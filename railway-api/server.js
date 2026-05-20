@@ -10,7 +10,7 @@ const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "acc
 const ASSET_BUNDLE_DIR = path.join(process.cwd(), "assetbundles");
 const MIGRATIONS_DIR = path.join(process.cwd(), "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api.onrender.com").replace(/\/+$/, "");
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);

@@ -5,7 +5,7 @@ const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
   .split(",")
   .map((value) => Number(value.trim()))
   .filter(Boolean);
-const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onrender.com").replace(/\/+$/, "");
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
