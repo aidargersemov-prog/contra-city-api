@@ -1,0 +1,127 @@
+{
+  "accounts": {
+    "1": {
+      "id": 1,
+      "key": "contra-revive-key",
+      "name": "ContraCity",
+      "fullName": "Contra City Player",
+      "level": 1,
+      "exp": 0,
+      "expMin": 0,
+      "expMax": 1000,
+      "money": 700,
+      "view": {
+        "hat": 0,
+        "head": 0,
+        "mask": 0,
+        "gloves": 0,
+        "shirt": 0,
+        "pants": 0,
+        "boots": 0,
+        "backpack": 0,
+        "other": 0
+      },
+      "weap": {
+        "id1": 0,
+        "id2": 0,
+        "id3": 0,
+        "id4": 0,
+        "id5": 0,
+        "id6": 0,
+        "id7": 0
+      },
+      "taun": {
+        "i0": 0,
+        "i1": 0,
+        "i2": 0
+      },
+      "stats": {},
+      "inventory": [
+        {
+          "itype": 2,
+          "e_id": 200,
+          "sname": "enhancer_200",
+          "sn": "enhancer_200",
+          "nlvl": 1,
+          "iS": 1,
+          "iC": 0,
+          "sc": {
+            "sc_id": "4200",
+            "t1v": 100,
+            "t1r": 0,
+            "t1p": 0,
+            "t7v": 100,
+            "t7r": 0,
+            "t7p": 0,
+            "t30v": 100,
+            "t30r": 0,
+            "t30p": 0,
+            "tPv": 100,
+            "tPr": 0,
+            "tPp": 0
+          }
+        },
+        {
+          "itype": 4,
+          "t_id": 2,
+          "sname": "taunt_2",
+          "sn": "taunt_2",
+          "nlvl": 1,
+          "iS": 1,
+          "sc": {
+            "sc_id": "3002",
+            "t1v": 100,
+            "t1r": 0,
+            "t1p": 0,
+            "t7v": 100,
+            "t7r": 0,
+            "t7p": 0,
+            "t30v": 100,
+            "t30r": 0,
+            "t30p": 0,
+            "tPv": 100,
+            "tPr": 0,
+            "tPp": 0
+          }
+        },
+        {
+          "itype": 1,
+          "id": 80,
+          "w_id": 80,
+          "wt": 4,
+          "ws": 3,
+          "ammo": 30,
+          "ammo_tot": 120,
+          "rap": 100,
+          "rt": 500,
+          "lt": 500,
+          "dev": 5,
+          "rad": 10,
+          "krit": 5,
+          "smindam": 10,
+          "smaxdam": 20,
+          "mmindam": 10,
+          "mmaxdam": 20,
+          "lmindam": 10,
+          "lmaxdam": 20,
+          "vel": 100,
+          "ang": 0,
+          "sname": "mg_aug5_o",
+          "sn": "mg_aug5_o",
+          "name": "Повстанец",
+          "nlvl": 1,
+          "iS": 1,
+          "sc": {
+            "sc_id": "1080",
+            "tPv": 100,
+            "tPr": 0,
+            "tPp": 0
+          }
+        }
+      ],
+      "abilities": [],
+      "createdAt": "2026-05-09T12:10:46.605Z",
+      "updatedAt": "2026-05-09T14:47:38.607Z"
+    }
+  }
+}
