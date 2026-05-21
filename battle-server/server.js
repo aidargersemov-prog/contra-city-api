@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-21-client-timing-fire-reload-v47";
+const BUILD_ID = "battle-server-2026-05-21-rocket-blow-control-v48";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2112,6 +2112,12 @@ function shotConsumesAmmo(weaponType, launchMode) {
   return mode !== 2;
 }
 
+function isWeaponControlShot(state, launchMode) {
+  if (!state) return false;
+  if (isColdArmsWeaponType(state.type)) return false;
+  return !shotConsumesAmmo(state.type, launchMode);
+}
+
 function isComplexReloadWeaponState(state) {
   const type = Number(state?.type);
   return (type === 7 || type === 8 || type === 9 || type === 15) && numberOr(state?.maxLoadedAmmo, 0) >= 3;
@@ -2209,11 +2215,15 @@ function allowWeaponShot(session, state, launchMode) {
 
   const now = Date.now();
   const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  const consumesAmmo = shotConsumesAmmo(state.type, launchMode);
+  if (isWeaponControlShot(state, launchMode)) {
+    return { ok: true, reason: "control-event", intervalMs };
+  }
+
   if (state.nextShotAt && now + SHOT_THROTTLE_SLACK_MS < state.nextShotAt) {
     return { ok: false, reason: "rate", waitMs: state.nextShotAt - now, intervalMs };
   }
 
-  const consumesAmmo = shotConsumesAmmo(state.type, launchMode);
   if (state.reloading && (!isComplexReloadWeaponState(state) || state.loadedAmmo <= 0)) {
     return { ok: false, reason: "reload", waitMs: Math.max(0, Math.min(state.reloadFullUntil || now, Date.now() + reloadSingleDurationMs(state)) - now), intervalMs };
   }
@@ -2255,8 +2265,10 @@ function buildShotEvent(session, parsed) {
   }
 
   noteWeaponShot(session, parsed);
-  const ammo = state && shotConsumesAmmo(state.type, launchMode)
-    ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
+  const ammo = state
+    ? (shotConsumesAmmo(state.type, launchMode)
+      ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
+      : ` interval=${gate.intervalMs}ms gate=${gate.reason}`)
     : "";
   console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}`);
   return rawEvent(97, [
