@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-20-original-weapon-reload-v45";
+const BUILD_ID = "battle-server-2026-05-21-client-timing-fire-reload-v47";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -29,20 +29,20 @@ const INIT_REPLY = ["callback", "legacy", "both"].includes((process.env.INIT_REP
 const PUSH_ROOM_LIST_AFTER_INIT = process.env.PUSH_ROOM_LIST_AFTER_INIT === "1";
 const PROFILE_CACHE_TTL_MS = Number(process.env.PROFILE_CACHE_TTL_MS || 30000);
 const CATALOG_CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS || 300000);
-const PROFILE_JOIN_WAIT_MS = Math.max(0, Number(process.env.PROFILE_JOIN_WAIT_MS || 75));
+const PROFILE_JOIN_WAIT_MS = Math.max(0, Number(process.env.PROFILE_JOIN_WAIT_MS || 1000));
 const JOIN_LOADOUT_SLOT_LIMIT = Math.max(1, Math.min(7, Number(process.env.JOIN_LOADOUT_SLOT_LIMIT || 7)));
 const INCLUDE_WEAPON_LEGACY_FIELDS = process.env.INCLUDE_WEAPON_LEGACY_FIELDS !== "0";
 const INCLUDE_JOIN_WEARS = process.env.INCLUDE_JOIN_WEARS !== "0";
 const INCLUDE_JOIN_ACTOR_ECHO_FIELDS = process.env.INCLUDE_JOIN_ACTOR_ECHO_FIELDS === "1";
 const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1";
 const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 600));
-const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 1600));
+const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
 const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETRY_MS || 1000));
-const JOIN_PROFILE_MAX_WAIT_MS = Math.max(JOIN_SELF_PROFILE_WAIT_MS, Number(process.env.JOIN_PROFILE_MAX_WAIT_MS || 15000));
+const JOIN_PROFILE_MAX_WAIT_MS = Math.max(JOIN_SELF_PROFILE_WAIT_MS, Number(process.env.JOIN_PROFILE_MAX_WAIT_MS || 70000));
 const ALLOW_FALLBACK_JOIN_PROFILE = process.env.ALLOW_FALLBACK_JOIN_PROFILE === "1";
 const JOIN_SETTINGS_PUSH_DELAYS_MS = parseDelayList(process.env.JOIN_SETTINGS_PUSH_DELAYS_MS || "1200,2500,5000,8000,12000");
 const JOIN_START_EVENT_FALLBACK_DELAY_MS = Math.max(0, Number(process.env.JOIN_START_EVENT_FALLBACK_DELAY_MS || 1800));
-const JOIN_LATE_START_DELAYS_MS = parseDelayList(process.env.JOIN_LATE_START_DELAYS_MS || "15000,30000,45000,60000");
+const JOIN_LATE_START_DELAYS_MS = parseDelayList(process.env.JOIN_LATE_START_DELAYS_MS || "6000,12000,20000,30000,45000,60000,90000");
 const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
 const NORMALIZE_WEAPON_RAPIDITY = process.env.NORMALIZE_WEAPON_RAPIDITY !== "0";
 const SHOT_THROTTLE_SLACK_MS = Math.max(0, Number(process.env.SHOT_THROTTLE_SLACK_MS || 20));
@@ -1083,7 +1083,13 @@ function weaponRapidity(item = {}, fallback = {}) {
 }
 
 function shotIntervalMsFromRapidity(rapidity) {
-  return Math.max(110, numberOr(rapidity, 100) + 10);
+  const shotTimeMs = numberOr(rapidity, 100) + 10;
+  return shotTimeMs < 100 ? 110 : shotTimeMs;
+}
+
+function reloadDurationMsFromRaw(reloadTimeMs) {
+  const reloadMs = numberOr(reloadTimeMs, 0) + 10;
+  return reloadMs < 100 ? 110 : reloadMs;
 }
 
 function weaponAdditionalValuesRaw(item = {}) {
@@ -1526,6 +1532,7 @@ function makeWeaponRuntimeState(profile = null) {
     const maxLoadedAmmo = weaponMaxLoadedAmmo(merged, fallback);
     const maxAmmoReserve = weaponMaxAmmoReserve(merged, fallback);
     const rapidity = weaponRapidity(merged, fallback);
+    const reloadTimeMs = numberOr(merged.rt, fallback.rt ?? 0);
     states.set(slot, {
       slot,
       index: slot - 1,
@@ -1533,6 +1540,13 @@ function makeWeaponRuntimeState(profile = null) {
       rapidity,
       shotIntervalMs: shotIntervalMsFromRapidity(rapidity),
       nextShotAt: 0,
+      reloadTimeMs,
+      reloadDurationMs: reloadDurationMsFromRaw(reloadTimeMs),
+      reloadTimer: null,
+      reloadSeq: 0,
+      reloading: false,
+      reloadStartedAt: 0,
+      reloadFullUntil: 0,
       maxLoadedAmmo,
       maxAmmoReserve,
       loadedAmmo: maxLoadedAmmo,
@@ -2098,24 +2112,119 @@ function shotConsumesAmmo(weaponType, launchMode) {
   return mode !== 2;
 }
 
-function serverThrottlesWeaponType(weaponType) {
-  const type = Number(weaponType);
-  return type === 3 || type === 4 || type === 5 || type === 6 || type === 11 || type === 12 || type === 13 || type === 14;
+function isComplexReloadWeaponState(state) {
+  const type = Number(state?.type);
+  return (type === 7 || type === 8 || type === 9 || type === 15) && numberOr(state?.maxLoadedAmmo, 0) >= 3;
+}
+
+function reloadSingleDurationMs(state) {
+  const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
+  if (!isComplexReloadWeaponState(state)) return fullReloadMs;
+  return Math.floor(fullReloadMs / Math.max(1, numberOr(state.maxLoadedAmmo, 1))) + 10;
+}
+
+function clearWeaponReloadTimer(state) {
+  if (!state?.reloadTimer) return;
+  clearTimeout(state.reloadTimer);
+  state.reloadTimer = null;
+}
+
+function cancelWeaponReload(state, reason = "cancel") {
+  if (!state) return;
+  clearWeaponReloadTimer(state);
+  if (state.reloading) {
+    console.log(`[event] reload ${reason} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+  }
+  state.reloading = false;
+  state.reloadStartedAt = 0;
+  state.reloadFullUntil = 0;
+}
+
+function clearSessionWeaponReloadTimers(session) {
+  for (const state of session?.weaponStates?.values?.() || []) {
+    cancelWeaponReload(state, "clear");
+  }
+}
+
+function makeReloadUpdateEvent(session, state) {
+  const reload = rawHashtable([
+    { key: rawByte(78), value: rawInt(state.index) },
+    { key: rawByte(81), value: rawInt(state.loadedAmmo) },
+    { key: rawByte(80), value: rawInt(state.ammoReserve) },
+    { key: rawByte(89), value: rawByte(state.type) },
+  ]);
+  return rawEvent(96, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: reload },
+  ]);
+}
+
+function scheduleReloadTick(session, state, channel, reloadSeq, delayMs) {
+  clearWeaponReloadTimer(state);
+  state.reloadTimer = setTimeout(() => {
+    state.reloadTimer = null;
+    applyReloadTick(session, state, channel, reloadSeq);
+  }, Math.max(0, delayMs));
+  if (typeof state.reloadTimer.unref === "function") {
+    state.reloadTimer.unref();
+  }
+}
+
+function applyReloadTick(session, state, channel, reloadSeq) {
+  if (!session || !state || state.reloadSeq !== reloadSeq || !state.reloading) return;
+  if (session.weaponStates?.get?.(state.slot) !== state) return;
+
+  const missing = Math.max(0, state.maxLoadedAmmo - state.loadedAmmo);
+  const reserve = Math.max(0, state.ammoReserve);
+  if (missing <= 0 || reserve <= 0) {
+    cancelWeaponReload(state, "complete-empty");
+    return;
+  }
+
+  const amount = isComplexReloadWeaponState(state) ? 1 : Math.min(missing, reserve);
+  state.loadedAmmo += amount;
+  state.ammoReserve -= amount;
+  const event = makeReloadUpdateEvent(session, state);
+  sendReliableToSession(session, event, channel);
+  broadcastReliableToRoom(session, event, channel, "reload");
+  console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
+
+  if (
+    isComplexReloadWeaponState(state) &&
+    state.loadedAmmo < state.maxLoadedAmmo &&
+    state.ammoReserve > 0 &&
+    Date.now() < state.reloadFullUntil
+  ) {
+    scheduleReloadTick(session, state, channel, reloadSeq, reloadSingleDurationMs(state));
+    return;
+  }
+
+  state.reloading = false;
+  state.reloadStartedAt = 0;
+  state.reloadFullUntil = 0;
 }
 
 function allowWeaponShot(session, state, launchMode) {
   if (!state) return { ok: true, reason: "unknown-state" };
-  if (!shotConsumesAmmo(state.type, launchMode)) return { ok: true, reason: "no-ammo-event" };
 
   const now = Date.now();
-  const intervalMs = Math.max(110, numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity)));
-  if (serverThrottlesWeaponType(state.type) && state.nextShotAt && now + SHOT_THROTTLE_SLACK_MS < state.nextShotAt) {
+  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  if (state.nextShotAt && now + SHOT_THROTTLE_SLACK_MS < state.nextShotAt) {
     return { ok: false, reason: "rate", waitMs: state.nextShotAt - now, intervalMs };
   }
 
-  if (state.loadedAmmo <= 0) {
+  const consumesAmmo = shotConsumesAmmo(state.type, launchMode);
+  if (state.reloading && (!isComplexReloadWeaponState(state) || state.loadedAmmo <= 0)) {
+    return { ok: false, reason: "reload", waitMs: Math.max(0, Math.min(state.reloadFullUntil || now, Date.now() + reloadSingleDurationMs(state)) - now), intervalMs };
+  }
+
+  if (!consumesAmmo) {
     state.nextShotAt = now + intervalMs;
-    return { ok: true, reason: "empty-desync", intervalMs };
+    return { ok: true, reason: "no-ammo-event", intervalMs };
+  }
+
+  if (state.loadedAmmo <= 0) {
+    return { ok: false, reason: "empty", intervalMs };
   }
 
   state.nextShotAt = now + intervalMs;
@@ -2128,6 +2237,7 @@ function noteWeaponShot(session, parsed) {
   const launchMode = numberOr(htGet(data, 16)?.value, 0);
   const state = weaponStateByType(session, weaponType);
   if (!state || !shotConsumesAmmo(state.type, launchMode)) return;
+  if (state.reloading) cancelWeaponReload(state, "interrupted-by-shot");
   state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
 }
 
@@ -2236,7 +2346,7 @@ function buildWeaponChangeEvent(session, parsed) {
   ]);
 }
 
-function buildReloadEvent(session, parsed) {
+function buildReloadEvent(session, parsed, channel = 0) {
   const data = parsed?.params?.get(245);
   const requestedType = htGet(data, 89)?.value;
   const state = weaponStateByType(session, requestedType);
@@ -2245,26 +2355,33 @@ function buildReloadEvent(session, parsed) {
     return null;
   }
 
-  if (!isColdArmsWeaponType(state.type)) {
-    const amount = Math.min(Math.max(0, state.maxLoadedAmmo - state.loadedAmmo), Math.max(0, state.ammoReserve));
-    state.loadedAmmo += amount;
-    state.ammoReserve -= amount;
-  } else {
-    state.loadedAmmo = 0;
-    state.ammoReserve = 0;
+  if (isColdArmsWeaponType(state.type)) {
+    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=cold-arms`);
+    return null;
   }
 
-  const reload = rawHashtable([
-    { key: rawByte(78), value: rawInt(state.index) },
-    { key: rawByte(81), value: rawInt(state.loadedAmmo) },
-    { key: rawByte(80), value: rawInt(state.ammoReserve) },
-    { key: rawByte(89), value: rawByte(state.type) },
-  ]);
-  console.log(`[event] reload actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
-  return rawEvent(96, [
-    { key: 254, value: rawInt(session.actorId) },
-    { key: 245, value: reload },
-  ]);
+  const missing = Math.max(0, state.maxLoadedAmmo - state.loadedAmmo);
+  const reserve = Math.max(0, state.ammoReserve);
+  const amount = Math.min(missing, reserve);
+  if (amount <= 0) {
+    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=full-or-empty loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    return null;
+  }
+
+  if (state.reloading) {
+    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=already-reloading loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    return null;
+  }
+
+  const now = Date.now();
+  state.reloadSeq = (state.reloadSeq || 0) + 1;
+  state.reloading = true;
+  state.reloadStartedAt = now;
+  state.reloadFullUntil = now + numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
+  const firstTickMs = isComplexReloadWeaponState(state) ? reloadSingleDurationMs(state) : numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
+  scheduleReloadTick(session, state, channel, state.reloadSeq, firstTickMs);
+  console.log(`[event] reload start actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} first=${firstTickMs}ms full=${state.reloadFullUntil - now}ms complex=${isComplexReloadWeaponState(state) ? 1 : 0}`);
+  return null;
 }
 function queueAutoSpawn(session, requestedTeam, reason) {
   if (!AUTO_SPAWN_AFTER_GAMESTATE || session.moveSeen) return;
@@ -2405,6 +2522,7 @@ function resetSessionRoomProgress(session) {
   clearJoinStartTimer(session);
   clearJoinSettingsTimers(session);
   clearJoinLateStartTimers(session);
+  clearSessionWeaponReloadTimers(session);
   session.gameStateRequested = false;
   session.team = -1;
   session.lastTransform = null;
@@ -2456,6 +2574,7 @@ function removeDuplicatePlayerSessions(room, session) {
       clearJoinStartTimer(playerSession);
       clearJoinSettingsTimers(playerSession);
       clearJoinLateStartTimers(playerSession);
+      clearSessionWeaponReloadTimers(playerSession);
       playerSession.gameStateRequested = false;
       console.log(`[state] stale player removed room=${room.name} actor=${actorId} player=${playerSession.playerId || "unknown"}`);
     }
@@ -2869,7 +2988,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === 96) {
-    const response = buildReloadEvent(session, parsed);
+    const response = buildReloadEvent(session, parsed, channel);
     if (response) broadcastReliableToRoom(session, response, channel, "reload");
     return response ? [response] : [];
   }
