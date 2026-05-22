@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-21-rocket-blow-control-v48";
+const BUILD_ID = "battle-server-2026-05-22-zombi2-upper-dm-spawns-v49";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -195,10 +195,16 @@ function pointListFor(session, team) {
   return mapSpawns.dm?.length ? mapSpawns.dm : null;
 }
 
-function prefersGroundDmSpawn(session, team) {
-  if (team !== 0) return false;
+function preferredDmSpawnPoints(session, team, points) {
+  if (team !== 0) return points;
   const map = mapKey(session.room?.map);
-  return map === "arena_3lvl" || map === "zombi_2";
+  if (map === "arena_3lvl") {
+    return points.filter((point) => Number(point.y) <= -60);
+  }
+  if (map === "zombi_2") {
+    return points.filter((point) => Number(point.y) >= -30 && Number(point.y) <= -5);
+  }
+  return points;
 }
 
 function spawnPointFor(session, team) {
@@ -215,11 +221,9 @@ function spawnPointFor(session, team) {
     };
   }
 
-  // Restored maps can contain upper/editor Respawn_T0 markers before the lower playable floor markers.
-  const groundPoints = prefersGroundDmSpawn(session, team)
-    ? points.filter((point) => Number(point.y) <= -60)
-    : points;
-  const candidates = groundPoints.length ? groundPoints : points;
+  // Restored maps can contain exported spawn layers that are not the playable DM floor.
+  const preferredPoints = preferredDmSpawnPoints(session, team, points);
+  const candidates = preferredPoints.length ? preferredPoints : points;
   const baseIndex = (Number(session.actorId) || 1) - 1;
   const point = candidates[Math.abs(baseIndex) % candidates.length];
   return {
