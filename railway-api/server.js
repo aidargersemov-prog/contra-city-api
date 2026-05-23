@@ -11,6 +11,24 @@ const ASSET_BUNDLE_DIR = path.join(process.cwd(), "assetbundles");
 const MIGRATIONS_DIR = path.join(process.cwd(), "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api.onrender.com").replace(/\/+$/, "");
+const LAUNCHER_MANIFEST_PATH = path.resolve(
+  process.env.LAUNCHER_MANIFEST_PATH ||
+    firstExistingPath([
+      path.join(process.cwd(), "launcher", "manifest.json"),
+      path.join(process.cwd(), "..", "launcher", "manifest.json"),
+      path.join(process.cwd(), "launcher-manifest.json")
+    ]) ||
+    path.join(process.cwd(), "launcher-manifest.json")
+);
+const LAUNCHER_UPDATE_DIR = path.resolve(
+  process.env.LAUNCHER_UPDATE_DIR ||
+    firstExistingPath([
+      path.join(process.cwd(), "contra2build"),
+      path.join(process.cwd(), "..", "contra2build"),
+      path.join(process.cwd(), "update-files")
+    ]) ||
+    path.join(process.cwd(), "update-files")
+);
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);
@@ -20,6 +38,10 @@ const SHOP_PRICE = 100;
 const BATTLE_HOST = process.env.BATTLE_HOST || "";
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
+
+function firstExistingPath(candidates) {
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+}
 
 const cost = (id, value = 100) => ({
   sc_id: String(id),
@@ -1985,6 +2007,65 @@ function tryServeAssetBundle(req, res, url) {
   return true;
 }
 
+function safeJoin(baseDir, relativePath) {
+  const normalized = relativePath.replaceAll("\\", "/");
+  if (!normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) {
+    return null;
+  }
+
+  const base = path.resolve(baseDir);
+  const fullPath = path.resolve(base, normalized);
+  if (fullPath !== base && !fullPath.startsWith(base + path.sep)) {
+    return null;
+  }
+
+  return fullPath;
+}
+
+function tryServeLauncherUpdate(req, res, url) {
+  const pathname = decodeURIComponent(url.pathname || "/");
+  if (pathname === "/launcher/manifest.json") {
+    if (!fs.existsSync(LAUNCHER_MANIFEST_PATH)) {
+      sendJson(res, { ok: false, error: "launcher_manifest_not_found" }, 404);
+      return true;
+    }
+
+    const stat = fs.statSync(LAUNCHER_MANIFEST_PATH);
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "content-length": String(stat.size),
+      "cache-control": "no-cache"
+    });
+    fs.createReadStream(LAUNCHER_MANIFEST_PATH).pipe(res);
+    return true;
+  }
+
+  if (!pathname.startsWith("/launcher/files/")) {
+    return false;
+  }
+
+  const relativePath = pathname.slice("/launcher/files/".length);
+  const filePath = safeJoin(LAUNCHER_UPDATE_DIR, relativePath);
+  if (!filePath) {
+    sendJson(res, { ok: false, error: "invalid_update_path" }, 400);
+    return true;
+  }
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    sendJson(res, { ok: false, error: "update_file_not_found", file: relativePath }, 404);
+    return true;
+  }
+
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": String(stat.size),
+    "cache-control": "public, max-age=3600"
+  });
+  fs.createReadStream(filePath).pipe(res);
+  return true;
+}
+
 function readJsonBody(req, limitBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -2129,6 +2210,10 @@ ensureDesktopAccount();
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+
+  if (tryServeLauncherUpdate(req, res, url)) {
+    return;
+  }
 
   if (tryServeAssetBundle(req, res, url)) {
     return;
