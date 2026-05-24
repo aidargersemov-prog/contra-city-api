@@ -1190,14 +1190,29 @@ function ensureDesktopAccount() {
   return store.accounts["1"];
 }
 
-function accountFrom(url) {
-  const id = String(Number(url.searchParams.get("ccid") || 1));
-  const key = url.searchParams.get("cckey") || DEFAULT_KEY;
-  const account = store.accounts[id] ? normalizeAccount(store.accounts[id]) : null;
-  if (!account || account.key !== key) {
-    return ensureDesktopAccount();
+function accountCredentialsFrom(url) {
+  const rawId = url.searchParams.get("ccid");
+  const key = url.searchParams.get("cckey");
+  const idNumber = Number(rawId);
+
+  if (!rawId || !Number.isInteger(idNumber) || idNumber <= 0 || !key) {
+    return null;
   }
-  store.accounts[id] = account;
+
+  return { id: String(idNumber), key };
+}
+
+function accountFrom(url) {
+  const credentials = accountCredentialsFrom(url);
+  if (!credentials) {
+    return null;
+  }
+
+  const account = store.accounts[credentials.id] ? normalizeAccount(store.accounts[credentials.id]) : null;
+  if (!account || account.key !== credentials.key) {
+    return null;
+  }
+  store.accounts[credentials.id] = account;
   return account;
 }
 
@@ -1208,20 +1223,23 @@ function persist(account) {
 }
 
 async function accountFromRequest(url) {
-  const id = String(Number(url.searchParams.get("ccid") || 1));
-  const key = url.searchParams.get("cckey") || DEFAULT_KEY;
-  const cached = store.accounts[id] ? normalizeAccount(store.accounts[id]) : null;
-  if (cached && cached.key === key) {
-    store.accounts[id] = cached;
+  const credentials = accountCredentialsFrom(url);
+  if (!credentials) {
+    return null;
+  }
+
+  const cached = store.accounts[credentials.id] ? normalizeAccount(store.accounts[credentials.id]) : null;
+  if (cached && cached.key === credentials.key) {
+    store.accounts[credentials.id] = cached;
     return refreshAccountFromPostgres(cached);
   }
 
   if (pgPool) {
     try {
       await pgSaveChain.catch(() => {});
-      const fresh = await loadPostgresAccount(id);
-      if (fresh && fresh.key === key) {
-        store.accounts[id] = fresh;
+      const fresh = await loadPostgresAccount(credentials.id);
+      if (fresh && fresh.key === credentials.key) {
+        store.accounts[credentials.id] = fresh;
         return fresh;
       }
     } catch (error) {
@@ -1749,6 +1767,9 @@ async function routeAjax(url, resolvedAccount = null) {
   let page = url.searchParams.get("page") || "";
   let act = url.searchParams.get("act") || url.searchParams.get("action") || "";
   let account = resolvedAccount || accountFrom(url);
+  if (!account) {
+    return { result: false, error: "1" };
+  }
   if (!resolvedAccount) account = await refreshAccountFromPostgres(account);
 
   if (page === "sh") page = "shop";
@@ -2174,6 +2195,10 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname.endsWith("/ajax.php")) {
     const account = await accountFromRequest(url);
+    if (!account) {
+      sendJson(res, { result: false, error: "1" }, 403);
+      return;
+    }
     sendJson(res, await routeAjax(url, account), 200, { "Set-Cookie": cookieHeaders(account) });
     return;
   }
