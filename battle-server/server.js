@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-room-list-peer-sync-v50";
+const BUILD_ID = "battle-server-2026-05-24-room-list-event252-v51";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2485,36 +2485,31 @@ function roomListData(room) {
   ];
 }
 
-function makeDefaultRoomListEntry() {
-  return {
-    name: DEFAULT_ROOM,
-    map: DEFAULT_MAP,
-    mode: FORCE_TEAM_MODE ? 2 : 1,
-    maxUsers: 8,
-    friendlyFire: false,
-    timeLimit: 10,
-    fragLimit: 50,
-    lvlMin: 1,
-    lvlMax: 50,
-    password: "",
-    players: new Map(),
-  };
-}
-
 function makeRoomListRaw() {
   const entries = [];
   for (const room of rooms.values()) {
     if (!room?.name) continue;
+    if ((room.players?.size || 0) <= 0) continue;
     entries.push({
       key: rawString(room.name),
       value: rawStringArray(roomListData(room)),
     });
   }
-  if (entries.length === 0) {
-    const room = makeDefaultRoomListEntry();
-    entries.push({ key: rawString(room.name), value: rawStringArray(roomListData(room)) });
-  }
   return rawHashtable(entries);
+}
+
+function roomListSummary() {
+  return Array.from(rooms.values())
+    .filter((room) => room?.name && (room.players?.size || 0) > 0)
+    .map((room) => `${room.name}:${room.map}:${room.players.size}/${room.maxUsers || 8}`)
+    .join(",") || "empty";
+}
+
+function makeRoomListEvent(session) {
+  return rawEvent(252, [
+    { key: 254, value: rawInt(session?.actorId || 0) },
+    { key: 245, value: makeRoomListRaw() },
+  ]);
 }
 
 function ensureRoom(settings) {
@@ -3033,8 +3028,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[event] request code=${eventCode}`);
   }
   if (eventCode === 86) {
-    console.log("[event] room list request");
-    return [rawEvent(252, [{ key: 245, value: makeRoomListRaw() }])];
+    console.log(`[event] room list request rooms=${roomListSummary()}`);
+    return [makeRoomListEvent(session)];
   }
 
   if (eventCode === 84) {
@@ -3259,8 +3254,8 @@ async function handleUdp(port, socket, msg, rinfo) {
             console.log(`[state] init accepted reply=${initModes.join("+")} seq=${initSeqs.join(",")}`);
             if (PUSH_ROOM_LIST_AFTER_INIT) {
               const roomListSeq = session.serverSeq++;
-              reliableCommands.push(makeReliable(roomListSeq, rawEvent(252, [{ key: 245, value: makeRoomListRaw() }]), channel));
-              console.log(`[event] room list pushed after init seq=${roomListSeq}`);
+              reliableCommands.push(makeReliable(roomListSeq, makeRoomListEvent(session), channel));
+              console.log(`[event] room list pushed after init seq=${roomListSeq} rooms=${roomListSummary()}`);
             }
             return reliableCommands;
           }
