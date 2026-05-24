@@ -710,6 +710,14 @@ let pgPool = null;
 let pgSaveChain = Promise.resolve();
 const MANAGED_CATALOG_ITEM_TYPES = [1, 2, 3, 4];
 
+function enqueuePostgresMutation(operation) {
+  const run = pgSaveChain.catch(() => {}).then(operation);
+  pgSaveChain = run.catch((error) => {
+    console.error("[postgres] mutation failed", error);
+  });
+  return run;
+}
+
 function jsonValue(value, fallback) {
   if (value == null) return fallback;
   if (typeof value !== "string") return value;
@@ -1675,9 +1683,77 @@ function recordPurchase(account, item, price) {
     });
 }
 
-function buyItem(account, item) {
+async function buyItemPostgres(account, item, price) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      const row = player.rows[0];
+      if (!row || row.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const money = Number(row.money || 0);
+      if (money < price) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [2] };
+      }
+
+      const nextMoney = money - price;
+      const itemData = clone(item);
+      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
+      await client.query(
+        `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [Number(account.id), inventoryItemKey(itemData), Number(itemData?.itype || 0), JSON.stringify(itemData)]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
+         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
+        [
+          Number(account.id),
+          inventoryItemKey(itemData),
+          Number(itemData?.itype || 0),
+          inventoryItemId(itemData),
+          Number(price || 0),
+          JSON.stringify(itemData)
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      const fresh = await loadPostgresAccount(account.id);
+      if (fresh) {
+        store.accounts[String(fresh.id)] = fresh;
+      }
+
+      return ok({ req: "", vcur: nextMoney });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original error is more useful for diagnostics.
+      }
+      console.error("[postgres] buy item failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function buyItem(account, item) {
   if (!item) return { result: false, err: [1] };
   const price = itemPrice(item);
+  if (pgPool) return buyItemPostgres(account, item, price);
   if (account.money < price) return { result: false, err: [2] };
   if (!hasInventoryItem(account, item)) {
     account.inventory.push(clone(item));
@@ -1750,7 +1826,77 @@ function changeName(account, url) {
   });
 }
 
-function buyAbility(account, url) {
+async function buyAbilityPostgres(account, url) {
+  const id = Number(url.searchParams.get("id") || 0);
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      const row = player.rows[0];
+      if (!row || row.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const ownedAbilities = await client.query("SELECT ability_id, ability_level FROM player_abilities WHERE player_id = $1", [Number(account.id)]);
+      const abilities = ownedAbilities.rows.map((abilityRow) => ({
+        i: Number(abilityRow.ability_id),
+        l: Number(abilityRow.ability_level)
+      }));
+      const next = abilityCatalog.find(
+        (ability) => Number(ability.i) === id && !abilities.some((owned) => Number(owned.i) === id && Number(owned.l) >= Number(ability.l))
+      );
+      if (!next) {
+        await client.query("ROLLBACK");
+        return ok({ req: "" });
+      }
+
+      const price = itemPrice(next);
+      const money = Number(row.money || 0);
+      if (money < price) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [2] };
+      }
+
+      const nextMoney = money - price;
+      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
+      await client.query("DELETE FROM player_abilities WHERE player_id = $1 AND ability_id = $2", [Number(account.id), id]);
+      await client.query(
+        `INSERT INTO player_abilities (player_id, ability_id, ability_level, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (player_id, ability_id) DO UPDATE SET
+           ability_level = EXCLUDED.ability_level,
+           updated_at = now()`,
+        [Number(account.id), Number(next.i), Number(next.l)]
+      );
+
+      await client.query("COMMIT");
+
+      const fresh = await loadPostgresAccount(account.id);
+      if (fresh) {
+        store.accounts[String(fresh.id)] = fresh;
+      }
+
+      return ok({ req: "", vcur: nextMoney });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original error is more useful for diagnostics.
+      }
+      console.error("[postgres] buy ability failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function buyAbility(account, url) {
+  if (pgPool) return buyAbilityPostgres(account, url);
   const id = Number(url.searchParams.get("id") || 0);
   const next = abilityCatalog.find((ability) => Number(ability.i) === id && !account.abilities.some((owned) => Number(owned.i) === id && Number(owned.l) >= Number(ability.l)));
   if (!next) return ok({ req: "" });
@@ -1818,13 +1964,13 @@ async function routeAjax(url, resolvedAccount = null) {
 
   if (page === "buy") {
     const id = Number(url.searchParams.get("id") || url.searchParams.get("i") || 0);
-    if (act === "bweap") return buyItem(account, findShopItem(shopWeapons, "w_id", id));
-    if (act === "bwear") return buyItem(account, findShopItem(shopWears, "w_id", id));
-    if (act === "btaunt") return buyItem(account, findShopItem(shopTaunts, "t_id", id));
-    if (act === "benh") return buyItem(account, findShopItem(shopEnhancers, "e_id", id));
-    if (act === "babil") return buyAbility(account, url);
+    if (act === "bweap") return await buyItem(account, findShopItem(shopWeapons, "w_id", id));
+    if (act === "bwear") return await buyItem(account, findShopItem(shopWears, "w_id", id));
+    if (act === "btaunt") return await buyItem(account, findShopItem(shopTaunts, "t_id", id));
+    if (act === "benh") return await buyItem(account, findShopItem(shopEnhancers, "e_id", id));
+    if (act === "babil") return await buyAbility(account, url);
     if (act === "bmap") return ok({ req: "" });
-    return ok({ req: "" });
+    return { result: false, err: [1] };
   }
 
   if (page === "stats") {
