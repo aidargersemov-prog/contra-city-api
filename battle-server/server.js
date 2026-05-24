@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-peer-actor-before-spawn-v56";
+const BUILD_ID = "battle-server-2026-05-24-peer-spawn-async-guard-v57";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -18,6 +18,7 @@ const SPAWN_NO_MOVE_WARN_MS = Math.max(0, Number(process.env.SPAWN_NO_MOVE_WARN_
 const DEBUG_PACKETS = process.env.DEBUG_PACKETS === "1";
 const DEBUG_MOVE_PACKETS = process.env.DEBUG_MOVE_PACKETS === "1";
 const LOG_SEND_PACKETS = DEBUG_PACKETS || process.env.LOG_SEND_PACKETS === "1";
+const ACTOR_JOIN_ASYNC_DELAY_MS = Math.max(0, Number(process.env.ACTOR_JOIN_ASYNC_DELAY_MS || 1500));
 const MOVE_LOG_EVERY = Math.max(1, Number(process.env.MOVE_LOG_EVERY || 100));
 const SPAWN_INDEX = Number(process.env.SPAWN_INDEX || 0);
 const SPAWN_Y_OFFSET = Number(process.env.SPAWN_Y_OFFSET || 0);
@@ -1961,7 +1962,12 @@ function sendReliablePayloadsToSession(targetSession, payloads, channel = 0) {
   if (!reliablePayloads.length) return false;
   const targetChannel = reliableChannelForSession(targetSession, channel);
   const commands = reliablePayloads.map((payload) => makeReliable(targetSession.serverSeq++, payload, targetChannel));
-  sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
+  try {
+    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
+  } catch (error) {
+    console.log(`[warn] peer-send failed actor=${targetSession.actorId || "?"} cmds=${commands.length} reason=${error.message}`);
+    return false;
+  }
   return true;
 }
 
@@ -1976,10 +1982,11 @@ function broadcastReliableToRoom(sourceSession, payload, channel = 0, reason = "
   for (const playerSession of room.players.values()) {
     if (!playerSession || playerSession === sourceSession) continue;
     if (options.requireGameState !== false && !playerSession.gameStateRequested) continue;
-    if (options.skipKnownActor && sessionKnowsActor(playerSession, sourceSession.actorId)) continue;
+    if (options.skipKnownActor && sessionHasActorData(playerSession, sourceSession.actorId)) continue;
     if (sendReliableToSession(playerSession, payload, channel)) {
       sent += 1;
       if (options.markActorKnown) markActorKnown(playerSession, sourceSession.actorId);
+      if (options.markActorAnnounced) markActorAnnounced(playerSession, sourceSession.actorId);
     }
   }
   if (sent > 0 && reason) {
@@ -2669,11 +2676,13 @@ function resetSessionRoomProgress(session) {
   session.moveSeen = false;
   session.spawnRetry = null;
   clearSpawnMoveWarningTimer(session);
+  clearPeerSpawnTimers(session);
   clearJoinRoomTimers(session);
   clearSessionWeaponReloadTimers(session);
   session.gameStateRequested = false;
   session.lastGameStateResponseAt = 0;
   session.knownActorIds = new Set();
+  session.actorJoinAnnouncedAt = new Map();
   session.team = -1;
   session.lastTransform = null;
 }
@@ -2750,15 +2759,56 @@ function ensureKnownActorSet(session) {
   return session.knownActorIds;
 }
 
+function ensureActorAnnounceMap(session) {
+  if (!session) return null;
+  if (!(session.actorJoinAnnouncedAt instanceof Map)) session.actorJoinAnnouncedAt = new Map();
+  return session.actorJoinAnnouncedAt;
+}
+
+function ensurePeerSpawnTimerSet(session) {
+  if (!session) return null;
+  if (!(session.peerSpawnTimers instanceof Set)) session.peerSpawnTimers = new Set();
+  return session.peerSpawnTimers;
+}
+
+function clearPeerSpawnTimers(session) {
+  if (!(session?.peerSpawnTimers instanceof Set)) return;
+  for (const timer of session.peerSpawnTimers) {
+    clearTimeout(timer);
+  }
+  session.peerSpawnTimers.clear();
+}
+
 function markActorKnown(session, actorId) {
   const normalizedActorId = Number(actorId);
   if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return;
   ensureKnownActorSet(session)?.add(normalizedActorId);
+  session?.actorJoinAnnouncedAt?.delete?.(normalizedActorId);
+}
+
+function markActorAnnounced(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return;
+  if (sessionKnowsActor(session, normalizedActorId)) return;
+  ensureActorAnnounceMap(session)?.set(normalizedActorId, Date.now());
 }
 
 function sessionKnowsActor(session, actorId) {
   const normalizedActorId = Number(actorId);
   return Number.isInteger(normalizedActorId) && session?.knownActorIds instanceof Set && session.knownActorIds.has(normalizedActorId);
+}
+
+function actorAnnounceAgeMs(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || !(session?.actorJoinAnnouncedAt instanceof Map)) return null;
+  const announcedAt = session.actorJoinAnnouncedAt.get(normalizedActorId);
+  return Number.isFinite(announcedAt) ? Date.now() - announcedAt : null;
+}
+
+function sessionHasActorData(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId)) return false;
+  return sessionKnowsActor(session, normalizedActorId) || actorAnnounceAgeMs(session, normalizedActorId) != null;
 }
 
 function markKnownRoomActors(session) {
@@ -2775,33 +2825,69 @@ function forgetActorForRoom(room, actorId) {
   if (!Number.isInteger(normalizedActorId) || !room?.players?.size) return;
   for (const playerSession of room.players.values()) {
     playerSession?.knownActorIds?.delete?.(normalizedActorId);
+    playerSession?.actorJoinAnnouncedAt?.delete?.(normalizedActorId);
   }
+}
+
+function schedulePeerSpawnEvent(targetSession, sourceSession, spawnPayload, channel, delayMs) {
+  const room = sourceSession?.room;
+  const sourceActorId = sourceSession?.actorId;
+  const targetActorId = targetSession?.actorId;
+  if (!room || !sourceActorId || !targetActorId || !spawnPayload) return false;
+  const timerSet = ensurePeerSpawnTimerSet(targetSession);
+  const waitMs = Math.max(0, Number(delayMs) || 0);
+  const timer = setTimeout(() => {
+    timerSet?.delete(timer);
+    if (sourceSession.room !== room || targetSession.room !== room) return;
+    if (room.players.get(sourceActorId) !== sourceSession || room.players.get(targetActorId) !== targetSession) return;
+    if (!targetSession.gameStateRequested) return;
+    if (sendReliableToSession(targetSession, spawnPayload, channel)) {
+      markActorKnown(targetSession, sourceActorId);
+      console.log(`[sync] spawn-delayed actor=${sourceActorId} peer=${targetActorId} delay=${waitMs}ms`);
+    }
+  }, waitMs);
+  timerSet?.add(timer);
+  if (typeof timer.unref === "function") timer.unref();
+  return true;
 }
 
 function broadcastSpawnToRoom(sourceSession, spawnPayload, channel = 0) {
   const room = sourceSession?.room;
   if (!room?.players?.size || !spawnPayload) return 0;
   let sent = 0;
-  let actorJoinSent = 0;
+  let announced = 0;
+  let queued = 0;
   for (const playerSession of room.players.values()) {
     if (!playerSession || playerSession === sourceSession || !playerSession.gameStateRequested) continue;
-    const payloads = [];
-    let includesActorJoin = false;
-    if (!sessionKnowsActor(playerSession, sourceSession.actorId)) {
-      payloads.push(makeActorJoinEvent(sourceSession));
-      includesActorJoin = true;
+
+    if (sessionKnowsActor(playerSession, sourceSession.actorId)) {
+      if (sendReliableToSession(playerSession, spawnPayload, channel)) sent += 1;
+      continue;
     }
-    payloads.push(spawnPayload);
-    if (sendReliablePayloadsToSession(playerSession, payloads, channel)) {
-      sent += 1;
-      if (includesActorJoin) {
-        markActorKnown(playerSession, sourceSession.actorId);
-        actorJoinSent += 1;
+
+    const announceAge = actorAnnounceAgeMs(playerSession, sourceSession.actorId);
+    if (announceAge == null) {
+      if (sendReliableToSession(playerSession, makeActorJoinEvent(sourceSession), channel)) {
+        markActorAnnounced(playerSession, sourceSession.actorId);
+        announced += 1;
+        if (schedulePeerSpawnEvent(playerSession, sourceSession, spawnPayload, channel, ACTOR_JOIN_ASYNC_DELAY_MS)) queued += 1;
       }
+      continue;
+    }
+
+    const remainingDelay = ACTOR_JOIN_ASYNC_DELAY_MS - announceAge;
+    if (remainingDelay > 0) {
+      if (schedulePeerSpawnEvent(playerSession, sourceSession, spawnPayload, channel, remainingDelay)) queued += 1;
+      continue;
+    }
+
+    if (sendReliableToSession(playerSession, spawnPayload, channel)) {
+      markActorKnown(playerSession, sourceSession.actorId);
+      sent += 1;
     }
   }
-  if (sent > 0) {
-    console.log(`[sync] spawn actor=${sourceSession.actorId} peers=${sent}${actorJoinSent ? ` actorJoin=${actorJoinSent}` : ""}`);
+  if (sent > 0 || announced > 0 || queued > 0) {
+    console.log(`[sync] spawn actor=${sourceSession.actorId} peers=${sent} announced=${announced} queued=${queued}`);
   }
   return sent;
 }
@@ -3124,6 +3210,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     const actorListRaw = makeRoomActorListRaw(session.room, session);
     session.knownActorIds = new Set();
+    session.actorJoinAnnouncedAt = new Map();
     markKnownRoomActors(session);
     session.room.players.set(session.actorId, session);
     markActorKnown(session, session.actorId);
@@ -3135,7 +3222,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       incomingActor: actorParam,
     });
     broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
-      markActorKnown: true,
+      markActorAnnounced: true,
       skipKnownActor: true,
     });
     return responses;
@@ -3297,6 +3384,8 @@ async function handleUdp(port, socket, msg, rinfo) {
       reliableInFlight: new Map(),
       reliableGeneration: 0,
       knownActorIds: new Set(),
+      actorJoinAnnouncedAt: new Map(),
+      peerSpawnTimers: new Set(),
       lastChannel: 0,
       port,
       remoteKey: `${rinfo.address}:${rinfo.port}`,
@@ -3438,7 +3527,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} gameStateScore=spawned joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} gameStateScore=spawned joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
