@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-no-zero-pulses-compact-actor-v60";
+const BUILD_ID = "battle-server-2026-05-24-peer-actor-mtu-wire-v61";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -40,6 +40,7 @@ const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1
 const INCLUDE_PEERS_IN_GAMESTATE = process.env.INCLUDE_PEERS_IN_GAMESTATE === "1";
 const GAMESTATE_REPEAT_MIN_MS = Math.max(0, Number(process.env.GAMESTATE_REPEAT_MIN_MS || 750));
 const MAX_UDP_PACKET_BYTES = Math.max(0, Number(process.env.MAX_UDP_PACKET_BYTES || 1200));
+const ACTOR_JOIN_MAX_PACKET_BYTES = Math.max(0, Number(process.env.ACTOR_JOIN_MAX_PACKET_BYTES || MAX_UDP_PACKET_BYTES));
 const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 600));
 const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
 const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETRY_MS || 1000));
@@ -785,10 +786,11 @@ function makeRoomActorListRaw(room, excludeSession = null) {
   if (!room?.players?.size) return makeEmptyActorListRaw();
   const entries = [];
   for (const [actorId, playerSession] of room.players.entries()) {
-    if (!playerSession || playerSession === excludeSession || !playerSession.actorRaw) continue;
+    const playerActorRaw = playerSession?.peerActorRaw || playerSession?.actorRaw;
+    if (!playerSession || playerSession === excludeSession || !playerActorRaw) continue;
     entries.push({
       key: rawInt(actorId),
-      value: playerSession.actorRaw,
+      value: playerActorRaw,
     });
   }
   return rawHashtable(entries);
@@ -1585,11 +1587,12 @@ function sessionRuntimeStats(session = null) {
   return playerRuntimeStats(session?.loadedProfile || null);
 }
 
-function makeWeaponDictionaryRaw(profile = null) {
+function makeWeaponDictionaryRaw(profile = null, slotLimit = JOIN_LOADOUT_SLOT_LIMIT, options = {}) {
   const allSlots = weaponSlotsForProfile(profile);
-  const joinSlots = allSlots.slice(0, JOIN_LOADOUT_SLOT_LIMIT);
-  if (joinSlots.length < allSlots.length) {
-    console.log(`[loadout] compact join slots=${joinSlots.map(([slot]) => slot).join(",")} of=${allSlots.length} limit=${JOIN_LOADOUT_SLOT_LIMIT}`);
+  const normalizedLimit = Math.max(1, Math.min(7, Number(slotLimit || JOIN_LOADOUT_SLOT_LIMIT)));
+  const joinSlots = allSlots.slice(0, normalizedLimit);
+  if (options.logCompact !== false && joinSlots.length < allSlots.length) {
+    console.log(`[loadout] compact join slots=${joinSlots.map(([slot]) => slot).join(",")} of=${allSlots.length} limit=${normalizedLimit}`);
   }
 
   return rawTypedDictionary(0x69, 0x68, joinSlots.map(([slot, item]) => ({
@@ -1651,13 +1654,13 @@ function makeDefaultWeaponDictionaryRaw() {
   })));
 }
 
-function makeActorInfoRaw(profile = null) {
+function makeActorInfoRaw(profile = null, options = {}) {
   const stats = playerRuntimeStats(profile);
   const entries = [
     { key: rawByte(100), value: rawInt(stats.maxHealth) },
     { key: rawByte(99), value: rawInt(stats.maxEnergy) },
     { key: rawByte(95), value: rawInt(stats.speed10) },
-    { key: rawByte(94), value: makeWeaponDictionaryRaw(profile) },
+    { key: rawByte(94), value: makeWeaponDictionaryRaw(profile, options.weaponSlotLimit ?? JOIN_LOADOUT_SLOT_LIMIT, options) },
     { key: rawByte(92), value: rawInt(stats.jump) },
     { key: rawByte(76), value: rawInt(numberOr(profile?.level, Number(process.env.DEFAULT_PLAYER_LEVEL || 1))) },
     { key: rawByte(36), value: rawBool(process.env.DEFAULT_PLAYER_PREMIUM === "1") },
@@ -1767,7 +1770,7 @@ function applyLateProfile(session, profile, incomingActor = null) {
   session.playerName = profile.name;
   session.weaponStates = makeWeaponRuntimeState(profile);
   if (incomingActor) {
-    session.actorRaw = makeActorDataRaw(incomingActor, profile);
+    updateActorWireData(session, incomingActor, profile, session.lastChannel || 0);
   }
   const stats = playerRuntimeStats(profile);
   if (!session.spawned) {
@@ -1844,7 +1847,7 @@ async function loadPlayerProfile(incomingActor) {
   }
 }
 
-function makeActorDataRaw(incomingActor, profile = null) {
+function makeActorDataRaw(incomingActor, profile = null, options = {}) {
   const credentials = actorCredentials(incomingActor);
   const authId = numberOr(profile?.authId, credentials.authId);
   const name = stringOr(profile?.name ?? htGet(incomingActor, 242)?.value, process.env.DEFAULT_PLAYER_NAME || "ContraCity");
@@ -1853,7 +1856,7 @@ function makeActorDataRaw(incomingActor, profile = null) {
     { key: rawByte(242), value: rawString(name) },
     { key: rawByte(241), value: rawInt(authId) },
     { key: rawByte(239), value: rawShort(Number.isFinite(team) ? team : -1) },
-    { key: rawByte(96), value: makeActorInfoRaw(profile) },
+    { key: rawByte(96), value: makeActorInfoRaw(profile, options) },
   ];
 
   if (INCLUDE_JOIN_ACTOR_ECHO_FIELDS) {
@@ -1868,6 +1871,68 @@ function makeActorDataRaw(incomingActor, profile = null) {
   }
 
   return rawHashtable(entries);
+}
+
+function actorRawForPeer(session) {
+  return session?.peerActorRaw || session?.actorRaw || rawHashtable([]);
+}
+
+function actorJoinPacketBytes(actorId, actorRaw, channel = 0) {
+  const payload = rawEvent(105, [
+    { key: 254, value: rawInt(actorId) },
+    { key: 245, value: actorRaw || rawHashtable([]) },
+  ]);
+  return 12 + makeReliable(0, payload, channel).length;
+}
+
+function actorListJoinResponsePacketBytes(actorId, actorRaw, roomRaw, channel = 0) {
+  const actorList = rawHashtable([{
+    key: rawInt(actorId),
+    value: actorRaw || rawHashtable([]),
+  }]);
+  const payload = rawOperationResponse(255, [
+    { key: 254, value: rawInt(actorId) },
+    { key: 249, value: actorList },
+    { key: 248, value: roomRaw || rawHashtable([]) },
+  ]);
+  return 12 + makeReliable(0, payload, channel).length;
+}
+
+function fitPeerActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null) {
+  const maxSlots = JOIN_LOADOUT_SLOT_LIMIT;
+  let fallback = null;
+  for (let slotLimit = maxSlots; slotLimit >= 1; slotLimit -= 1) {
+    const raw = makeActorDataRaw(incomingActor, profile, {
+      weaponSlotLimit: slotLimit,
+      logCompact: false,
+    });
+    const eventBytes = actorJoinPacketBytes(actorId, raw, channel);
+    const joinBytes = actorListJoinResponsePacketBytes(actorId, raw, roomRaw, channel);
+    const bytes = Math.max(eventBytes, joinBytes);
+    const candidate = { raw, slotLimit, bytes, eventBytes, joinBytes };
+    fallback = candidate;
+    if (!ACTOR_JOIN_MAX_PACKET_BYTES || bytes <= ACTOR_JOIN_MAX_PACKET_BYTES) {
+      if (slotLimit < maxSlots) {
+        console.log(`[loadout] peer actor compact actor=${actorId} slots=${slotLimit}/${maxSlots} bytes=${bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${eventBytes} join=${joinBytes}`);
+      }
+      return candidate;
+    }
+  }
+  if (fallback && ACTOR_JOIN_MAX_PACKET_BYTES) {
+    console.log(`[warn] peer actor payload over budget actor=${actorId} slots=${fallback.slotLimit}/${maxSlots} bytes=${fallback.bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${fallback.eventBytes} join=${fallback.joinBytes}`);
+  }
+  return fallback || { raw: rawHashtable([]), slotLimit: 0, bytes: actorJoinPacketBytes(actorId, rawHashtable([]), channel) };
+}
+
+function updateActorWireData(session, incomingActor, profile, channel = 0) {
+  session.actorJoinParam = incomingActor;
+  session.actorRaw = makeActorDataRaw(incomingActor, profile, {
+    weaponSlotLimit: JOIN_LOADOUT_SLOT_LIMIT,
+  });
+  const peerActor = fitPeerActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw);
+  session.peerActorRaw = peerActor.raw;
+  session.peerActorLoadoutSlots = peerActor.slotLimit;
+  session.peerActorRawBytes = peerActor.bytes;
 }
 
 function makeGameStateRaw(session) {
@@ -2715,6 +2780,10 @@ function resetTransportForReconnect(session, reason) {
   session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
   session.roomRaw = makeRoomSettingsRaw(session.room);
   session.actorRaw = null;
+  session.peerActorRaw = null;
+  session.peerActorRawBytes = 0;
+  session.peerActorLoadoutSlots = 0;
+  session.actorJoinParam = null;
   session.currentWeaponSlot = 1;
   session.weaponStates = makeWeaponRuntimeState(null);
   session.health = playerRuntimeStats(null).maxHealth;
@@ -2747,7 +2816,7 @@ function removeDuplicatePlayerSessions(room, session) {
 function makeActorJoinEvent(session) {
   return rawEvent(105, [
     { key: 254, value: rawInt(session.actorId) },
-    { key: 245, value: session.actorRaw || rawHashtable([]) },
+    { key: 245, value: actorRawForPeer(session) },
   ]);
 }
 
@@ -3205,7 +3274,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.roomRaw = makeRoomSettingsRaw(session.room);
     removeDuplicatePlayerSessions(session.room, session);
     session.actorId = nextRoomActorId(session.room);
-    session.actorRaw = makeActorDataRaw(actorParam, profile);
+    updateActorWireData(session, actorParam, profile, channel);
     const joinActorId = session.actorId;
     if (profileSource === "fallback") {
       (pendingProfile || warmPlayerProfile(actorParam, "late-room-profile")).then((loadedProfile) => {
@@ -3221,7 +3290,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.room.players.set(session.actorId, session);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
-    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} roomRaw=${session.roomRaw?.length || 0}`);
+    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerPacket=${session.peerActorRawBytes || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
       waitForProfile: profileSource === "fallback",
@@ -3376,6 +3445,10 @@ async function handleUdp(port, socket, msg, rinfo) {
       room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
       roomRaw: null,
       actorRaw: null,
+      peerActorRaw: null,
+      peerActorRawBytes: 0,
+      peerActorLoadoutSlots: 0,
+      actorJoinParam: null,
       team: -1,
       spawned: false,
       moveSeen: false,
@@ -3536,7 +3609,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} gameStateScore=spawned joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
