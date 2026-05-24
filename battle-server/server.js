@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-room-list-event252-v51";
+const BUILD_ID = "battle-server-2026-05-24-gamestate-throttle-v52";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -35,6 +35,9 @@ const INCLUDE_WEAPON_LEGACY_FIELDS = process.env.INCLUDE_WEAPON_LEGACY_FIELDS !=
 const INCLUDE_JOIN_WEARS = process.env.INCLUDE_JOIN_WEARS !== "0";
 const INCLUDE_JOIN_ACTOR_ECHO_FIELDS = process.env.INCLUDE_JOIN_ACTOR_ECHO_FIELDS === "1";
 const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1";
+const INCLUDE_PEERS_IN_GAMESTATE = process.env.INCLUDE_PEERS_IN_GAMESTATE === "1";
+const GAMESTATE_REPEAT_MIN_MS = Math.max(0, Number(process.env.GAMESTATE_REPEAT_MIN_MS || 750));
+const MAX_UDP_PACKET_BYTES = Math.max(0, Number(process.env.MAX_UDP_PACKET_BYTES || 1200));
 const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 600));
 const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
 const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETRY_MS || 1000));
@@ -340,14 +343,36 @@ function cacheReliableResponse(session, cacheKey, reliableCommands) {
 
 function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
   const sentTime = photonNow();
-  const packet = Buffer.concat([
-    makeHeader(peerIdOverride ?? session.peerId, commands.length, sentTime, session.challenge),
-    ...commands,
+  const buildPacket = (packetCommands) => Buffer.concat([
+    makeHeader(peerIdOverride ?? session.peerId, packetCommands.length, sentTime, session.challenge),
+    ...packetCommands,
   ]);
+  const packet = buildPacket(commands);
+
+  if (MAX_UDP_PACKET_BYTES > 0 && commands.length > 1 && packet.length > MAX_UDP_PACKET_BYTES) {
+    let chunk = [];
+    for (const command of commands) {
+      const nextChunk = [...chunk, command];
+      if (chunk.length > 0 && buildPacket(nextChunk).length > MAX_UDP_PACKET_BYTES) {
+        sendPacket(socket, rinfo, session, chunk, peerIdOverride);
+        chunk = [command];
+      } else {
+        chunk = nextChunk;
+      }
+    }
+    if (chunk.length > 0) {
+      sendPacket(socket, rinfo, session, chunk, peerIdOverride);
+    }
+    return;
+  }
+
   socket.send(packet, rinfo.port, rinfo.address);
   const ackOnly = commands.every((command) => command[0] === 0x01);
   if (DEBUG_PACKETS || !ackOnly) {
     console.log(`[send] bytes=${packet.length} to=${rinfo.address}:${rinfo.port} cmds=${commands.length}`);
+  }
+  if (MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES) {
+    console.log(`[warn] udp-packet-large bytes=${packet.length} max=${MAX_UDP_PACKET_BYTES} cmds=${commands.length}`);
   }
 }
 
@@ -1828,11 +1853,14 @@ function makeActorDataRaw(incomingActor, profile = null) {
 
 function makeGameStateRaw(session) {
   const entries = [
-    { key: rawByte(99), value: makeRoomActorListRaw(session.room, session) },
     { key: rawByte(88), value: makeScoreRaw(session) },
     { key: rawByte(77), value: rawBool(false) },
     { key: rawByte(95), value: rawLong(session.room.startedAt) },
   ];
+
+  if (INCLUDE_PEERS_IN_GAMESTATE) {
+    entries.unshift({ key: rawByte(99), value: makeRoomActorListRaw(session.room, session) });
+  }
 
   const items = makeRoomItemsRaw(session.room);
   if (items) {
@@ -2622,6 +2650,7 @@ function resetSessionRoomProgress(session) {
   clearJoinLateStartTimers(session);
   clearSessionWeaponReloadTimers(session);
   session.gameStateRequested = false;
+  session.lastGameStateResponseAt = 0;
   session.team = -1;
   session.lastTransform = null;
 }
@@ -3033,7 +3062,19 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === 84) {
+    const now = Date.now();
+    if (
+      GAMESTATE_REPEAT_MIN_MS > 0 &&
+      session.gameStateRequested &&
+      !session.spawned &&
+      session.lastGameStateResponseAt &&
+      now - session.lastGameStateResponseAt < GAMESTATE_REPEAT_MIN_MS
+    ) {
+      console.log(`[event] game state request throttled actor=${session.actorId} age=${now - session.lastGameStateResponseAt}ms`);
+      return [];
+    }
     session.gameStateRequested = true;
+    session.lastGameStateResponseAt = now;
     clearJoinStartTimer(session);
     clearJoinSettingsTimers(session);
     console.log("[event] game state request");
@@ -3056,6 +3097,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   if (eventCode === 100) {
     const team = getTeamFromEventData(parsed, normalizeTeamForRoom(session));
     session.spawned = true;
+    session.lastGameStateResponseAt = 0;
     session.spawnRetry = null;
     const response = buildSpawnEvent(session, team, "client-request");
     broadcastReliableToRoom(session, response, channel, "spawn");
@@ -3148,6 +3190,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       joinSettingsTimers: [],
       joinLateStartTimers: [],
       gameStateRequested: false,
+      lastGameStateResponseAt: 0,
       reliableResponses: new Map(),
       reliableInFlight: new Map(),
       reliableGeneration: 0,
@@ -3290,7 +3333,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStateScore=spawned joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${JOIN_SETTINGS_PUSH_DELAYS_MS.length ? JOIN_SETTINGS_PUSH_DELAYS_MS.join(",") : "off"}ms joinLateStart=${JOIN_LATE_START_DELAYS_MS.length ? JOIN_LATE_START_DELAYS_MS.join(",") : "off"}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} gameStateScore=spawned joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${JOIN_SETTINGS_PUSH_DELAYS_MS.length ? JOIN_SETTINGS_PUSH_DELAYS_MS.join(",") : "off"}ms joinLateStart=${JOIN_LATE_START_DELAYS_MS.length ? JOIN_LATE_START_DELAYS_MS.join(",") : "off"}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
