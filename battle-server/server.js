@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-22-zombi2-upper-dm-spawns-v49";
+const BUILD_ID = "battle-server-2026-05-24-room-list-peer-sync-v50";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -388,6 +388,14 @@ function rawString(value) {
   return Buffer.concat([Buffer.from([0x73]), u16(data.length), data]);
 }
 
+function rawStringArray(values) {
+  const items = values.map((value) => {
+    const data = Buffer.from(String(value ?? ""), "utf8");
+    return Buffer.concat([u16(data.length), data]);
+  });
+  return Buffer.concat([Buffer.from([0x61]), u16(items.length), ...items]);
+}
+
 function rawHashtable(entries) {
   return Buffer.concat([Buffer.from([0x68]), rawHashtableBody(entries)]);
 }
@@ -653,32 +661,56 @@ function stringOr(value, fallback = "") {
   return text || fallback;
 }
 
+function shortRoomValue(value, fallback, min = 0, max = 32767) {
+  const number = Math.trunc(numberOr(value, fallback));
+  return Math.max(min, Math.min(max, number));
+}
+
+function boolOr(value, fallback = false) {
+  if (value == null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(text)) return true;
+  if (["false", "0", "no", "off"].includes(text)) return false;
+  return fallback;
+}
+
 function roomSettingsFrom(rawRoom) {
-  const name = htGet(rawRoom, "name")?.value || DEFAULT_ROOM;
-  const map = htGet(rawRoom, "map")?.value || DEFAULT_MAP;
+  const hasFullSettings = Boolean(htGet(rawRoom, "map"));
+  const name = stringOr(htGet(rawRoom, "name")?.value, DEFAULT_ROOM);
+  const map = stringOr(htGet(rawRoom, "map")?.value, DEFAULT_MAP);
   const modeValue = htGet(rawRoom, "game_mode")?.value;
   const requestedMode = Number(modeValue ?? 1);
-  const maxUsers = htGet(rawRoom, "max_users")?.value || 8;
-  const friendly = htGet(rawRoom, "friendly_fire")?.value || false;
+  const maxUsers = htGet(rawRoom, "max_users")?.value;
+  const friendly = htGet(rawRoom, "friendly_fire")?.value;
+  const guestMode = htGet(rawRoom, "guest_mode")?.value;
   return {
     name,
     map,
     mode: FORCE_TEAM_MODE ? 2 : (Number.isFinite(requestedMode) && requestedMode > 0 ? requestedMode : 1),
-    maxUsers: Number(maxUsers || 8),
-    friendlyFire: Boolean(friendly),
+    maxUsers: shortRoomValue(maxUsers, 8, 1, 64),
+    friendlyFire: boolOr(friendly, false),
+    timeLimit: shortRoomValue(htGet(rawRoom, "time_limit")?.value, 10, 1, 50),
+    fragLimit: shortRoomValue(htGet(rawRoom, "frag_limit")?.value, 50, 1, 1000),
+    lvlMin: shortRoomValue(htGet(rawRoom, "lvl_min")?.value, 1, 1, 99),
+    lvlMax: shortRoomValue(htGet(rawRoom, "lvl_max")?.value, 50, 1, 99),
+    password: stringOr(htGet(rawRoom, "password")?.value, ""),
+    guestMode: guestMode == null ? 0 : shortRoomValue(guestMode === true ? 1 : guestMode, 0, 0, 32767),
+    hasFullSettings,
   };
 }
 
 function makeRoomSettingsRaw(settings) {
-  return rawHashtable([
-    { key: rawString("time_limit"), value: rawShort(10) },
-    { key: rawString("frag_limit"), value: rawShort(50) },
+  const entries = [
+    { key: rawString("time_limit"), value: rawShort(shortRoomValue(settings.timeLimit, 10, 1, 50)) },
+    { key: rawString("frag_limit"), value: rawShort(shortRoomValue(settings.fragLimit, 50, 1, 1000)) },
     { key: rawString("friendly_fire"), value: rawBool(settings.friendlyFire) },
-    { key: rawString("lvl_min"), value: rawShort(1) },
-    { key: rawString("lvl_max"), value: rawShort(50) },
+    { key: rawString("lvl_min"), value: rawShort(shortRoomValue(settings.lvlMin, 1, 1, 99)) },
+    { key: rawString("lvl_max"), value: rawShort(shortRoomValue(settings.lvlMax, 50, 1, 99)) },
     { key: rawString("game_mode"), value: rawByte(settings.mode) },
     { key: rawString("map"), value: rawString(settings.map) },
-    { key: rawString("max_users"), value: rawShort(settings.maxUsers) },
+    { key: rawString("max_users"), value: rawShort(shortRoomValue(settings.maxUsers, 8, 1, 64)) },
     { key: rawString("name"), value: rawString(settings.name) },
     {
       key: rawString("game_param"),
@@ -691,7 +723,14 @@ function makeRoomSettingsRaw(settings) {
         { key: rawString("destroy_geometry"), value: rawBool(DESTROY_GEOMETRY) },
       ]),
     },
-  ]);
+  ];
+  if (settings.password) {
+    entries.push({ key: rawString("password"), value: rawString(settings.password) });
+  }
+  if (settings.guestMode) {
+    entries.push({ key: rawString("guest_mode"), value: rawShort(shortRoomValue(settings.guestMode, 0)) });
+  }
+  return rawHashtable(entries);
 }
 
 function makeEmptyActorListRaw() {
@@ -2430,16 +2469,52 @@ function maybeAppendQueuedSpawn(session, commands, channel) {
   ));
 }
 
+function roomListData(room) {
+  const users = room?.players?.size || 0;
+  return [
+    stringOr(room?.map, DEFAULT_MAP),
+    String(shortRoomValue(room?.lvlMin, 1, 1, 99)),
+    String(shortRoomValue(room?.lvlMax, 50, 1, 99)),
+    String(shortRoomValue(room?.mode, FORCE_TEAM_MODE ? 2 : 1, 1, 255)),
+    String(shortRoomValue(room?.timeLimit, 10, 1, 50)),
+    String(shortRoomValue(room?.fragLimit, 50, 1, 1000)),
+    String(shortRoomValue(users, 0, 0, 32767)),
+    String(shortRoomValue(room?.maxUsers, 8, Math.max(1, users), 64)),
+    String(boolOr(room?.friendlyFire, false)),
+    String(Boolean(room?.password)),
+  ];
+}
+
+function makeDefaultRoomListEntry() {
+  return {
+    name: DEFAULT_ROOM,
+    map: DEFAULT_MAP,
+    mode: FORCE_TEAM_MODE ? 2 : 1,
+    maxUsers: 8,
+    friendlyFire: false,
+    timeLimit: 10,
+    fragLimit: 50,
+    lvlMin: 1,
+    lvlMax: 50,
+    password: "",
+    players: new Map(),
+  };
+}
+
 function makeRoomListRaw() {
-  const room = rawHashtable([
-    { key: rawString("name"), value: rawString(DEFAULT_ROOM) },
-    { key: rawString("map"), value: rawString(DEFAULT_MAP) },
-    { key: rawString("game_mode"), value: rawByte(FORCE_TEAM_MODE ? 2 : 1) },
-    { key: rawString("users"), value: rawShort(0) },
-    { key: rawString("max_users"), value: rawShort(8) },
-    { key: rawString("server"), value: rawString(SERVER_NAME) },
-  ]);
-  return rawHashtable([{ key: rawString(DEFAULT_ROOM), value: room }]);
+  const entries = [];
+  for (const room of rooms.values()) {
+    if (!room?.name) continue;
+    entries.push({
+      key: rawString(room.name),
+      value: rawStringArray(roomListData(room)),
+    });
+  }
+  if (entries.length === 0) {
+    const room = makeDefaultRoomListEntry();
+    entries.push({ key: rawString(room.name), value: rawStringArray(roomListData(room)) });
+  }
+  return rawHashtable(entries);
 }
 
 function ensureRoom(settings) {
@@ -2452,6 +2527,12 @@ function ensureRoom(settings) {
       mode: Number.isFinite(mode) && mode > 0 ? mode : 1,
       maxUsers: settings.maxUsers || 8,
       friendlyFire: settings.friendlyFire || false,
+      timeLimit: settings.timeLimit || 10,
+      fragLimit: settings.fragLimit || 50,
+      lvlMin: settings.lvlMin || 1,
+      lvlMax: settings.lvlMax || 50,
+      password: settings.password || "",
+      guestMode: settings.guestMode || 0,
       startedAt: photonNow(),
       players: new Map(),
       moves: 0,
@@ -2459,11 +2540,17 @@ function ensureRoom(settings) {
     });
   } else {
     const room = rooms.get(name);
-    if (room.players.size === 0) {
+    if (room.players.size === 0 && settings.hasFullSettings !== false) {
       room.map = settings.map || room.map || DEFAULT_MAP;
       room.mode = Number.isFinite(mode) && mode > 0 ? mode : room.mode;
       room.maxUsers = settings.maxUsers || room.maxUsers || 8;
       room.friendlyFire = settings.friendlyFire || false;
+      room.timeLimit = settings.timeLimit || room.timeLimit || 10;
+      room.fragLimit = settings.fragLimit || room.fragLimit || 50;
+      room.lvlMin = settings.lvlMin || room.lvlMin || 1;
+      room.lvlMax = settings.lvlMax || room.lvlMax || 50;
+      room.password = settings.password || "";
+      room.guestMode = settings.guestMode || 0;
       room.startedAt = photonNow();
       room.moves = 0;
       room.items = makeRoomItemState(room.map);
