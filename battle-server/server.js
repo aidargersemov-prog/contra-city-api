@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-peer-spawn-async-guard-v57";
+const BUILD_ID = "battle-server-2026-05-24-late-start-only-v58";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -46,7 +46,7 @@ const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETR
 const JOIN_PROFILE_MAX_WAIT_MS = Math.max(JOIN_SELF_PROFILE_WAIT_MS, Number(process.env.JOIN_PROFILE_MAX_WAIT_MS || 70000));
 const ALLOW_FALLBACK_JOIN_PROFILE = process.env.ALLOW_FALLBACK_JOIN_PROFILE === "1";
 const JOIN_SETTINGS_PUSH_DELAYS_MS = parseDelayList(process.env.JOIN_SETTINGS_PUSH_DELAYS_MS || "7000,15000,30000,60000,90000");
-const JOIN_START_EVENT_FALLBACK_DELAY_MS = Math.max(0, Number(process.env.JOIN_START_EVENT_FALLBACK_DELAY_MS || 1800));
+const JOIN_START_EVENT_FALLBACK_DELAY_MS = Math.max(0, Number(process.env.JOIN_START_EVENT_FALLBACK_DELAY_MS || 0));
 const JOIN_LATE_START_DELAYS_MS = parseDelayList(process.env.JOIN_LATE_START_DELAYS_MS || "6000,12000,20000,30000,45000,60000,90000");
 const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
 const NORMALIZE_WEAPON_RAPIDITY = process.env.NORMALIZE_WEAPON_RAPIDITY !== "0";
@@ -171,6 +171,11 @@ const MAP_SPAWN_POINTS = {
 
 function photonNow() {
   return Math.max(0, Math.floor(Date.now() - PROCESS_START_MS)) >>> 0;
+}
+
+function roomAgeMs(room) {
+  const startedAt = Number(room?.startedAt);
+  return Number.isFinite(startedAt) ? Math.max(0, photonNow() - startedAt) : 0;
 }
 
 function hasEnvSpawnOverride() {
@@ -2972,6 +2977,7 @@ function queueJoinSettingsPushes(port, socket, rinfo, session, channel = 0) {
 
 function queueJoinStartFallback(port, socket, rinfo, session, channel = 0) {
   clearJoinStartTimer(session);
+  // Normal slow-load recovery is handled by join-late-start pulses; this early one-shot is opt-in for diagnostics.
   if (JOIN_START_EVENT_FALLBACK_DELAY_MS <= 0) return;
   const actorId = session.actorId;
   session.joinStartEventTimer = setTimeout(() => {
@@ -3262,7 +3268,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.gameStateRequested = true;
     session.lastGameStateResponseAt = now;
     clearJoinRoomTimers(session);
-    console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM}`);
+    console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM} roomAge=${roomAgeMs(session.room)}ms`);
     postBattleEvent(session, "gamestate");
     const responses = [
       rawEvent(84, [
