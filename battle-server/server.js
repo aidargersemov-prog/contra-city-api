@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-real-join-inflight-dedupe-v55";
+const BUILD_ID = "battle-server-2026-05-24-peer-actor-before-spawn-v56";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -383,6 +383,14 @@ function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
 
 function sendReliablePayload(socket, rinfo, session, payload, channel = 0) {
   sendPacket(socket, rinfo, session, [makeReliable(session.serverSeq++, payload, channel)]);
+}
+
+function reliableChannelForSession(session, fallback = 0) {
+  const lastChannel = Number(session?.lastChannel);
+  if (Number.isInteger(lastChannel) && lastChannel >= 0 && lastChannel <= 255) return lastChannel;
+  const fallbackChannel = Number(fallback);
+  if (Number.isInteger(fallbackChannel) && fallbackChannel >= 0 && fallbackChannel <= 255) return fallbackChannel;
+  return 0;
 }
 
 function rawNull() {
@@ -1947,10 +1955,18 @@ function buildSpawnItemEvent(item) {
   return rawEvent(94, [{ key: 245, value: makeItemRaw(item) }]);
 }
 
-function sendReliableToSession(targetSession, payload, channel = 0) {
-  if (!targetSession?.socket || !targetSession?.rinfo || !payload) return false;
-  sendReliablePayload(targetSession.socket, targetSession.rinfo, targetSession, payload, channel);
+function sendReliablePayloadsToSession(targetSession, payloads, channel = 0) {
+  if (!targetSession?.socket || !targetSession?.rinfo || !Array.isArray(payloads)) return false;
+  const reliablePayloads = payloads.filter(Boolean);
+  if (!reliablePayloads.length) return false;
+  const targetChannel = reliableChannelForSession(targetSession, channel);
+  const commands = reliablePayloads.map((payload) => makeReliable(targetSession.serverSeq++, payload, targetChannel));
+  sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
   return true;
+}
+
+function sendReliableToSession(targetSession, payload, channel = 0) {
+  return sendReliablePayloadsToSession(targetSession, [payload], channel);
 }
 
 function broadcastReliableToRoom(sourceSession, payload, channel = 0, reason = "sync", options = {}) {
@@ -1960,7 +1976,11 @@ function broadcastReliableToRoom(sourceSession, payload, channel = 0, reason = "
   for (const playerSession of room.players.values()) {
     if (!playerSession || playerSession === sourceSession) continue;
     if (options.requireGameState !== false && !playerSession.gameStateRequested) continue;
-    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+    if (options.skipKnownActor && sessionKnowsActor(playerSession, sourceSession.actorId)) continue;
+    if (sendReliableToSession(playerSession, payload, channel)) {
+      sent += 1;
+      if (options.markActorKnown) markActorKnown(playerSession, sourceSession.actorId);
+    }
   }
   if (sent > 0 && reason) {
     console.log(`[sync] ${reason} actor=${sourceSession.actorId} peers=${sent}`);
@@ -2495,11 +2515,9 @@ function maybeAppendQueuedSpawn(session, commands, channel) {
 
   session.spawnRetry.attempts += 1;
   session.spawnRetry.nextAt = now + AUTO_SPAWN_RETRY_MS;
-  commands.push(makeReliable(
-    session.serverSeq++,
-    buildSpawnEvent(session, session.spawnRetry.team, `auto-retry-${session.spawnRetry.attempts}`),
-    channel,
-  ));
+  const spawnResponse = buildSpawnEvent(session, session.spawnRetry.team, `auto-retry-${session.spawnRetry.attempts}`);
+  commands.push(makeReliable(session.serverSeq++, spawnResponse, channel));
+  broadcastSpawnToRoom(session, spawnResponse, channel);
 }
 
 function roomListData(room) {
@@ -2655,6 +2673,7 @@ function resetSessionRoomProgress(session) {
   clearSessionWeaponReloadTimers(session);
   session.gameStateRequested = false;
   session.lastGameStateResponseAt = 0;
+  session.knownActorIds = new Set();
   session.team = -1;
   session.lastTransform = null;
 }
@@ -2665,6 +2684,7 @@ function detachSessionFromRoom(session, reason = "leave") {
       if (playerSession === session) {
         broadcastReliableToRoom(session, makeActorLeaveEvent(actorId), 0, "actor-leave");
         session.room.players.delete(actorId);
+        forgetActorForRoom(session.room, actorId);
         console.log(`[state] room player removed reason=${reason} room=${session.room.name} actor=${actorId}`);
       }
     }
@@ -2699,6 +2719,7 @@ function removeDuplicatePlayerSessions(room, session) {
     ) {
       broadcastReliableToRoom(playerSession, makeActorLeaveEvent(actorId), 0, "stale-leave");
       room.players.delete(actorId);
+      forgetActorForRoom(room, actorId);
       playerSession.spawnRetry = null;
       clearSpawnMoveWarningTimer(playerSession);
       clearJoinRoomTimers(playerSession);
@@ -2721,6 +2742,68 @@ function makeActorLeaveEvent(actorId) {
     { key: 254, value: rawInt(actorId) },
     { key: 245, value: rawHashtable([]) },
   ]);
+}
+
+function ensureKnownActorSet(session) {
+  if (!session) return null;
+  if (!(session.knownActorIds instanceof Set)) session.knownActorIds = new Set();
+  return session.knownActorIds;
+}
+
+function markActorKnown(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return;
+  ensureKnownActorSet(session)?.add(normalizedActorId);
+}
+
+function sessionKnowsActor(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  return Number.isInteger(normalizedActorId) && session?.knownActorIds instanceof Set && session.knownActorIds.has(normalizedActorId);
+}
+
+function markKnownRoomActors(session) {
+  if (!session?.room?.players) return;
+  markActorKnown(session, session.actorId);
+  for (const [actorId, playerSession] of session.room.players.entries()) {
+    if (!playerSession || playerSession === session || !playerSession.actorRaw) continue;
+    markActorKnown(session, actorId);
+  }
+}
+
+function forgetActorForRoom(room, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || !room?.players?.size) return;
+  for (const playerSession of room.players.values()) {
+    playerSession?.knownActorIds?.delete?.(normalizedActorId);
+  }
+}
+
+function broadcastSpawnToRoom(sourceSession, spawnPayload, channel = 0) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !spawnPayload) return 0;
+  let sent = 0;
+  let actorJoinSent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession || !playerSession.gameStateRequested) continue;
+    const payloads = [];
+    let includesActorJoin = false;
+    if (!sessionKnowsActor(playerSession, sourceSession.actorId)) {
+      payloads.push(makeActorJoinEvent(sourceSession));
+      includesActorJoin = true;
+    }
+    payloads.push(spawnPayload);
+    if (sendReliablePayloadsToSession(playerSession, payloads, channel)) {
+      sent += 1;
+      if (includesActorJoin) {
+        markActorKnown(playerSession, sourceSession.actorId);
+        actorJoinSent += 1;
+      }
+    }
+  }
+  if (sent > 0) {
+    console.log(`[sync] spawn actor=${sourceSession.actorId} peers=${sent}${actorJoinSent ? ` actorJoin=${actorJoinSent}` : ""}`);
+  }
+  return sent;
 }
 
 function makeJoinSelfEvent(session) {
@@ -2791,6 +2874,7 @@ function queueJoinSettingsPushes(port, socket, rinfo, session, channel = 0) {
         return;
       }
       console.log(`[event] join-settings-push actor=${session.actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} roomRaw=${session.roomRaw?.length || 0}`);
+      markKnownRoomActors(session);
       sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
     }, delayMs);
     if (typeof timer.unref === "function") {
@@ -2828,6 +2912,7 @@ function queueJoinLateStartPulses(port, socket, rinfo, session, channel = 0) {
       }
       console.log(`[event] join-late-start-pulse actor=${actorId} delay=${delayMs}ms`);
       sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
+      markKnownRoomActors(session);
       sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
     }, delayMs);
     if (typeof timer.unref === "function") {
@@ -3038,7 +3123,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       });
     }
     const actorListRaw = makeRoomActorListRaw(session.room, session);
+    session.knownActorIds = new Set();
+    markKnownRoomActors(session);
     session.room.players.set(session.actorId, session);
+    markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
@@ -3046,7 +3134,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       waitForProfile: profileSource === "fallback",
       incomingActor: actorParam,
     });
-    broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join");
+    broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
+      markActorKnown: true,
+      skipKnownActor: true,
+    });
     return responses;
   }
 
@@ -3093,7 +3184,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       ]),
     ];
     if (AUTO_SPAWN_AFTER_GAMESTATE && !session.spawned) {
-      responses.push(buildSpawnEvent(session, null, "auto-after-gamestate"));
+      const spawnResponse = buildSpawnEvent(session, null, "auto-after-gamestate");
+      responses.push(spawnResponse);
+      broadcastSpawnToRoom(session, spawnResponse, channel);
       queueAutoSpawn(session, null, "post-gamestate");
     } else if (!session.spawned) {
       console.log(`[event] waiting client spawn request actor=${session.actorId} team=${normalizeTeamForRoom(session)} mode=${roomMode(session)}`);
@@ -3108,7 +3201,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.spawnRetry = null;
     clearJoinRoomTimers(session);
     const response = buildSpawnEvent(session, team, "client-request");
-    broadcastReliableToRoom(session, response, channel, "spawn");
+    broadcastSpawnToRoom(session, response, channel);
     return [response];
   }
 
@@ -3203,6 +3296,8 @@ async function handleUdp(port, socket, msg, rinfo) {
       reliableResponses: new Map(),
       reliableInFlight: new Map(),
       reliableGeneration: 0,
+      knownActorIds: new Set(),
+      lastChannel: 0,
       port,
       remoteKey: `${rinfo.address}:${rinfo.port}`,
       playerId: 1,
@@ -3236,6 +3331,7 @@ async function handleUdp(port, socket, msg, rinfo) {
     const commandType = msg[offset];
     const channel = msg[offset + 1];
     lastChannel = channel;
+    session.lastChannel = channel;
     const commandLength = readU32(msg, offset + 4);
     const reliableSeq = readU32(msg, offset + 8);
     const commandEnd = offset + commandLength;
