@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-original-join-settings-v54";
+const BUILD_ID = "battle-server-2026-05-24-real-join-inflight-dedupe-v55";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -44,7 +44,7 @@ const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(proc
 const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETRY_MS || 1000));
 const JOIN_PROFILE_MAX_WAIT_MS = Math.max(JOIN_SELF_PROFILE_WAIT_MS, Number(process.env.JOIN_PROFILE_MAX_WAIT_MS || 70000));
 const ALLOW_FALLBACK_JOIN_PROFILE = process.env.ALLOW_FALLBACK_JOIN_PROFILE === "1";
-const JOIN_SETTINGS_PUSH_DELAYS_MS = parseDelayList(process.env.JOIN_SETTINGS_PUSH_DELAYS_MS || "");
+const JOIN_SETTINGS_PUSH_DELAYS_MS = parseDelayList(process.env.JOIN_SETTINGS_PUSH_DELAYS_MS || "7000,15000,30000,60000,90000");
 const JOIN_START_EVENT_FALLBACK_DELAY_MS = Math.max(0, Number(process.env.JOIN_START_EVENT_FALLBACK_DELAY_MS || 1800));
 const JOIN_LATE_START_DELAYS_MS = parseDelayList(process.env.JOIN_LATE_START_DELAYS_MS || "6000,12000,20000,30000,45000,60000,90000");
 const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
@@ -2604,12 +2604,14 @@ function resetReliableDedupe(session, reason = "reset", options = {}) {
   const cached = session.reliableResponses?.size || 0;
   const inFlight = session.reliableInFlight?.size || 0;
   session.reliableResponses?.clear?.();
-  session.reliableInFlight?.clear?.();
+  if (options.clearInFlight !== false) {
+    session.reliableInFlight?.clear?.();
+  }
   if (options.bumpGeneration) {
     session.reliableGeneration = (session.reliableGeneration || 0) + 1;
   }
   if (cached || inFlight || options.bumpGeneration) {
-    console.log(`[state] reliable cache reset reason=${reason} cached=${cached} inflight=${inFlight} gen=${session.reliableGeneration || 0}`);
+    console.log(`[state] reliable cache reset reason=${reason} cached=${cached} inflight=${inFlight}${options.clearInFlight === false ? " preserved" : ""} gen=${session.reliableGeneration || 0}`);
   }
 }
 
@@ -2826,9 +2828,7 @@ function queueJoinLateStartPulses(port, socket, rinfo, session, channel = 0) {
       }
       console.log(`[event] join-late-start-pulse actor=${actorId} delay=${delayMs}ms`);
       sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
-      if (JOIN_SETTINGS_PUSH_DELAYS_MS.length) {
-        sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
-      }
+      sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
     }, delayMs);
     if (typeof timer.unref === "function") {
       timer.unref();
@@ -3016,7 +3016,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const settings = roomSettingsFrom(roomPropsParam);
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
-    resetReliableDedupe(session, "real-room-join");
+    resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
     detachSessionFromRoom(session, "rejoin");
     const { profile, source: profileSource, pendingProfile } = await profileForJoin(actorParam);
     session.playerId = profile.authId;
