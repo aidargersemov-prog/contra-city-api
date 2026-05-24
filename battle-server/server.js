@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-25-lobby-roomlist-collision-v66";
+const BUILD_ID = "battle-server-2026-05-25-original-roomlist-request-v67";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2672,29 +2672,6 @@ function makeRoomListEvent(session) {
   ]);
 }
 
-function isSessionInBattleRoom(session) {
-  if (!session?.room?.players) return false;
-  for (const playerSession of session.room.players.values()) {
-    if (playerSession === session) return true;
-  }
-  return false;
-}
-
-function broadcastRoomListToLobbySessions(reason) {
-  let sent = 0;
-  for (const targetSession of sessions.values()) {
-    if (!targetSession?.socket || !targetSession?.rinfo) continue;
-    if (isSessionInBattleRoom(targetSession)) continue;
-    if (sendReliableToSession(targetSession, makeRoomListEvent(targetSession), reliableChannelForSession(targetSession, 0))) {
-      sent += 1;
-    }
-  }
-  if (sent > 0) {
-    console.log(`[event] room list pushed reason=${reason} peers=${sent} rooms=${roomListSummary()}`);
-  }
-  return sent;
-}
-
 function ensureRoom(settings) {
   const name = settings.name || DEFAULT_ROOM;
   const mode = Number(settings.mode ?? 1);
@@ -2813,7 +2790,6 @@ function resetSessionRoomProgress(session) {
 }
 
 function detachSessionFromRoom(session, reason = "leave") {
-  let removed = false;
   if (session?.room?.players) {
     for (const [actorId, playerSession] of session.room.players.entries()) {
       if (playerSession === session) {
@@ -2821,14 +2797,10 @@ function detachSessionFromRoom(session, reason = "leave") {
         session.room.players.delete(actorId);
         forgetActorForRoom(session.room, actorId);
         console.log(`[state] room player removed reason=${reason} room=${session.room.name} actor=${actorId}`);
-        removed = true;
       }
     }
   }
   resetSessionRoomProgress(session);
-  if (removed && reason !== "rejoin") {
-    broadcastRoomListToLobbySessions(`room-${reason}`);
-  }
 }
 
 function resetTransportForReconnect(session, reason) {
@@ -3348,7 +3320,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.actorJoinAnnouncedAt = new Map();
     markKnownRoomActors(session);
     session.room.players.set(session.actorId, session);
-    broadcastRoomListToLobbySessions("room-join");
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerPacket=${session.peerActorRawBytes || 0} roomRaw=${session.roomRaw?.length || 0}`);
