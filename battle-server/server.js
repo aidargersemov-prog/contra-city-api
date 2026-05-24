@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-24-original-joindata-compact-actor-v59";
+const BUILD_ID = "battle-server-2026-05-24-no-zero-pulses-compact-actor-v60";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -34,7 +34,7 @@ const CATALOG_CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS || 300000);
 const PROFILE_JOIN_WAIT_MS = Math.max(0, Number(process.env.PROFILE_JOIN_WAIT_MS || 1000));
 const JOIN_LOADOUT_SLOT_LIMIT = Math.max(1, Math.min(7, Number(process.env.JOIN_LOADOUT_SLOT_LIMIT || 7)));
 const INCLUDE_WEAPON_LEGACY_FIELDS = process.env.INCLUDE_WEAPON_LEGACY_FIELDS === "1";
-const INCLUDE_JOIN_WEARS = process.env.INCLUDE_JOIN_WEARS !== "0";
+const INCLUDE_JOIN_WEARS = process.env.INCLUDE_JOIN_WEARS === "1";
 const INCLUDE_JOIN_ACTOR_ECHO_FIELDS = process.env.INCLUDE_JOIN_ACTOR_ECHO_FIELDS === "1";
 const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1";
 const INCLUDE_PEERS_IN_GAMESTATE = process.env.INCLUDE_PEERS_IN_GAMESTATE === "1";
@@ -77,7 +77,7 @@ function parseDelayList(value) {
   return String(value || "")
     .split(",")
     .map((part) => Number(part.trim()))
-    .filter((delayMs) => Number.isFinite(delayMs) && delayMs >= 0);
+    .filter((delayMs) => Number.isFinite(delayMs) && delayMs > 0);
 }
 
 function formatDelayList(delays) {
@@ -3316,7 +3316,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       postBattleEvent(session, "move", { eventData: { count: session.room.moves } });
     }
     const move = buildActorDataEvent(session, 99, parsed);
-    broadcastReliableToRoom(session, move, channel, "", { requireGameState: true });
+    const movePeers = broadcastReliableToRoom(session, move, channel, "", { requireGameState: true });
+    if ((DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) && movePeers > 0) {
+      console.log(`[sync] move actor=${session.actorId} peers=${movePeers} count=${session.room.moves}`);
+    }
     const pickup = buildProximityPickItemEvent(session, point);
     if (pickup) broadcastReliableToRoom(session, pickup, channel, "item-pick");
     return pickup ? [pickup] : [];
