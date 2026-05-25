@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-25-peer-spawn-confirm-v69";
+const BUILD_ID = "battle-server-2026-05-25-shot-target-wire-log-v70";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -632,11 +632,14 @@ function readTypedRaw(buf, offset, forcedType = null) {
     const count = readU16(buf, offset);
     offset += 2;
     const itemType = buf[offset++];
+    const items = [];
     for (let i = 0; i < count; i++) {
       const parsed = readTypedRaw(buf, offset, itemType);
       offset = parsed.offset;
+      items.push(parsed);
     }
-    return { type, value: null, raw: buf.subarray(start, offset), offset };
+    value = { kind: "typed-array", itemType, items };
+    return { type, value, raw: buf.subarray(start, offset), offset };
   }
 
   throw new Error(`unsupported photon type 0x${type.toString(16)} at ${start}`);
@@ -2487,6 +2490,21 @@ function noteWeaponShot(session, parsed) {
   state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
 }
 
+function describeShotTargets(data) {
+  const targets = htGet(data, 86);
+  const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  if (!targetItems) return targets ? " targets=unparsed" : " targets=none";
+  if (targetItems.length === 0) return " targets=empty";
+  const details = targetItems.map((target) => {
+    const actorId = htGet(target, 94)?.value;
+    const descriptorRaw = htGet(target, 68)?.value;
+    if (descriptorRaw == null) return `${actorId ?? "?"}:descriptor=none`;
+    const descriptor = Number(descriptorRaw) & 0xff;
+    return `${actorId ?? "?"}:descriptor=0x${descriptor.toString(16).padStart(2, "0")}:type=${descriptor & 7}:zone=0x${(descriptor & 48).toString(16).padStart(2, "0")}`;
+  });
+  return ` targets=${details.join(",")}`;
+}
+
 function buildShotEvent(session, parsed) {
   const data = parsed?.params?.get(245);
   if (!data?.raw) return null;
@@ -2506,7 +2524,7 @@ function buildShotEvent(session, parsed) {
       ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
       : ` interval=${gate.intervalMs}ms gate=${gate.reason}`)
     : "";
-  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}`);
+  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}`);
   return rawEvent(97, [
     { key: 254, value: rawInt(session.actorId) },
     { key: 245, value: data.raw },
