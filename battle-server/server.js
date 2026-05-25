@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-25-shot-target-wire-log-v70";
+const BUILD_ID = "battle-server-2026-05-25-shot-context-capture-v71";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -255,6 +255,10 @@ function spawnPointFor(session, team) {
 
 function fmtPoint(point) {
   return `${Number(point.x).toFixed(2)},${Number(point.y).toFixed(2)},${Number(point.z).toFixed(2)}@${Number(point.rotY || 0).toFixed(0)}`;
+}
+
+function fmtVector(point) {
+  return `${Number(point.x).toFixed(2)},${Number(point.y).toFixed(2)},${Number(point.z).toFixed(2)}`;
 }
 
 function u16(n) {
@@ -1642,6 +1646,7 @@ function makeWeaponRuntimeState(profile = null) {
     states.set(slot, {
       slot,
       index: slot - 1,
+      weaponId: numberOr(merged.w_id ?? merged.id, fallback.w_id ?? fallback.id),
       type: numberOr(merged.wt, fallback.wt),
       rapidity,
       shotIntervalMs: shotIntervalMsFromRapidity(rapidity),
@@ -1658,6 +1663,10 @@ function makeWeaponRuntimeState(profile = null) {
       loadedAmmo: maxLoadedAmmo,
       ammoReserve: Math.max(0, maxAmmoReserve - maxLoadedAmmo),
       systemName: normalizeSystemName(merged.sn ?? merged.sname, fallback.sn),
+      crit: numberOr(merged.krit, fallback.krit),
+      shortDamage: [numberOr(merged.smindam, fallback.smindam), numberOr(merged.smaxdam, fallback.smaxdam)],
+      mediumDamage: [numberOr(merged.mmindam, fallback.mmindam), numberOr(merged.mmaxdam, fallback.mmaxdam)],
+      longDamage: [numberOr(merged.lmindam, fallback.lmindam), numberOr(merged.lmaxdam, fallback.lmaxdam)],
     });
   }
   return states;
@@ -2505,6 +2514,50 @@ function describeShotTargets(data) {
   return ` targets=${details.join(",")}`;
 }
 
+function pointFromHashtable(data) {
+  const x = Number(htGet(data, 1)?.value);
+  const y = Number(htGet(data, 2)?.value);
+  const z = Number(htGet(data, 3)?.value);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+  return { x, y, z };
+}
+
+function distanceBetweenPoints(left, right) {
+  if (!left || !right) return null;
+  const dx = Number(left.x) - Number(right.x);
+  const dy = Number(left.y) - Number(right.y);
+  const dz = Number(left.z) - Number(right.z);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) return null;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function formatCaptureDistance(distance) {
+  return Number.isFinite(distance) ? distance.toFixed(2) : "unknown";
+}
+
+function describeShotDamageContext(session, data, state) {
+  const targets = htGet(data, 86);
+  const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  if (!targetItems?.length) return "";
+
+  const origin = pointFromHashtable(htGet(data, 11));
+  const weapon = state
+    ? ` weapon=${state.systemName}#${state.weaponId} cfgDmg=${state.shortDamage.join("-")}/${state.mediumDamage.join("-")}/${state.longDamage.join("-")} crit=${state.crit}`
+    : " weapon=unknown";
+  const context = targetItems.map((target) => {
+    const actorId = Number(htGet(target, 94)?.value);
+    const targetSession = Number.isFinite(actorId) ? session.room?.players?.get(actorId) : null;
+    if (!targetSession) return `${Number.isFinite(actorId) ? actorId : "?"}:session=missing`;
+    const stats = sessionRuntimeStats(targetSession);
+    const actorDistance = distanceBetweenPoints(session.lastTransform, targetSession.lastTransform);
+    const originDistance = distanceBetweenPoints(origin, targetSession.lastTransform);
+    const health = targetSession.health ?? stats.maxHealth;
+    const energy = targetSession.energy ?? stats.maxEnergy;
+    return `${actorId}:actorDist=${formatCaptureDistance(actorDistance)}:originDist=${formatCaptureDistance(originDistance)}:hp=${health}/${stats.maxHealth}:energy=${energy}/${stats.maxEnergy}:prot=${formatProtectionBonuses(stats.modifiers.protections)}`;
+  });
+  return `${weapon} origin=${origin ? fmtVector(origin) : "unknown"} context=${context.join(",")}`;
+}
+
 function buildShotEvent(session, parsed) {
   const data = parsed?.params?.get(245);
   if (!data?.raw) return null;
@@ -2524,7 +2577,7 @@ function buildShotEvent(session, parsed) {
       ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
       : ` interval=${gate.intervalMs}ms gate=${gate.reason}`)
     : "";
-  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}`);
+  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}`);
   return rawEvent(97, [
     { key: 254, value: rawInt(session.actorId) },
     { key: 245, value: data.raw },
