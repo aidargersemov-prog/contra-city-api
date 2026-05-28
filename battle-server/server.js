@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-28-server-damage-v72";
+const BUILD_ID = "battle-server-2026-05-28-respawn-move-gate-v73";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2303,6 +2303,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   session.team = team;
   session.spawned = true;
   session.dead = false;
+  session.moveSeen = false;
   session.health = stats.maxHealth;
   session.energy = stats.maxEnergy;
   const point = spawnPointFor(session, team);
@@ -2684,7 +2685,7 @@ function weaponProtectionKey(weaponType) {
 function isExplosiveDamageWeapon(weaponType, launchMode) {
   const type = Number(weaponType);
   const mode = Number(launchMode ?? 0);
-  return (type === 8 || type === 9 || type === 15) && mode === 2;
+  return (type === 8 || type === 9 || type === 15) && mode !== 1;
 }
 
 function explosionDistanceCoefficient(distance) {
@@ -2867,11 +2868,17 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     }
     clearSpawnMoveWarningTimer(targetSession);
     clearSessionWeaponReloadTimers(targetSession);
+    clearPeerSpawnTimers(targetSession);
+    targetSession.moveSeen = false;
+    targetSession.spawnRetry = null;
+    targetSession.pendingSpawnBroadcast = null;
     const impulse = shotImpulseVector(data, shooter, targetSession);
     result.killed = true;
     result.killEvent = makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse);
     result.summary += ":kill=1";
     postBattleEvent(targetSession, "death", {
+      health: targetSession.health,
+      energy: targetSession.energy,
       killerActorId: shooter.actorId,
       weaponType,
       hitZone,
@@ -3249,6 +3256,7 @@ function resetSessionRoomProgress(session) {
   session.actorJoinAnnouncedAt = new Map();
   session.team = -1;
   session.lastTransform = null;
+  session.pendingSpawnBroadcast = null;
 }
 
 function detachSessionFromRoom(session, reason = "leave") {
@@ -3283,6 +3291,7 @@ function resetTransportForReconnect(session, reason) {
   session.health = playerRuntimeStats(null).maxHealth;
   session.energy = playerRuntimeStats(null).maxEnergy;
   session.dead = false;
+  session.pendingSpawnBroadcast = null;
   session.kills = 0;
   session.deaths = 0;
   session.points = 0;
@@ -3877,11 +3886,16 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (eventCode === 100) {
     const team = getTeamFromEventData(parsed, normalizeTeamForRoom(session));
-    session.spawned = true;
+    const respawnAfterDeath = Boolean(session.dead);
     session.lastGameStateResponseAt = 0;
     session.spawnRetry = null;
     clearJoinRoomTimers(session);
     const response = buildSpawnEvent(session, team, "client-request");
+    if (respawnAfterDeath) {
+      session.pendingSpawnBroadcast = { payload: response, channel };
+      console.log(`[sync] spawn actor=${session.actorId} peer-broadcast=deferred-until-move reason=respawn`);
+      return [response];
+    }
     broadcastSpawnToRoom(session, response, channel);
     return [response, ...buildPeerSpawnReplayEvents(session)];
   }
@@ -3905,6 +3919,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     if (DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) {
       console.log(`[event] move actor=${session.actorId} count=${session.room.moves}${point ? ` pos=${fmtPoint(point)}` : ""}`);
+    }
+    if (session.pendingSpawnBroadcast?.payload) {
+      const pending = session.pendingSpawnBroadcast;
+      session.pendingSpawnBroadcast = null;
+      const spawnPeers = broadcastSpawnToRoom(session, pending.payload, pending.channel ?? channel);
+      console.log(`[sync] deferred-spawn actor=${session.actorId} peers=${spawnPeers} reason=first-move-after-respawn`);
     }
     if (session.room.moves === 1 || session.room.moves % 250 === 0) {
       postBattleEvent(session, "move", { eventData: { count: session.room.moves } });
@@ -4005,6 +4025,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       knownActorIds: new Set(),
       actorJoinAnnouncedAt: new Map(),
       peerSpawnTimers: new Set(),
+      pendingSpawnBroadcast: null,
       lastChannel: 0,
       port,
       remoteKey: `${rinfo.address}:${rinfo.port}`,
