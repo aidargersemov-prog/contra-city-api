@@ -9,13 +9,14 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-28-peer-full-loadout-v80";
+const BUILD_ID = "battle-server-2026-05-28-spectator-unreliable-move-v81";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
 const AUTO_SPAWN_RETRY_MS = Number(process.env.AUTO_SPAWN_RETRY_MS || 250);
 const SPAWN_NO_MOVE_WARN_MS = Math.max(0, Number(process.env.SPAWN_NO_MOVE_WARN_MS || 2500));
 const SPAWN_SELF_RETRY_DELAYS_MS = parseDelayList(process.env.SPAWN_SELF_RETRY_DELAYS_MS || "650,1400");
+const SPECTATOR_MOVE_UNRELIABLE = process.env.SPECTATOR_MOVE_UNRELIABLE !== "0";
 const DEBUG_PACKETS = process.env.DEBUG_PACKETS === "1";
 const DEBUG_MOVE_PACKETS = process.env.DEBUG_MOVE_PACKETS === "1";
 const LOG_SEND_PACKETS = DEBUG_PACKETS || process.env.LOG_SEND_PACKETS === "1";
@@ -362,6 +363,16 @@ function makeReliable(seq, payload, channel = 0) {
     Buffer.from([0x06, channel, 0x01, 0x04]),
     u32(12 + payload.length),
     u32(seq),
+    payload,
+  ]);
+}
+
+function makeUnreliable(lastReliableSeq, unreliableSeq, payload, channel = 0) {
+  return Buffer.concat([
+    Buffer.from([0x07, channel, 0x00, 0x04]),
+    u32(16 + payload.length),
+    u32(Math.max(0, Number(lastReliableSeq) || 0)),
+    u32(unreliableSeq),
     payload,
   ]);
 }
@@ -2012,7 +2023,7 @@ function mandatoryLoadoutActorCandidates(incomingActor, profile) {
 }
 
 function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null, mode = "event") {
-  const maxSlots = JOIN_LOADOUT_SLOT_LIMIT;
+  const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
   let fallback = null;
   for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile)) {
     const eventBytes = actorJoinPacketBytes(actorId, candidate.raw, channel);
@@ -2182,10 +2193,56 @@ function sendReliableCommandToSession(targetSession, reliableCommand) {
   return true;
 }
 
+function makeSessionUnreliableCommand(session, payload, channel = 0) {
+  const targetChannel = reliableChannelForSession(session, channel);
+  const lastReliableSeq = Math.max(0, (Number(session.serverSeq) || 0) - 1);
+  session.unreliableSeq = ((Number(session.unreliableSeq) || 0) + 1) >>> 0;
+  return {
+    channel: targetChannel,
+    seq: session.unreliableSeq,
+    command: makeUnreliable(lastReliableSeq, session.unreliableSeq, payload, targetChannel),
+  };
+}
+
+function sendUnreliableToSession(targetSession, payload, channel = 0) {
+  if (!targetSession?.socket || !targetSession?.rinfo || !payload) return false;
+  const command = makeSessionUnreliableCommand(targetSession, payload, channel);
+  try {
+    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, [command.command]);
+  } catch (error) {
+    console.log(`[warn] peer-send-unreliable failed actor=${targetSession.actorId || "?"} seq=${command.seq ?? "?"} reason=${error.message}`);
+    return false;
+  }
+  return true;
+}
+
 function canReceiveLivePeerEvent(playerSession) {
   if (!playerSession?.gameStateRequested) return false;
   if (playerSession.waitingSelfSpawnMove) return false;
   return Boolean(playerSession.moveSeen);
+}
+
+function canReceiveSpectatorMove(playerSession) {
+  if (!SPECTATOR_MOVE_UNRELIABLE) return false;
+  if (!playerSession?.gameStateRequested) return false;
+  if (playerSession.waitingSelfSpawnMove) return false;
+  return !playerSession.moveSeen;
+}
+
+function broadcastMoveToRoom(sourceSession, payload, channel = 0) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !payload) return { total: 0, reliable: 0, spectator: 0 };
+  let reliable = 0;
+  let spectator = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession) continue;
+    if (canReceiveLivePeerEvent(playerSession)) {
+      if (sendReliableToSession(playerSession, payload, channel)) reliable += 1;
+    } else if (canReceiveSpectatorMove(playerSession)) {
+      if (sendUnreliableToSession(playerSession, payload, channel)) spectator += 1;
+    }
+  }
+  return { total: reliable + spectator, reliable, spectator };
 }
 
 function broadcastReliableToRoom(sourceSession, payload, channel = 0, reason = "sync", options = {}) {
@@ -3458,6 +3515,7 @@ function resetTransportForReconnect(session, reason) {
   detachSessionFromRoom(session, reason);
   resetReliableDedupe(session, reason, { bumpGeneration: true });
   session.serverSeq = 0;
+  session.unreliableSeq = 0;
   session.verifySeq = null;
   session.seenVerify = false;
   session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
@@ -4132,12 +4190,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       postBattleEvent(session, "move", { eventData: { count: session.room.moves } });
     }
     const move = buildActorDataEvent(session, 99, parsed);
-    const movePeers = broadcastReliableToRoom(session, move, channel, "", {
-      requireGameState: true,
-      requireLiveReady: true,
-    });
-    if ((DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) && movePeers > 0) {
-      console.log(`[sync] move actor=${session.actorId} peers=${movePeers} count=${session.room.moves}`);
+    const movePeers = broadcastMoveToRoom(session, move, channel);
+    if ((DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) && movePeers.total > 0) {
+      console.log(`[sync] move actor=${session.actorId} peers=${movePeers.total} reliable=${movePeers.reliable} spectator=${movePeers.spectator} count=${session.room.moves}`);
     }
     const pickup = buildProximityPickItemEvent(session, point);
     if (pickup) broadcastReliableToRoom(session, pickup, channel, "item-pick", { requireLiveReady: true });
@@ -4206,6 +4261,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       // reliable sequence 1, otherwise the Unity client ACKs it but waits for
       // missing sequence 1 forever.
       serverSeq: 0,
+      unreliableSeq: 0,
       verifySeq: null,
       seenVerify: false,
       room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
@@ -4389,7 +4445,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=blocked-reliable peerLiveGate=move-seen-only shotWeaponConfirm=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=${SPECTATOR_MOVE_UNRELIABLE ? "unreliable-move" : "blocked"} peerLiveGate=move-seen-only spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} shotWeaponConfirm=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
