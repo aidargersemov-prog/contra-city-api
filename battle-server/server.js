@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-28-respawn-move-gate-v73";
+const BUILD_ID = "battle-server-2026-05-28-lethal-delivery-v74";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2793,6 +2793,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     crit: false,
     killed: false,
     killEvent: null,
+    killedSession: null,
     summary: `${Number.isFinite(targetActorId) ? targetActorId : "?"}:skip`,
   };
 
@@ -2869,11 +2870,11 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     clearSpawnMoveWarningTimer(targetSession);
     clearSessionWeaponReloadTimers(targetSession);
     clearPeerSpawnTimers(targetSession);
-    targetSession.moveSeen = false;
     targetSession.spawnRetry = null;
     targetSession.pendingSpawnBroadcast = null;
     const impulse = shotImpulseVector(data, shooter, targetSession);
     result.killed = true;
+    result.killedSession = targetSession;
     result.killEvent = makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse);
     result.summary += ":kill=1";
     postBattleEvent(targetSession, "death", {
@@ -2895,6 +2896,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
   const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
   const replacements = new Map();
   const killEvents = [];
+  const killedSessions = new Set();
   let shotCrit = false;
   const summaries = [];
 
@@ -2904,6 +2906,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
       const damage = applyShotDamageToTarget(session, data, damageState, weaponType, launchMode, target, index);
       shotCrit = shotCrit || damage.crit;
       if (damage.killEvent) killEvents.push(damage.killEvent);
+      if (damage.killedSession) killedSessions.add(damage.killedSession);
       summaries.push(damage.summary);
       return hashtableBodyWithReplacements(target, new Map([
         [92, rawDamageShort(damage.healthDamage)],
@@ -2922,6 +2925,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
       { key: 245, value: hashtableRawWithReplacements(data, replacements) },
     ]),
     killEvents,
+    killedSessions: Array.from(killedSessions),
     summary: summaries.length ? ` damage=${summaries.join(",")}` : "",
   };
 }
@@ -2948,6 +2952,14 @@ function buildShotEvent(session, parsed) {
   const response = buildShotDamagePayload(session, data, state, weaponType, launchMode);
   console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${response.summary}`);
   return response;
+}
+
+function gateKilledSessionsAfterDelivery(response) {
+  for (const targetSession of response?.killedSessions || []) {
+    if (!targetSession) continue;
+    targetSession.moveSeen = false;
+    console.log(`[sync] death-gate actor=${targetSession.actorId} reason=kill-delivered`);
+  }
 }
 
 function buildPickItemEvent(session, parsed) {
@@ -3961,6 +3973,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       for (const killEvent of response.killEvents || []) {
         broadcastReliableToRoom(session, killEvent, channel, "kill", { requireMoveSeen: true });
       }
+      gateKilledSessionsAfterDelivery(response);
     }
     return response?.shotEvent ? [response.shotEvent, ...(response.killEvents || [])] : [];
   }
