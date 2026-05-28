@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-28-spectator-live-gate-v75";
+const BUILD_ID = "battle-server-2026-05-28-shot-weapon-confirm-v76";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2315,6 +2315,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   session.dead = false;
   session.moveSeen = false;
   session.waitingSelfSpawnMove = true;
+  invalidatePeerWeaponConfirm(session.room, session.actorId);
   session.health = stats.maxHealth;
   session.energy = stats.maxEnergy;
   const point = spawnPointFor(session, team);
@@ -2427,6 +2428,68 @@ function weaponStateByType(session, weaponType) {
     if (state.type === type) return state;
   }
   return null;
+}
+
+function weaponStateConfirmKey(state) {
+  if (!state) return "";
+  return `${state.slot}:${state.type}:${state.weaponId}:${state.systemName}`;
+}
+
+function buildWeaponChangePayloadFromState(state) {
+  if (!state) return null;
+  return rawHashtable([
+    { key: rawByte(78), value: rawInt(state.slot) },
+    { key: rawByte(89), value: rawByte(state.type) },
+  ]);
+}
+
+function buildWeaponChangeEventFromState(session, state) {
+  const payload = buildWeaponChangePayloadFromState(state);
+  if (!payload) return null;
+  return rawEvent(98, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: payload },
+  ]);
+}
+
+function buildShotWeaponConfirm(session, state) {
+  if (!state) return null;
+  const key = weaponStateConfirmKey(state);
+  if (!key) return null;
+  const event = buildWeaponChangeEventFromState(session, state);
+  return event ? { event, key, state } : null;
+}
+
+function invalidatePeerWeaponConfirm(room, actorId) {
+  if (!room?.players) return;
+  for (const playerSession of room.players.values()) {
+    playerSession?.peerWeaponConfirmKeys?.delete(Number(actorId));
+  }
+}
+
+function peerWeaponConfirmKnown(playerSession, actorId, key) {
+  return playerSession?.peerWeaponConfirmKeys?.get(Number(actorId)) === key;
+}
+
+function markPeerWeaponConfirm(playerSession, actorId, key) {
+  if (!playerSession.peerWeaponConfirmKeys) playerSession.peerWeaponConfirmKeys = new Map();
+  playerSession.peerWeaponConfirmKeys.set(Number(actorId), key);
+}
+
+function broadcastShotWeaponConfirmToRoom(sourceSession, confirm, channel = 0) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !confirm?.event || !confirm.key) return 0;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession) continue;
+    if (!playerSession.gameStateRequested || !playerSession.moveSeen) continue;
+    if (peerWeaponConfirmKnown(playerSession, sourceSession.actorId, confirm.key)) continue;
+    if (sendReliableToSession(playerSession, confirm.event, channel)) {
+      markPeerWeaponConfirm(playerSession, sourceSession.actorId, confirm.key);
+      sent += 1;
+    }
+  }
+  return sent;
 }
 
 function shotConsumesAmmo(weaponType, launchMode) {
@@ -2957,12 +3020,14 @@ function buildShotEvent(session, parsed) {
   }
 
   noteWeaponShot(session, parsed);
+  if (state) session.currentWeaponSlot = state.slot;
   const ammo = state
     ? (shotConsumesAmmo(state.type, launchMode)
       ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
       : ` interval=${gate.intervalMs}ms gate=${gate.reason}`)
     : "";
   const response = buildShotDamagePayload(session, data, state, weaponType, launchMode);
+  response.weaponConfirm = buildShotWeaponConfirm(session, state);
   console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${response.summary}`);
   return response;
 }
@@ -3049,7 +3114,10 @@ function buildWeaponChangeEvent(session, parsed) {
   if (!data?.raw) return null;
   const slot = numberOr(htGet(data, 78)?.value, 0);
   const state = weaponStateBySlot(session, slot);
-  if (state) session.currentWeaponSlot = slot;
+  if (state) {
+    session.currentWeaponSlot = slot;
+    invalidatePeerWeaponConfirm(session.room, session.actorId);
+  }
   console.log(`[event] weapon-change actor=${session.actorId}${describeWeaponEventData(data)}${state ? ` name=${state.systemName}` : ""}`);
   return rawEvent(98, [
     { key: 254, value: rawInt(session.actorId) },
@@ -3281,6 +3349,7 @@ function resetSessionRoomProgress(session) {
   session.lastGameStateResponseAt = 0;
   session.knownActorIds = new Set();
   session.actorJoinAnnouncedAt = new Map();
+  session.peerWeaponConfirmKeys = new Map();
   session.team = -1;
   session.lastTransform = null;
   session.pendingSpawnBroadcast = null;
@@ -3315,6 +3384,7 @@ function resetTransportForReconnect(session, reason) {
   session.actorJoinParam = null;
   session.currentWeaponSlot = 1;
   session.weaponStates = makeWeaponRuntimeState(null);
+  session.peerWeaponConfirmKeys = new Map();
   session.health = playerRuntimeStats(null).maxHealth;
   session.energy = playerRuntimeStats(null).maxEnergy;
   session.dead = false;
@@ -3818,6 +3888,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.loadedProfile = profile;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
+    session.peerWeaponConfirmKeys = new Map();
     session.dead = false;
     session.kills = 0;
     session.deaths = 0;
@@ -3987,6 +4058,13 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   if (eventCode === 97) {
     const response = buildShotEvent(session, parsed);
     if (response?.shotEvent) {
+      if (response.weaponConfirm) {
+        const confirmPeers = broadcastShotWeaponConfirmToRoom(session, response.weaponConfirm, channel);
+        if (confirmPeers > 0) {
+          const state = response.weaponConfirm.state;
+          console.log(`[sync] shot-weapon-confirm actor=${session.actorId} peers=${confirmPeers} slot=${state.slot} type=${state.type} name=${state.systemName}`);
+        }
+      }
       broadcastReliableToRoom(session, response.shotEvent, channel, "shot", { requireMoveSeen: true });
       for (const killEvent of response.killEvents || []) {
         broadcastReliableToRoom(session, killEvent, channel, "kill", { requireMoveSeen: true });
@@ -4043,6 +4121,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       waitingSelfSpawnMove: false,
       currentWeaponSlot: 1,
       weaponStates: makeWeaponRuntimeState(null),
+      peerWeaponConfirmKeys: new Map(),
       spawnRetry: null,
       spawnMoveWarningTimer: null,
       joinSelfEventTimer: null,
@@ -4202,7 +4281,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=${ALLOW_PRESPAWN_SPECTATOR_LIVE ? "on" : "off"} peerLiveGate=spectator+spawn-handshake`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=${ALLOW_PRESPAWN_SPECTATOR_LIVE ? "on" : "off"} peerLiveGate=spectator+spawn-handshake shotWeaponConfirm=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
