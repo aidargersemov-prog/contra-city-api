@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-28-self-spawn-retry-v77";
+const BUILD_ID = "battle-server-2026-05-28-self-spawn-same-seq-v78";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -2137,6 +2137,27 @@ function sendReliableToSession(targetSession, payload, channel = 0) {
   return sendReliablePayloadsToSession(targetSession, [payload], channel);
 }
 
+function makeSessionReliableCommand(session, payload, channel = 0) {
+  const targetChannel = reliableChannelForSession(session, channel);
+  const seq = session.serverSeq++;
+  return {
+    channel: targetChannel,
+    seq,
+    command: makeReliable(seq, payload, targetChannel),
+  };
+}
+
+function sendReliableCommandToSession(targetSession, reliableCommand) {
+  if (!targetSession?.socket || !targetSession?.rinfo || !reliableCommand?.command) return false;
+  try {
+    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, [reliableCommand.command]);
+  } catch (error) {
+    console.log(`[warn] peer-send failed actor=${targetSession.actorId || "?"} seq=${reliableCommand.seq ?? "?"} reason=${error.message}`);
+    return false;
+  }
+  return true;
+}
+
 function canReceiveLivePeerEvent(playerSession) {
   if (!playerSession?.gameStateRequested) return false;
   if (playerSession.waitingSelfSpawnMove) return false;
@@ -3351,8 +3372,8 @@ function clearSpawnSelfRetryTimers(session) {
   session.spawnSelfRetryTimers.clear();
 }
 
-function queueSelfSpawnRetry(session, spawnPayload, channel, spawnSeq, reason) {
-  if (!SPAWN_SELF_RETRY_DELAYS_MS.length || !session?.room || !spawnPayload) return;
+function queueSelfSpawnRetry(session, reliableCommand, spawnSeq, reason) {
+  if (!SPAWN_SELF_RETRY_DELAYS_MS.length || !session?.room || !reliableCommand?.command) return;
   const actorId = session.actorId;
   const room = session.room;
   const timerSet = ensureSpawnSelfRetryTimerSet(session);
@@ -3366,8 +3387,8 @@ function queueSelfSpawnRetry(session, spawnPayload, channel, spawnSeq, reason) {
       if (room.players?.get(actorId) !== session) return;
       if (session.spawnSeq !== spawnSeq) return;
       if (!session.spawned || session.dead || session.moveSeen || !session.waitingSelfSpawnMove) return;
-      if (sendReliableToSession(session, spawnPayload, channel)) {
-        console.log(`[sync] spawn-self-retry actor=${actorId} delay=${waitMs}ms reason=${reason}`);
+      if (sendReliableCommandToSession(session, reliableCommand)) {
+        console.log(`[sync] spawn-self-retry actor=${actorId} seq=${reliableCommand.seq} delay=${waitMs}ms reason=${reason}`);
       }
     }, waitMs);
     timerSet.add(timer);
@@ -4038,14 +4059,18 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.spawnSeq = (session.spawnSeq || 0) + 1;
     const spawnSeq = session.spawnSeq;
     const response = buildSpawnEvent(session, team, "client-request");
-    queueSelfSpawnRetry(session, response, channel, spawnSeq, respawnAfterDeath ? "respawn" : "spawn");
+    const selfSpawnCommand = makeSessionReliableCommand(session, response, channel);
+    if (sendReliableCommandToSession(session, selfSpawnCommand)) {
+      console.log(`[sync] spawn-self actor=${session.actorId} seq=${selfSpawnCommand.seq} reason=${respawnAfterDeath ? "respawn" : "spawn"}`);
+    }
+    queueSelfSpawnRetry(session, selfSpawnCommand, spawnSeq, respawnAfterDeath ? "respawn" : "spawn");
     if (respawnAfterDeath) {
       session.pendingSpawnBroadcast = { payload: response, channel };
       console.log(`[sync] spawn actor=${session.actorId} peer-broadcast=deferred-until-move reason=respawn`);
-      return [response];
+      return [];
     }
     broadcastSpawnToRoom(session, response, channel);
-    return [response, ...buildPeerSpawnReplayEvents(session)];
+    return buildPeerSpawnReplayEvents(session);
   }
 
   if (eventCode === 99) {
