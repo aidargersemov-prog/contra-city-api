@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-28-spawn-critical-live-gate-v79";
+const BUILD_ID = "battle-server-2026-05-28-peer-full-loadout-v80";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -849,7 +849,7 @@ function makeRoomActorListRaw(room, excludeSession = null) {
   if (!room?.players?.size) return makeEmptyActorListRaw();
   const entries = [];
   for (const [actorId, playerSession] of room.players.entries()) {
-    const playerActorRaw = playerSession?.peerActorRaw || playerSession?.actorRaw;
+    const playerActorRaw = playerSession?.joinActorRaw || playerSession?.peerActorRaw || playerSession?.actorRaw;
     if (!playerSession || playerSession === excludeSession || !playerActorRaw) continue;
     entries.push({
       key: rawInt(actorId),
@@ -1253,7 +1253,7 @@ function weaponAdditionalValuesRaw(item = {}) {
   return entries.length ? rawHashtable(entries) : null;
 }
 
-function weaponBodyFromItem(item = {}, index = 0, profile = null) {
+function weaponBodyFromItem(item = {}, index = 0, profile = null, options = {}) {
   const fallback = defaultWeaponForSlot(index + 1);
   const slot = weaponSlot({ ...fallback, ...(item || {}) }, index);
   const merged = mergedWeaponForSlot(item, fallback, slot, profile);
@@ -1289,8 +1289,10 @@ function weaponBodyFromItem(item = {}, index = 0, profile = null) {
     );
   }
 
-  const additional = weaponAdditionalValuesRaw(merged);
-  if (additional) entries.push({ key: rawByte(79), value: additional });
+  if (options.includeWeaponAdditional !== false) {
+    const additional = weaponAdditionalValuesRaw(merged);
+    if (additional) entries.push({ key: rawByte(79), value: additional });
+  }
 
   return rawHashtableBody(entries);
 }
@@ -1660,7 +1662,7 @@ function makeWeaponDictionaryRaw(profile = null, slotLimit = JOIN_LOADOUT_SLOT_L
 
   return rawTypedDictionary(0x69, 0x68, joinSlots.map(([slot, item]) => ({
     keyBody: i32(slot - 1),
-    valueBody: weaponBodyFromItem(item, slot - 1, profile),
+    valueBody: weaponBodyFromItem(item, slot - 1, profile, options),
   })));
 }
 
@@ -1732,11 +1734,16 @@ function makeActorInfoRaw(profile = null, options = {}) {
     { key: rawByte(92), value: rawInt(stats.jump) },
     { key: rawByte(76), value: rawInt(numberOr(profile?.level, Number(process.env.DEFAULT_PLAYER_LEVEL || 1))) },
     { key: rawByte(36), value: rawBool(process.env.DEFAULT_PLAYER_PREMIUM === "1") },
-    { key: rawByte(6), value: rawString("") },
-    { key: rawByte(5), value: rawInt(0) },
   ];
 
-  if (INCLUDE_JOIN_WEARS) {
+  if (options.includeActorOptionalFields !== false) {
+    entries.push(
+      { key: rawByte(6), value: rawString("") },
+      { key: rawByte(5), value: rawInt(0) },
+    );
+  }
+
+  if (options.includeWears !== false && INCLUDE_JOIN_WEARS) {
     const wears = makeWearDictionaryRaw(profile);
     if (wears) entries.push({ key: rawByte(30), value: wears });
   }
@@ -1989,30 +1996,40 @@ function actorListJoinResponsePacketBytes(actorId, actorRaw, roomRaw, channel = 
   return 12 + makeReliable(0, payload, channel).length;
 }
 
-function fitPeerActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null) {
+function mandatoryLoadoutActorCandidates(incomingActor, profile) {
+  const maxSlots = JOIN_LOADOUT_SLOT_LIMIT;
+  return [
+    { label: "full", options: { weaponSlotLimit: maxSlots, logCompact: false } },
+    { label: "no-wears", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false } },
+    { label: "no-wears-no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false } },
+    { label: "required-actor", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+  ].map((candidate) => ({
+    label: candidate.label,
+    slotLimit: maxSlots,
+    raw: makeActorDataRaw(incomingActor, profile, candidate.options),
+  }));
+}
+
+function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null, mode = "event") {
   const maxSlots = JOIN_LOADOUT_SLOT_LIMIT;
   let fallback = null;
-  for (let slotLimit = maxSlots; slotLimit >= 1; slotLimit -= 1) {
-    const raw = makeActorDataRaw(incomingActor, profile, {
-      weaponSlotLimit: slotLimit,
-      logCompact: false,
-    });
-    const eventBytes = actorJoinPacketBytes(actorId, raw, channel);
-    const joinBytes = actorListJoinResponsePacketBytes(actorId, raw, roomRaw, channel);
-    const bytes = Math.max(eventBytes, joinBytes);
-    const candidate = { raw, slotLimit, bytes, eventBytes, joinBytes };
-    fallback = candidate;
+  for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile)) {
+    const eventBytes = actorJoinPacketBytes(actorId, candidate.raw, channel);
+    const joinBytes = actorListJoinResponsePacketBytes(actorId, candidate.raw, roomRaw, channel);
+    const bytes = mode === "join" ? joinBytes : eventBytes;
+    const result = { ...candidate, bytes, eventBytes, joinBytes };
+    fallback = result;
     if (!ACTOR_JOIN_MAX_PACKET_BYTES || bytes <= ACTOR_JOIN_MAX_PACKET_BYTES) {
-      if (slotLimit < maxSlots) {
-        console.log(`[loadout] peer actor compact actor=${actorId} slots=${slotLimit}/${maxSlots} bytes=${bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${eventBytes} join=${joinBytes}`);
+      if (candidate.label !== "full") {
+        console.log(`[loadout] ${mode} actor compact actor=${actorId} profile=${candidate.label} slots=${candidate.slotLimit}/${maxSlots} bytes=${bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${eventBytes} join=${joinBytes}`);
       }
-      return candidate;
+      return result;
     }
   }
   if (fallback && ACTOR_JOIN_MAX_PACKET_BYTES) {
-    console.log(`[warn] peer actor payload over budget actor=${actorId} slots=${fallback.slotLimit}/${maxSlots} bytes=${fallback.bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${fallback.eventBytes} join=${fallback.joinBytes}`);
+    console.log(`[warn] ${mode} actor payload over budget actor=${actorId} profile=${fallback.label} slots=${fallback.slotLimit}/${maxSlots} bytes=${fallback.bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${fallback.eventBytes} join=${fallback.joinBytes}`);
   }
-  return fallback || { raw: rawHashtable([]), slotLimit: 0, bytes: actorJoinPacketBytes(actorId, rawHashtable([]), channel) };
+  return fallback || { raw: rawHashtable([]), label: "empty", slotLimit: 0, bytes: actorJoinPacketBytes(actorId, rawHashtable([]), channel) };
 }
 
 function updateActorWireData(session, incomingActor, profile, channel = 0) {
@@ -2020,10 +2037,16 @@ function updateActorWireData(session, incomingActor, profile, channel = 0) {
   session.actorRaw = makeActorDataRaw(incomingActor, profile, {
     weaponSlotLimit: JOIN_LOADOUT_SLOT_LIMIT,
   });
-  const peerActor = fitPeerActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw);
+  const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event");
+  const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join");
   session.peerActorRaw = peerActor.raw;
   session.peerActorLoadoutSlots = peerActor.slotLimit;
   session.peerActorRawBytes = peerActor.bytes;
+  session.peerActorProfile = peerActor.label;
+  session.joinActorRaw = joinActor.raw;
+  session.joinActorLoadoutSlots = joinActor.slotLimit;
+  session.joinActorRawBytes = joinActor.bytes;
+  session.joinActorProfile = joinActor.label;
 }
 
 function makeGameStateRaw(session) {
@@ -3442,6 +3465,11 @@ function resetTransportForReconnect(session, reason) {
   session.peerActorRaw = null;
   session.peerActorRawBytes = 0;
   session.peerActorLoadoutSlots = 0;
+  session.peerActorProfile = "";
+  session.joinActorRaw = null;
+  session.joinActorRawBytes = 0;
+  session.joinActorLoadoutSlots = 0;
+  session.joinActorProfile = "";
   session.actorJoinParam = null;
   session.currentWeaponSlot = 1;
   session.weaponStates = makeWeaponRuntimeState(null);
@@ -3981,7 +4009,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.room.players.set(session.actorId, session);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
-    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerPacket=${session.peerActorRawBytes || 0} roomRaw=${session.roomRaw?.length || 0}`);
+    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinPacket=${session.joinActorRawBytes || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
       waitForProfile: profileSource === "fallback",
@@ -4185,6 +4213,11 @@ async function handleUdp(port, socket, msg, rinfo) {
       peerActorRaw: null,
       peerActorRawBytes: 0,
       peerActorLoadoutSlots: 0,
+      peerActorProfile: "",
+      joinActorRaw: null,
+      joinActorRawBytes: 0,
+      joinActorLoadoutSlots: 0,
+      joinActorProfile: "",
       actorJoinParam: null,
       team: -1,
       spawned: false,
@@ -4355,7 +4388,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=blocked-reliable peerLiveGate=move-seen-only shotWeaponConfirm=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=blocked-reliable peerLiveGate=move-seen-only shotWeaponConfirm=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
