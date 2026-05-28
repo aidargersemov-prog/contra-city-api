@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-25-shot-context-capture-v71";
+const BUILD_ID = "battle-server-2026-05-28-server-damage-v72";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -58,6 +58,15 @@ const ENABLE_MAP_PICKUPS = process.env.ENABLE_MAP_PICKUPS === "1";
 const ITEM_RESPAWN_MS = Math.max(0, Number(process.env.ITEM_RESPAWN_MS || 30000));
 const ITEM_PICKUP_RADIUS = Math.max(1, Number(process.env.ITEM_PICKUP_RADIUS || 8));
 const REQUIRE_PICKUP_BENEFIT = process.env.REQUIRE_PICKUP_BENEFIT === "1";
+const ENABLE_BATTLE_DAMAGE = process.env.ENABLE_BATTLE_DAMAGE !== "0";
+const DAMAGE_SHORT_RANGE = Math.max(1, Number(process.env.DAMAGE_SHORT_RANGE || 30));
+const DAMAGE_MEDIUM_RANGE = Math.max(DAMAGE_SHORT_RANGE, Number(process.env.DAMAGE_MEDIUM_RANGE || 85));
+const DAMAGE_HEAD_MULTIPLIER = Math.max(0, Number(process.env.DAMAGE_HEAD_MULTIPLIER || 2));
+const DAMAGE_ENGINE_MULTIPLIER = Math.max(0, Number(process.env.DAMAGE_ENGINE_MULTIPLIER || 1.25));
+const DAMAGE_CRIT_MULTIPLIER = Math.max(1, Number(process.env.DAMAGE_CRIT_MULTIPLIER || 1.5));
+const DAMAGE_EXPLOSION_FULL_RADIUS = Math.max(0, Number(process.env.DAMAGE_EXPLOSION_FULL_RADIUS || 6.5));
+const DAMAGE_EXPLOSION_ZERO_RADIUS = Math.max(DAMAGE_EXPLOSION_FULL_RADIUS + 0.1, Number(process.env.DAMAGE_EXPLOSION_ZERO_RADIUS || 20));
+const DAMAGE_MAX_PROTECTION_PERCENT = Math.max(0, Math.min(100, Number(process.env.DAMAGE_MAX_PROTECTION_PERCENT || 95)));
 const BIKER_SET_HEALTH_FLOOR = Number(process.env.BIKER_SET_HEALTH_FLOOR || 170);
 const BIKER_SET_SPEED_FLOOR = Number(process.env.BIKER_SET_SPEED_FLOOR || 0);
 const BIKER_SET_WEAPON_SPEED_BONUS = Number(process.env.BIKER_SET_WEAPON_SPEED_BONUS || 0);
@@ -455,6 +464,10 @@ function rawHashtable(entries) {
   return Buffer.concat([Buffer.from([0x68]), rawHashtableBody(entries)]);
 }
 
+function rawHashtableFromBody(body) {
+  return Buffer.concat([Buffer.from([0x68]), body]);
+}
+
 function rawHashtableBody(entries) {
   return Buffer.concat([
     u16(entries.length),
@@ -475,6 +488,15 @@ function rawTypedDictionary(keyType, valueType, entries) {
     Buffer.from([0x44, keyType, valueType]),
     u16(entries.length),
     ...entries.flatMap((entry) => [entry.keyBody, entry.valueBody]),
+  ]);
+}
+
+function rawTypedArray(itemType, itemBodies) {
+  return Buffer.concat([
+    Buffer.from([0x79]),
+    u16(itemBodies.length),
+    Buffer.from([itemType & 0xff]),
+    ...itemBodies,
   ]);
 }
 
@@ -739,6 +761,25 @@ function boolOr(value, fallback = false) {
   if (["true", "1", "yes", "on"].includes(text)) return true;
   if (["false", "0", "no", "off"].includes(text)) return false;
   return fallback;
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, number));
+}
+
+function hashStringToU32(value) {
+  const text = String(value ?? "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+  }
+  return hash >>> 0;
+}
+
+function deterministicUnit(...parts) {
+  return hashStringToU32(parts.join("|")) / 0x100000000;
 }
 
 function roomSettingsFrom(rawRoom) {
@@ -1711,6 +1752,29 @@ function getRawValue(parsedHashtable, wantedKey) {
   return null;
 }
 
+function hashtableBodyWithReplacements(parsedHashtable, replacements = new Map()) {
+  const entries = [];
+  const used = new Set();
+  for (const entry of parsedHashtable?.value?.entries || []) {
+    const keyValue = entry.key.value;
+    if (replacements.has(keyValue)) {
+      entries.push({ key: entry.key.raw, value: replacements.get(keyValue) });
+      used.add(keyValue);
+    } else {
+      entries.push({ key: entry.key.raw, value: entry.value.raw });
+    }
+  }
+  for (const [keyValue, rawValue] of replacements.entries()) {
+    if (used.has(keyValue)) continue;
+    entries.push({ key: rawByte(keyValue), value: rawValue });
+  }
+  return rawHashtableBody(entries);
+}
+
+function hashtableRawWithReplacements(parsedHashtable, replacements = new Map()) {
+  return rawHashtableFromBody(hashtableBodyWithReplacements(parsedHashtable, replacements));
+}
+
 function actorCredentials(incomingActor) {
   const authId = Number(htGet(incomingActor, 241)?.value || process.env.DEFAULT_PLAYER_ID || 1);
   const authKey = String(htGet(incomingActor, 240)?.value || process.env.DEFAULT_PLAYER_KEY || "contra-revive-key");
@@ -2175,20 +2239,21 @@ function normalizeTeamForRoom(session, requestedTeam = null) {
 function makeScorePlayerRaw(session, team, options = {}) {
   const entries = [
     { key: rawByte(239), value: rawShort(team) },
-    { key: rawByte(69), value: rawInt(0) },
-    { key: rawByte(68), value: rawInt(0) },
-    { key: rawByte(67), value: rawInt(0) },
+    { key: rawByte(69), value: rawInt(numberOr(session.kills, 0)) },
+    { key: rawByte(68), value: rawInt(numberOr(session.deaths, 0)) },
+    { key: rawByte(67), value: rawInt(numberOr(session.points, 0)) },
     { key: rawByte(32), value: rawInt(0) },
     { key: rawByte(102), value: rawInt(0) },
     { key: rawByte(107), value: rawInt(0) },
   ];
 
-  if (options.includeAlive && session.lastTransform) {
+  if (options.includeAlive && !session.dead && session.lastTransform) {
+    const stats = sessionRuntimeStats(session);
     entries.push(
       { key: rawByte(101), value: rawBool(true) },
       { key: rawByte(237), value: makeTransformRaw(session.lastTransform) },
-      { key: rawByte(100), value: rawInt(session.health || 100) },
-      { key: rawByte(99), value: rawInt(session.energy || 100) },
+      { key: rawByte(100), value: rawInt(session.health ?? stats.maxHealth) },
+      { key: rawByte(99), value: rawInt(session.energy ?? stats.maxEnergy) },
     );
   }
 
@@ -2204,7 +2269,7 @@ function makeScoreRaw(session) {
   const playerEntries = [];
   const players = session.room?.players || new Map();
   for (const [actorId, playerSession] of players.entries()) {
-    if (!playerSession?.spawned) continue;
+    if (!playerSession?.spawned && !playerSession?.dead) continue;
     const rawTeam = Number(playerSession.team);
     const team = mode === 1 ? 0 : (rawTeam === 1 || rawTeam === 2 ? rawTeam : -1);
     if (team < 0) continue;
@@ -2237,6 +2302,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   const stats = sessionRuntimeStats(session);
   session.team = team;
   session.spawned = true;
+  session.dead = false;
   session.health = stats.maxHealth;
   session.energy = stats.maxEnergy;
   const point = spawnPointFor(session, team);
@@ -2256,7 +2322,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
 }
 
 function makeSpawnEventFromSession(session) {
-  if (!session?.spawned || !session.lastTransform) return null;
+  if (!session?.spawned || session.dead || !session.lastTransform) return null;
   const team = normalizeTeamForRoom(session, session.team);
   return rawEvent(100, [
     { key: 254, value: rawInt(session.actorId) },
@@ -2271,7 +2337,7 @@ function buildPeerSpawnReplayEvents(targetSession) {
 
   const events = [];
   for (const [actorId, playerSession] of room.players.entries()) {
-    if (!playerSession || playerSession === targetSession || !playerSession.spawned) continue;
+    if (!playerSession || playerSession === targetSession || !playerSession.spawned || playerSession.dead) continue;
     if (!sessionHasActorData(targetSession, actorId)) continue;
 
     const event = makeSpawnEventFromSession(playerSession);
@@ -2558,6 +2624,301 @@ function describeShotDamageContext(session, data, state) {
   return `${weapon} origin=${origin ? fmtVector(origin) : "unknown"} context=${context.join(",")}`;
 }
 
+const SHOT_TARGET_PLAYER = 1;
+const HIT_ZONE_ENGINE = 16;
+const HIT_ZONE_CABIN = 32;
+
+function rawDamageShort(value) {
+  return rawShort(Math.round(clampNumber(value, 0, 32767)));
+}
+
+function fallbackWeaponStateByType(weaponType) {
+  const type = Number(weaponType);
+  if (!Number.isFinite(type)) return null;
+  for (const state of makeWeaponRuntimeState(null).values()) {
+    if (state.type === type) return state;
+  }
+  return {
+    slot: 0,
+    index: 0,
+    weaponId: type,
+    type,
+    systemName: `weapon_type_${type}`,
+    crit: 0,
+    shortDamage: [1, 1],
+    mediumDamage: [1, 1],
+    longDamage: [1, 1],
+  };
+}
+
+function shotDamageState(session, weaponType, state) {
+  return state || fallbackWeaponStateByType(weaponType);
+}
+
+function weaponProtectionKey(weaponType) {
+  switch (Number(weaponType)) {
+    case 1:
+    case 2:
+      return "melee";
+    case 3:
+      return "pistol";
+    case 5:
+      return "flamer";
+    case 6:
+    case 102:
+      return "machinegun";
+    case 7:
+      return "shotgun";
+    case 8:
+      return "rocket";
+    case 9:
+    case 15:
+      return "grenade";
+    case 10:
+      return "sniper";
+    default:
+      return "automatic";
+  }
+}
+
+function isExplosiveDamageWeapon(weaponType, launchMode) {
+  const type = Number(weaponType);
+  const mode = Number(launchMode ?? 0);
+  return (type === 8 || type === 9 || type === 15) && mode === 2;
+}
+
+function explosionDistanceCoefficient(distance) {
+  if (!Number.isFinite(distance)) return 1;
+  if (distance <= DAMAGE_EXPLOSION_FULL_RADIUS) return 1;
+  if (distance >= DAMAGE_EXPLOSION_ZERO_RADIUS) return 0;
+  const span = DAMAGE_EXPLOSION_ZERO_RADIUS - DAMAGE_EXPLOSION_FULL_RADIUS;
+  return Math.max(0, Math.min(1, 1 - (distance - DAMAGE_EXPLOSION_FULL_RADIUS) / span));
+}
+
+function damageRangeName(distance) {
+  if (!Number.isFinite(distance)) return "medium";
+  if (distance <= DAMAGE_SHORT_RANGE) return "short";
+  if (distance <= DAMAGE_MEDIUM_RANGE) return "medium";
+  return "long";
+}
+
+function normalizedDamagePair(pair) {
+  const first = Math.max(0, numberOr(pair?.[0], 0));
+  const second = Math.max(0, numberOr(pair?.[1], first));
+  return first <= second ? [first, second] : [second, first];
+}
+
+function damagePairForRange(state, range) {
+  if (range === "short") return normalizedDamagePair(state?.shortDamage);
+  if (range === "long") return normalizedDamagePair(state?.longDamage);
+  return normalizedDamagePair(state?.mediumDamage);
+}
+
+function hitZoneMultiplier(hitZone) {
+  if (hitZone === HIT_ZONE_CABIN) return DAMAGE_HEAD_MULTIPLIER;
+  if (hitZone === HIT_ZONE_ENGINE) return DAMAGE_ENGINE_MULTIPLIER;
+  return 1;
+}
+
+function sessionCurrentHealthEnergy(session) {
+  const stats = sessionRuntimeStats(session);
+  return {
+    stats,
+    health: Math.round(clampNumber(session.health ?? stats.maxHealth, 0, stats.maxHealth)),
+    energy: Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, stats.maxEnergy)),
+  };
+}
+
+function friendlyFireBlocked(shooter, target) {
+  const mode = roomMode(shooter);
+  if (!isTeamMode(mode) || shooter.room?.friendlyFire) return false;
+  const shooterTeam = Number(shooter.team);
+  const targetTeam = Number(target.team);
+  return shooterTeam > 0 && targetTeam > 0 && shooterTeam === targetTeam;
+}
+
+function shotTimestampValue(data) {
+  const timestamp = htGet(data, 8)?.value;
+  return timestamp == null ? photonNow() : timestamp;
+}
+
+function shotImpulseVector(data, shooter, target) {
+  const origin = pointFromHashtable(htGet(data, 11)) || shooter.lastTransform;
+  const destination = target.lastTransform;
+  if (!origin || !destination) return null;
+  const dx = Number(destination.x) - Number(origin.x);
+  const dy = Number(destination.y) - Number(origin.y);
+  const dz = Number(destination.z) - Number(origin.z);
+  const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (!Number.isFinite(length) || length <= 0.0001) return null;
+  return { x: dx / length, y: dy / length, z: dz / length };
+}
+
+function makePointRaw(point) {
+  return rawHashtable([
+    { key: rawByte(1), value: rawFloat(point.x) },
+    { key: rawByte(2), value: rawFloat(point.y) },
+    { key: rawByte(3), value: rawFloat(point.z) },
+  ]);
+}
+
+function makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse) {
+  const current = sessionCurrentHealthEnergy(shooter);
+  const entries = [
+    { key: rawByte(94), value: rawInt(targetActorId) },
+    { key: rawByte(91), value: rawByte(weaponType) },
+    { key: rawByte(68), value: rawByte(hitZone) },
+    { key: rawByte(92), value: rawInt(current.health) },
+    { key: rawByte(93), value: rawInt(current.energy) },
+  ];
+  if (impulse) entries.push({ key: rawByte(54), value: makePointRaw(impulse) });
+  return rawEvent(95, [
+    { key: 254, value: rawInt(shooter.actorId) },
+    { key: 245, value: rawHashtable(entries) },
+  ]);
+}
+
+function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchMode, target, targetIndex) {
+  const descriptor = Number(htGet(target, 68)?.value ?? SHOT_TARGET_PLAYER) & 0xff;
+  const targetType = descriptor & 7;
+  const hitZone = descriptor & 48;
+  const targetActorId = Number(htGet(target, 94)?.value);
+  const result = {
+    descriptor,
+    targetActorId,
+    hitZone,
+    healthDamage: 0,
+    energyDamage: 0,
+    crit: false,
+    killed: false,
+    killEvent: null,
+    summary: `${Number.isFinite(targetActorId) ? targetActorId : "?"}:skip`,
+  };
+
+  if (!ENABLE_BATTLE_DAMAGE) {
+    result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:damage=off`;
+    return result;
+  }
+  if (targetType !== SHOT_TARGET_PLAYER || !Number.isFinite(targetActorId)) {
+    result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:non-player`;
+    return result;
+  }
+
+  const targetSession = shooter.room?.players?.get(targetActorId);
+  if (!targetSession || !targetSession.spawned || targetSession.dead) {
+    result.summary = `${targetActorId}:not-live`;
+    return result;
+  }
+  if (friendlyFireBlocked(shooter, targetSession)) {
+    result.summary = `${targetActorId}:friendly`;
+    return result;
+  }
+
+  const targetCurrent = sessionCurrentHealthEnergy(targetSession);
+  if (targetCurrent.health <= 0) {
+    targetSession.dead = true;
+    result.summary = `${targetActorId}:dead`;
+    return result;
+  }
+
+  const origin = pointFromHashtable(htGet(data, 11));
+  const actorDistance = distanceBetweenPoints(shooter.lastTransform, targetSession.lastTransform);
+  const originDistance = distanceBetweenPoints(origin, targetSession.lastTransform);
+  const explosive = isExplosiveDamageWeapon(weaponType, launchMode);
+  const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
+  const range = damageRangeName(damageDistance);
+  const [minDamage, maxDamage] = damagePairForRange(damageState, range);
+  const timestamp = shotTimestampValue(data);
+  const roll = deterministicUnit(BUILD_ID, "damage", shooter.actorId, targetActorId, targetIndex, weaponType, timestamp);
+  const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
+  const critChance = Math.max(0, numberOr(damageState?.crit, 0));
+  const crit = deterministicUnit(BUILD_ID, "crit", shooter.actorId, targetActorId, targetIndex, weaponType, timestamp) * 100 < critChance;
+  const explosionCoefficient = explosive ? explosionDistanceCoefficient(originDistance ?? actorDistance) : 1;
+  const protectionKey = weaponProtectionKey(weaponType);
+  const protection = clampNumber(
+    targetCurrent.stats.modifiers.protections?.[protectionKey] ?? 0,
+    0,
+    DAMAGE_MAX_PROTECTION_PERCENT
+  );
+  const totalDamage = Math.max(0, Math.round(
+    baseDamage *
+    explosionCoefficient *
+    hitZoneMultiplier(hitZone) *
+    (crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
+    (1 - protection / 100)
+  ));
+
+  const energyDamage = Math.min(targetCurrent.energy, totalDamage);
+  const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
+  targetSession.energy = targetCurrent.energy - energyDamage;
+  targetSession.health = targetCurrent.health - healthDamage;
+
+  result.energyDamage = energyDamage;
+  result.healthDamage = healthDamage;
+  result.crit = crit && totalDamage > 0;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.stats.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:prot=${protectionKey}:${protection}:crit=${result.crit ? 1 : 0}`;
+
+  if (targetCurrent.health > 0 && targetSession.health <= 0) {
+    targetSession.dead = true;
+    targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+    if (targetSession !== shooter) {
+      shooter.kills = numberOr(shooter.kills, 0) + 1;
+      shooter.points = numberOr(shooter.points, 0) + 1;
+    }
+    clearSpawnMoveWarningTimer(targetSession);
+    clearSessionWeaponReloadTimers(targetSession);
+    const impulse = shotImpulseVector(data, shooter, targetSession);
+    result.killed = true;
+    result.killEvent = makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse);
+    result.summary += ":kill=1";
+    postBattleEvent(targetSession, "death", {
+      killerActorId: shooter.actorId,
+      weaponType,
+      hitZone,
+      healthDamage,
+      energyDamage,
+    });
+  }
+
+  return result;
+}
+
+function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
+  const targets = htGet(data, 86);
+  const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  const replacements = new Map();
+  const killEvents = [];
+  let shotCrit = false;
+  const summaries = [];
+
+  if (targetItems?.length && targets.value.itemType === 0x68) {
+    const damageState = shotDamageState(session, weaponType, state);
+    const targetBodies = targetItems.map((target, index) => {
+      const damage = applyShotDamageToTarget(session, data, damageState, weaponType, launchMode, target, index);
+      shotCrit = shotCrit || damage.crit;
+      if (damage.killEvent) killEvents.push(damage.killEvent);
+      summaries.push(damage.summary);
+      return hashtableBodyWithReplacements(target, new Map([
+        [92, rawDamageShort(damage.healthDamage)],
+        [93, rawDamageShort(damage.energyDamage)],
+      ]));
+    });
+    replacements.set(86, rawTypedArray(0x68, targetBodies));
+  } else if (targets) {
+    summaries.push("targets=unparsed");
+  }
+
+  replacements.set(18, rawBool(shotCrit));
+  return {
+    shotEvent: rawEvent(97, [
+      { key: 254, value: rawInt(session.actorId) },
+      { key: 245, value: hashtableRawWithReplacements(data, replacements) },
+    ]),
+    killEvents,
+    summary: summaries.length ? ` damage=${summaries.join(",")}` : "",
+  };
+}
+
 function buildShotEvent(session, parsed) {
   const data = parsed?.params?.get(245);
   if (!data?.raw) return null;
@@ -2577,11 +2938,9 @@ function buildShotEvent(session, parsed) {
       ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
       : ` interval=${gate.intervalMs}ms gate=${gate.reason}`)
     : "";
-  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}`);
-  return rawEvent(97, [
-    { key: 254, value: rawInt(session.actorId) },
-    { key: 245, value: data.raw },
-  ]);
+  const response = buildShotDamagePayload(session, data, state, weaponType, launchMode);
+  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${response.summary}`);
+  return response;
 }
 
 function buildPickItemEvent(session, parsed) {
@@ -2877,6 +3236,7 @@ function queueSpawnNoMoveWarning(session, point, reason) {
 function resetSessionRoomProgress(session) {
   if (!session) return;
   session.spawned = false;
+  session.dead = false;
   session.moveSeen = false;
   session.spawnRetry = null;
   clearSpawnMoveWarningTimer(session);
@@ -2922,6 +3282,10 @@ function resetTransportForReconnect(session, reason) {
   session.weaponStates = makeWeaponRuntimeState(null);
   session.health = playerRuntimeStats(null).maxHealth;
   session.energy = playerRuntimeStats(null).maxEnergy;
+  session.dead = false;
+  session.kills = 0;
+  session.deaths = 0;
+  session.points = 0;
 }
 
 function removeDuplicatePlayerSessions(room, session) {
@@ -3416,6 +3780,15 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.loadedProfile = profile;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
+    session.dead = false;
+    session.kills = 0;
+    session.deaths = 0;
+    session.points = 0;
+    {
+      const stats = sessionRuntimeStats(session);
+      session.health = stats.maxHealth;
+      session.energy = stats.maxEnergy;
+    }
     session.room = ensureRoom(settings);
     session.roomRaw = makeRoomSettingsRaw(session.room);
     removeDuplicatePlayerSessions(session.room, session);
@@ -3514,6 +3887,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === 99) {
+    if (session.dead) {
+      if (DEBUG_MOVE_PACKETS) {
+        console.log(`[event] move ignored actor=${session.actorId} reason=dead`);
+      }
+      return [];
+    }
     session.spawned = true;
     session.moveSeen = true;
     session.spawnRetry = null;
@@ -3557,8 +3936,13 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (eventCode === 97) {
     const response = buildShotEvent(session, parsed);
-    if (response) broadcastReliableToRoom(session, response, channel, "shot", { requireMoveSeen: true });
-    return response ? [response] : [];
+    if (response?.shotEvent) {
+      broadcastReliableToRoom(session, response.shotEvent, channel, "shot", { requireMoveSeen: true });
+      for (const killEvent of response.killEvents || []) {
+        broadcastReliableToRoom(session, killEvent, channel, "kill", { requireMoveSeen: true });
+      }
+    }
+    return response?.shotEvent ? [response.shotEvent, ...(response.killEvents || [])] : [];
   }
 
   if (eventCode === 98) {
@@ -3603,6 +3987,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       actorJoinParam: null,
       team: -1,
       spawned: false,
+      dead: false,
       moveSeen: false,
       currentWeaponSlot: 1,
       weaponStates: makeWeaponRuntimeState(null),
@@ -3627,6 +4012,9 @@ async function handleUdp(port, socket, msg, rinfo) {
       playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
       health: playerRuntimeStats(null).maxHealth,
       energy: playerRuntimeStats(null).maxEnergy,
+      kills: 0,
+      deaths: 0,
+      points: 0,
     };
     session.roomRaw = makeRoomSettingsRaw(session.room);
     sessions.set(sessionId, session);
@@ -3761,7 +4149,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on peerLiveRequiresMove=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on peerLiveRequiresMove=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
