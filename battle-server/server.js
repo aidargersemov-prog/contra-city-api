@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-29-spectator-channel1-weapon-change-v84";
+const BUILD_ID = "battle-server-2026-05-29-peer-wear-priority-v85";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -1721,7 +1721,6 @@ function makeWearDictionaryRaw(profile = null) {
     valueBody: rawHashtableBody([
       { key: rawByte(99), value: rawString(stringOr(item.sn ?? item.sname, "")) },
       { key: rawByte(98), value: rawInt(numberOr(item.wt, wearType)) },
-      { key: rawByte(80), value: rawInt(itemId(item) || index) },
     ]),
   })));
 }
@@ -2047,6 +2046,8 @@ function mandatoryLoadoutActorCandidates(incomingActor, profile) {
   const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
   return [
     { label: "full", options: { weaponSlotLimit: maxSlots, logCompact: false } },
+    { label: "no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false } },
+    { label: "no-weapon-extra-no-actor-optional", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
     { label: "no-wears", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false } },
     { label: "no-wears-no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false } },
     { label: "required-actor", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
