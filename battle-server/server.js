@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api.onren
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-05-29-deferred-peer-wears-v87";
+const BUILD_ID = "battle-server-2026-05-30-dossier-battle-stats-v92";
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
@@ -42,6 +42,7 @@ const JOIN_LOADOUT_SLOT_LIMIT = Math.max(1, Math.min(7, Number(process.env.JOIN_
 const FULL_LOADOUT_SLOT_LIMIT = 7;
 const INCLUDE_WEAPON_LEGACY_FIELDS = process.env.INCLUDE_WEAPON_LEGACY_FIELDS === "1";
 const INCLUDE_JOIN_WEARS = process.env.INCLUDE_JOIN_WEARS !== "0";
+const INCLUDE_BATTLE_ENHANCERS = process.env.INCLUDE_BATTLE_ENHANCERS !== "0";
 const INCLUDE_JOIN_ACTOR_ECHO_FIELDS = process.env.INCLUDE_JOIN_ACTOR_ECHO_FIELDS === "1";
 const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1";
 const INCLUDE_PEERS_IN_GAMESTATE = process.env.INCLUDE_PEERS_IN_GAMESTATE === "1";
@@ -72,6 +73,7 @@ const DAMAGE_CRIT_MULTIPLIER = Math.max(1, Number(process.env.DAMAGE_CRIT_MULTIP
 const DAMAGE_EXPLOSION_FULL_RADIUS = Math.max(0, Number(process.env.DAMAGE_EXPLOSION_FULL_RADIUS || 6.5));
 const DAMAGE_EXPLOSION_ZERO_RADIUS = Math.max(DAMAGE_EXPLOSION_FULL_RADIUS + 0.1, Number(process.env.DAMAGE_EXPLOSION_ZERO_RADIUS || 20));
 const DAMAGE_MAX_PROTECTION_PERCENT = Math.max(0, Math.min(100, Number(process.env.DAMAGE_MAX_PROTECTION_PERCENT || 95)));
+const DAMAGE_MAX_HEAD_BONUS_PERCENT = Math.max(0, Number(process.env.DAMAGE_MAX_HEAD_BONUS_PERCENT || 500));
 const BIKER_SET_HEALTH_FLOOR = Number(process.env.BIKER_SET_HEALTH_FLOOR || 170);
 const BIKER_SET_SPEED_FLOOR = Number(process.env.BIKER_SET_SPEED_FLOOR || 0);
 const BIKER_SET_WEAPON_SPEED_BONUS = Number(process.env.BIKER_SET_WEAPON_SPEED_BONUS || 0);
@@ -1029,6 +1031,12 @@ const WEAR_VIEW_KEYS = [
   ["head", 9],
 ];
 
+const PASSIVE_BATTLE_ENHANCER_IDS = new Set([
+  1, 2, 3, 4, 5,
+  10, 11, 12,
+  30, 31, 32, 33, 34, 35, 36,
+]);
+
 const WEAPON_STAT_OVERRIDES = {
   ohca_basebalbat: {
     rt: 0,
@@ -1160,11 +1168,14 @@ const ABILITY_BONUS_LEVELS = {
   1: { armorFlat: [10, 20, 40, 60, 80] },
   2: { healthFlat: [10, 20, 30, 40, 50] },
   3: { speedPercent: [2, 4, 6, 8, 10] },
+  4: { damageReductionPercent: [2, 4, 6, 8, 10] },
   5: { weaponRapidityPercent: [2, 4, 6, 8, 10] },
   6: { weaponCritPercent: [5, 10, 15, 20, 25] },
   7: { weaponAmmoPercent: [10, 30, 40, 50, 60] },
   8: { weaponMinDamageFlat: [1, 2, 3, 4, 5] },
   9: { weaponMaxDamageFlat: [1, 2, 3, 4, 5] },
+  10: { weaponAccuracyFlat: [1, 2, 3, 4, 5] },
+  11: { weaponHeadDamagePercent: [5, 10, 15, 20, 25] },
 };
 
 const SET_BONUS_DEFINITIONS = [
@@ -1384,12 +1395,46 @@ function itemId(item) {
   return numberOr(item?.id ?? item?.w_id ?? item?.t_id ?? item?.e_id, 0);
 }
 
+function isActiveWorkshopWeaponUpgrade(item = {}) {
+  if (Number(item?.itype || 0) !== 1 || item?.u_id == null) return false;
+  const expiresAt = numberOr(item.eD, 0);
+  return expiresAt > Math.floor(Date.now() / 1000);
+}
+
+function workshopUpgradedWeaponStats(item = {}) {
+  const result = { ...item };
+  const ammo = numberOr(result.ammo, 0);
+  const ammoTotal = numberOr(result.ammo_tot, 0);
+  result.rap = Math.max(60, Math.round(numberOr(result.rap, 100) * 0.9));
+  result.dev = Math.max(0, Math.round(numberOr(result.dev, 0) * 0.9));
+  result.krit = numberOr(result.krit, 0) + 2;
+  result.smindam = Math.max(0, Math.round(numberOr(result.smindam, 0) * 1.1));
+  result.smaxdam = Math.max(result.smindam, Math.round(numberOr(result.smaxdam, 0) * 1.1));
+  result.mmindam = Math.max(0, Math.round(numberOr(result.mmindam, 0) * 1.1));
+  result.mmaxdam = Math.max(result.mmindam, Math.round(numberOr(result.mmaxdam, 0) * 1.1));
+  result.lmindam = Math.max(0, Math.round(numberOr(result.lmindam, 0) * 1.1));
+  result.lmaxdam = Math.max(result.lmindam, Math.round(numberOr(result.lmaxdam, 0) * 1.1));
+  result.ammo_tot = ammoTotal > 0 ? Math.max(ammo, Math.round(ammoTotal * 1.1)) : ammoTotal;
+  return result;
+}
+
+function inventoryWeaponForBattle(item = {}, baseWeaponsById = new Map()) {
+  if (item?.u_id == null || isActiveWorkshopWeaponUpgrade(item)) return item;
+  return baseWeaponsById.get(itemId(item)) || item;
+}
+
 function selectedWeapons(profile) {
   if (!profile) return null;
+  const defaultWeapons = profile.defaultWeapons || [];
+  const catalogWeapons = profile.catalogWeapons || [];
+  const baseWeaponsById = new Map([...defaultWeapons, ...catalogWeapons].map((item) => [itemId(item), item]));
+  const inventoryWeapons = (profile.inventory || [])
+    .filter((item) => Number(item.itype) === 1)
+    .map((item) => inventoryWeaponForBattle(item, baseWeaponsById));
   const weapons = [
-    ...(profile.defaultWeapons || []),
-    ...(profile.inventory || []).filter((item) => Number(item.itype) === 1),
-    ...(profile.catalogWeapons || []),
+    ...defaultWeapons,
+    ...catalogWeapons,
+    ...inventoryWeapons,
   ];
   const byId = new Map(weapons.map((item) => [itemId(item), item]));
   const bySlot = new Map(DEFAULT_LOADOUT_WEAPONS.map((item) => [Number(item.ws), item]));
@@ -1415,6 +1460,14 @@ function selectedWeapons(profile) {
     }
   }
   return selected.length ? selected : null;
+}
+
+function selectedWeaponUpgradeSummary(profile) {
+  const upgraded = (selectedWeapons(profile) || []).filter((item) => isActiveWorkshopWeaponUpgrade(item));
+  if (!upgraded.length) return "none";
+  return upgraded
+    .map((item) => `${weaponSlot(item)}:${itemId(item)}:${stringOr(item.sn ?? item.sname, "")}:u=${numberOr(item.u_id, 0)}:eD=${numberOr(item.eD, 0)}`)
+    .join(",");
 }
 
 function weaponSlotsForProfile(profile) {
@@ -1452,6 +1505,43 @@ function selectedWearSummary(profile) {
   if (!selected.length) return "none";
   return selected
     .map(({ item, wearType }) => `${wearType}:${itemId(item) || 0}:${stringOr(item.sn ?? item.sname, "")}`)
+    .join(",");
+}
+
+function enhancerTypeId(item = {}) {
+  return numberOr(item.e_id ?? item.eid ?? item.id, 0);
+}
+
+function enhancerExpiresAt(item = {}) {
+  return numberOr(item.eD ?? item.ed ?? item.expiresAt, 0);
+}
+
+function isInventoryEnhancerActive(item = {}, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const expiresAt = enhancerExpiresAt(item);
+  return expiresAt <= 0 || expiresAt > nowSeconds;
+}
+
+function selectedEnhancers(profile) {
+  if (!profile) return [];
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const byType = new Map();
+  for (const item of profile.inventory || []) {
+    if (Number(item.itype) !== 2) continue;
+    const enhancerType = enhancerTypeId(item);
+    if (!PASSIVE_BATTLE_ENHANCER_IDS.has(enhancerType)) continue;
+    if (!isInventoryEnhancerActive(item, nowSeconds)) continue;
+    if (!byType.has(enhancerType)) byType.set(enhancerType, item);
+  }
+  return Array.from(byType.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([enhancerType, item]) => ({ enhancerType, item }));
+}
+
+function selectedEnhancerSummary(profile) {
+  const selected = selectedEnhancers(profile);
+  if (!selected.length) return "none";
+  return selected
+    .map(({ enhancerType, item }) => `${enhancerType}:${itemId(item) || 0}:${stringOr(item.sn ?? item.sname ?? item.name, "")}:eD=${enhancerExpiresAt(item)}`)
     .join(",");
 }
 
@@ -1556,6 +1646,7 @@ function gameplayModifiersForProfile(profile = null) {
     healthPercent: 0,
     healthFloor: 0,
     armorFlat: 0,
+    damageReductionPercent: 0,
     speedPercent: 0,
     clientSpeedBonus: 0,
     clientSpeedFloor: 0,
@@ -1566,6 +1657,8 @@ function gameplayModifiersForProfile(profile = null) {
     weaponSpeedPercent: 0,
     weaponRapidityPercent: 0,
     weaponCritPercent: 0,
+    weaponHeadDamagePercent: 0,
+    weaponAccuracyFlat: 0,
     weaponAmmoPercent: 0,
     weaponMinDamageFlat: 0,
     weaponMaxDamageFlat: 0,
@@ -1580,10 +1673,13 @@ function gameplayModifiersForProfile(profile = null) {
     const index = level - 1;
     modifiers.healthFlat += numberOr(bonus.healthFlat?.[index], 0);
     modifiers.armorFlat += numberOr(bonus.armorFlat?.[index], 0);
+    modifiers.damageReductionPercent += numberOr(bonus.damageReductionPercent?.[index], 0);
     modifiers.speedPercent += numberOr(bonus.speedPercent?.[index], 0);
     modifiers.weaponSpeedPercent += numberOr(bonus.weaponSpeedPercent?.[index], 0);
     modifiers.weaponRapidityPercent += numberOr(bonus.weaponRapidityPercent?.[index], 0);
     modifiers.weaponCritPercent += numberOr(bonus.weaponCritPercent?.[index], 0);
+    modifiers.weaponHeadDamagePercent += numberOr(bonus.weaponHeadDamagePercent?.[index], 0);
+    modifiers.weaponAccuracyFlat += numberOr(bonus.weaponAccuracyFlat?.[index], 0);
     modifiers.weaponAmmoPercent += numberOr(bonus.weaponAmmoPercent?.[index], 0);
     modifiers.weaponMinDamageFlat += numberOr(bonus.weaponMinDamageFlat?.[index], 0);
     modifiers.weaponMaxDamageFlat += numberOr(bonus.weaponMaxDamageFlat?.[index], 0);
@@ -1679,6 +1775,11 @@ function applyWeaponGameplayBonuses(item, profile = null) {
     result.krit = numberOr(result.krit, 0) + critPercent;
   }
 
+  const accuracyFlat = numberOr(modifiers.weaponAccuracyFlat, 0);
+  if (accuracyFlat > 0) {
+    result.dev = Math.max(0, Math.round(numberOr(result.dev, 0) - accuracyFlat));
+  }
+
   const weaponSpeedPercentBonus = numberOr(modifiers.weaponSpeedPercent, 0);
   if (weaponSpeedPercentBonus !== 0) {
     result.wsp = Math.round(weaponSpeedPercent(result) + weaponSpeedPercentBonus);
@@ -1690,9 +1791,10 @@ function applyWeaponGameplayBonuses(item, profile = null) {
 function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null) {
   const base = { ...fallback, ...(item || {}), ws: slot };
   const override = WEAPON_STAT_OVERRIDES[weaponCanonicalKey(base)];
-  const merged = override
+  const mergedBase = override
     ? { ...base, ...override, ws: slot, w_id: numberOr(override.w_id, base.w_id ?? base.id), id: numberOr(override.id, base.id ?? base.w_id) }
     : base;
+  const merged = override && isActiveWorkshopWeaponUpgrade(base) ? workshopUpgradedWeaponStats(mergedBase) : mergedBase;
   return applyWeaponGameplayBonuses(merged, profile);
 }
 
@@ -1754,6 +1856,16 @@ function makeWearDictionaryRaw(profile = null) {
   })));
 }
 
+function makeEnhancerDictionaryRaw(profile = null) {
+  const selected = selectedEnhancers(profile);
+  if (!selected.length) return null;
+  // CombatPlayer.ContainsEnhancer() only checks ActorInfo[108] dictionary keys.
+  return rawTypedDictionary(0x62, 0x68, selected.map(({ enhancerType }) => ({
+    keyBody: Buffer.from([enhancerType & 0xff]),
+    valueBody: rawHashtableBody([]),
+  })));
+}
+
 function makeWeaponRuntimeState(profile = null) {
   const states = new Map();
   for (const [slot, item] of weaponSlotsForProfile(profile)) {
@@ -1784,6 +1896,7 @@ function makeWeaponRuntimeState(profile = null) {
       ammoReserve: Math.max(0, maxAmmoReserve - maxLoadedAmmo),
       systemName: normalizeSystemName(merged.sn ?? merged.sname, fallback.sn),
       crit: numberOr(merged.krit, fallback.krit),
+      deviation: numberOr(merged.dev, fallback.dev),
       shortDamage: [numberOr(merged.smindam, fallback.smindam), numberOr(merged.smaxdam, fallback.smaxdam)],
       mediumDamage: [numberOr(merged.mmindam, fallback.mmindam), numberOr(merged.mmaxdam, fallback.mmaxdam)],
       longDamage: [numberOr(merged.lmindam, fallback.lmindam), numberOr(merged.lmaxdam, fallback.lmaxdam)],
@@ -1821,6 +1934,11 @@ function makeActorInfoRaw(profile = null, options = {}) {
   if (options.includeWears !== false && INCLUDE_JOIN_WEARS) {
     const wears = makeWearDictionaryRaw(profile);
     if (wears) entries.push({ key: rawByte(30), value: wears });
+  }
+
+  if (options.includeEnhancers !== false && INCLUDE_BATTLE_ENHANCERS) {
+    const enhancers = makeEnhancerDictionaryRaw(profile);
+    if (enhancers) entries.push({ key: rawByte(108), value: enhancers });
   }
 
   return rawHashtable(entries);
@@ -1950,7 +2068,7 @@ function applyLateProfile(session, profile, incomingActor = null) {
     session.health = stats.maxHealth;
     session.energy = stats.maxEnergy;
   }
-  console.log(`[profile] late ready actor=${session.actorId} id=${profile.authId} name=${profile.name} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
+  console.log(`[profile] late ready actor=${session.actorId} id=${profile.authId} name=${profile.name} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
 }
 
 async function fetchApiJson(path) {
@@ -2012,7 +2130,7 @@ async function loadPlayerProfile(incomingActor, options = {}) {
     };
     profileCache.set(cacheKey, { loadedAt: Date.now(), profile });
     const stats = playerRuntimeStats(profile);
-    console.log(`[profile] loaded id=${profile.authId} name=${profile.name} weapons=${selectedWeapons(profile)?.length || 0} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} abilities=${profile.abilities.length} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
+    console.log(`[profile] loaded id=${profile.authId} name=${profile.name} weapons=${selectedWeapons(profile)?.length || 0} weaponUpgrades=${selectedWeaponUpgradeSummary(profile)} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} abilities=${profile.abilities.length} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
     return profile;
   } catch (error) {
     console.log(`[profile] failed id=${authId} ${error.message}`);
@@ -2079,7 +2197,8 @@ function mandatoryLoadoutActorCandidates(incomingActor, profile) {
     { label: "no-weapon-extra-no-actor-optional", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
     { label: "no-wears", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false } },
     { label: "no-wears-no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false } },
-    { label: "required-actor", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+    { label: "no-wears-no-weapon-extra-no-enhancers", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false, includeEnhancers: false } },
+    { label: "required-actor", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeEnhancers: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
   ].map((candidate) => ({
     label: candidate.label,
     slotLimit: maxSlots,
@@ -2087,10 +2206,20 @@ function mandatoryLoadoutActorCandidates(incomingActor, profile) {
   }));
 }
 
+function actorProfileHasWears(label, wearCount) {
+  return wearCount > 0 && !String(label || "").startsWith("no-wears") && label !== "required-actor";
+}
+
+function actorProfileHasEnhancers(label, enhancerCount) {
+  return enhancerCount > 0 && INCLUDE_BATTLE_ENHANCERS && !String(label || "").includes("no-enhancers") && label !== "required-actor";
+}
+
 function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null, mode = "event") {
   const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
   const wearCount = selectedWears(profile).length;
   const wearList = selectedWearSummary(profile);
+  const enhancerCount = selectedEnhancers(profile).length;
+  const enhancerList = selectedEnhancerSummary(profile);
   let fallback = null;
   for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile)) {
     const eventBytes = actorJoinPacketBytes(actorId, candidate.raw, channel);
@@ -2100,15 +2229,17 @@ function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw =
     fallback = result;
     if (!ACTOR_JOIN_MAX_PACKET_BYTES || bytes <= ACTOR_JOIN_MAX_PACKET_BYTES) {
       if (candidate.label !== "full") {
-        const hasWears = wearCount > 0 && !String(candidate.label || "").startsWith("no-wears") && candidate.label !== "required-actor";
-        console.log(`[loadout] ${mode} actor compact actor=${actorId} profile=${candidate.label} slots=${candidate.slotLimit}/${maxSlots} wears=${wearCount} hasWears=${hasWears ? "yes" : "no"} wearList=${wearList} bytes=${bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${eventBytes} join=${joinBytes}`);
+        const hasWears = actorProfileHasWears(candidate.label, wearCount);
+        const hasEnhancers = actorProfileHasEnhancers(candidate.label, enhancerCount);
+        console.log(`[loadout] ${mode} actor compact actor=${actorId} profile=${candidate.label} slots=${candidate.slotLimit}/${maxSlots} wears=${wearCount} hasWears=${hasWears ? "yes" : "no"} wearList=${wearList} enhancers=${enhancerCount} hasEnhancers=${hasEnhancers ? "yes" : "no"} enhancerList=${enhancerList} bytes=${bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${eventBytes} join=${joinBytes}`);
       }
       return result;
     }
   }
   if (fallback && ACTOR_JOIN_MAX_PACKET_BYTES) {
-    const hasWears = wearCount > 0 && !String(fallback.label || "").startsWith("no-wears") && fallback.label !== "required-actor";
-    console.log(`[warn] ${mode} actor payload over budget actor=${actorId} profile=${fallback.label} slots=${fallback.slotLimit}/${maxSlots} wears=${wearCount} hasWears=${hasWears ? "yes" : "no"} wearList=${wearList} bytes=${fallback.bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${fallback.eventBytes} join=${fallback.joinBytes}`);
+    const hasWears = actorProfileHasWears(fallback.label, wearCount);
+    const hasEnhancers = actorProfileHasEnhancers(fallback.label, enhancerCount);
+    console.log(`[warn] ${mode} actor payload over budget actor=${actorId} profile=${fallback.label} slots=${fallback.slotLimit}/${maxSlots} wears=${wearCount} hasWears=${hasWears ? "yes" : "no"} wearList=${wearList} enhancers=${enhancerCount} hasEnhancers=${hasEnhancers ? "yes" : "no"} enhancerList=${enhancerList} bytes=${fallback.bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${fallback.eventBytes} join=${fallback.joinBytes}`);
   }
   return fallback || { raw: rawHashtable([]), label: "empty", slotLimit: 0, bytes: actorJoinPacketBytes(actorId, rawHashtable([]), channel) };
 }
@@ -2131,8 +2262,12 @@ function updateActorWireData(session, incomingActor, profile, channel = 0) {
   session.actorWireSourceProfile = profile;
   session.actorWearCount = selectedWears(profile).length;
   session.actorWearSummary = selectedWearSummary(profile);
-  session.peerActorHasWears = session.actorWearCount > 0 && !String(peerActor.label || "").startsWith("no-wears") && peerActor.label !== "required-actor";
-  session.joinActorHasWears = session.actorWearCount > 0 && !String(joinActor.label || "").startsWith("no-wears") && joinActor.label !== "required-actor";
+  session.actorEnhancerCount = selectedEnhancers(profile).length;
+  session.actorEnhancerSummary = selectedEnhancerSummary(profile);
+  session.peerActorHasWears = actorProfileHasWears(peerActor.label, session.actorWearCount);
+  session.joinActorHasWears = actorProfileHasWears(joinActor.label, session.actorWearCount);
+  session.peerActorHasEnhancers = actorProfileHasEnhancers(peerActor.label, session.actorEnhancerCount);
+  session.joinActorHasEnhancers = actorProfileHasEnhancers(joinActor.label, session.actorEnhancerCount);
 }
 
 function refreshActorWireDataForRoomActorList(playerSession) {
@@ -2143,7 +2278,7 @@ function refreshActorWireDataForRoomActorList(playerSession) {
     return false;
   }
   updateActorWireData(playerSession, playerSession.actorJoinParam, playerSession.loadedProfile, playerSession.lastChannel || 0);
-  console.log(`[state] actor-wire refresh actor=${playerSession.actorId} reason=room-actor-list wears=${playerSession.actorWearCount || 0} wearList=${playerSession.actorWearSummary || "none"} joinProfile=${playerSession.joinActorProfile || "n/a"} joinHasWears=${playerSession.joinActorHasWears ? "yes" : "no"} joinPacket=${playerSession.joinActorRawBytes || 0} peerProfile=${playerSession.peerActorProfile || "n/a"} peerHasWears=${playerSession.peerActorHasWears ? "yes" : "no"} peerPacket=${playerSession.peerActorRawBytes || 0}`);
+  console.log(`[state] actor-wire refresh actor=${playerSession.actorId} reason=room-actor-list wears=${playerSession.actorWearCount || 0} wearList=${playerSession.actorWearSummary || "none"} enhancers=${playerSession.actorEnhancerCount || 0} enhancerList=${playerSession.actorEnhancerSummary || "none"} joinProfile=${playerSession.joinActorProfile || "n/a"} joinHasWears=${playerSession.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${playerSession.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${playerSession.joinActorRawBytes || 0} peerProfile=${playerSession.peerActorProfile || "n/a"} peerHasWears=${playerSession.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${playerSession.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${playerSession.peerActorRawBytes || 0}`);
   return true;
 }
 
@@ -2524,7 +2659,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   const point = spawnPointFor(session, team);
   session.lastTransform = point;
   const spawn = makeSpawnRaw(session, team, point);
-  console.log(`[event] ${reason} spawn actor=${session.actorId} team=${team} mode=${roomMode(session)} map=${session.room?.map || DEFAULT_MAP} pos=${fmtPoint(point)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump} jumpCap=${stats.jumpCap} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} prot=${formatProtectionBonuses(stats.modifiers.protections)}`);
+  console.log(`[event] ${reason} spawn actor=${session.actorId} team=${team} mode=${roomMode(session)} map=${session.room?.map || DEFAULT_MAP} pos=${fmtPoint(point)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump} jumpCap=${stats.jumpCap} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} prot=${formatProtectionBonuses(stats.modifiers.protections)}`);
   postBattleEvent(session, "spawn", {
     team,
     transform: { x: point.x, y: point.y, z: point.z, rotY: point.rotY || 0 },
@@ -2890,7 +3025,7 @@ function describeShotDamageContext(session, data, state) {
 
   const origin = pointFromHashtable(htGet(data, 11));
   const weapon = state
-    ? ` weapon=${state.systemName}#${state.weaponId} cfgDmg=${state.shortDamage.join("-")}/${state.mediumDamage.join("-")}/${state.longDamage.join("-")} crit=${state.crit}`
+    ? ` weapon=${state.systemName}#${state.weaponId} cfgDmg=${state.shortDamage.join("-")}/${state.mediumDamage.join("-")}/${state.longDamage.join("-")} crit=${state.crit} dev=${state.deviation}`
     : " weapon=unknown";
   const context = targetItems.map((target) => {
     const actorId = Number(htGet(target, 94)?.value);
@@ -2927,6 +3062,7 @@ function fallbackWeaponStateByType(weaponType) {
     type,
     systemName: `weapon_type_${type}`,
     crit: 0,
+    deviation: 0,
     shortDamage: [1, 1],
     mediumDamage: [1, 1],
     longDamage: [1, 1],
@@ -3072,6 +3208,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     healthDamage: 0,
     energyDamage: 0,
     crit: false,
+    hit: false,
     killed: false,
     killEvent: null,
     killedSession: null,
@@ -3104,6 +3241,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.summary = `${targetActorId}:dead`;
     return result;
   }
+  result.hit = true;
 
   const origin = pointFromHashtable(htGet(data, 11));
   const actorDistance = distanceBetweenPoints(shooter.lastTransform, targetSession.lastTransform);
@@ -3117,6 +3255,10 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
   const critChance = Math.max(0, numberOr(damageState?.crit, 0));
   const crit = deterministicUnit(BUILD_ID, "crit", shooter.actorId, targetActorId, targetIndex, weaponType, timestamp) * 100 < critChance;
+  const shooterStats = sessionRuntimeStats(shooter);
+  const headDamageBonus = hitZone === HIT_ZONE_CABIN
+    ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
+    : 0;
   const explosionCoefficient = explosive ? explosionDistanceCoefficient(originDistance ?? actorDistance) : 1;
   const protectionKey = weaponProtectionKey(weaponType);
   const protection = clampNumber(
@@ -3124,12 +3266,19 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     0,
     DAMAGE_MAX_PROTECTION_PERCENT
   );
+  const damageReduction = clampNumber(
+    targetCurrent.stats.modifiers.damageReductionPercent ?? 0,
+    0,
+    DAMAGE_MAX_PROTECTION_PERCENT
+  );
   const totalDamage = Math.max(0, Math.round(
     baseDamage *
     explosionCoefficient *
     hitZoneMultiplier(hitZone) *
+    (1 + headDamageBonus / 100) *
     (crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
-    (1 - protection / 100)
+    (1 - protection / 100) *
+    (1 - damageReduction / 100)
   ));
 
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
@@ -3140,15 +3289,21 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   result.energyDamage = energyDamage;
   result.healthDamage = healthDamage;
   result.crit = crit && totalDamage > 0;
-  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.stats.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:prot=${protectionKey}:${protection}:crit=${result.crit ? 1 : 0}`;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.stats.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:headDmg=${headDamageBonus}:prot=${protectionKey}:${protection}:dmgRed=${damageReduction}:crit=${result.crit ? 1 : 0}`;
 
   if (targetCurrent.health > 0 && targetSession.health <= 0) {
     targetSession.dead = true;
     targetSession.waitingSelfSpawnMove = false;
     targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+    targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
     if (targetSession !== shooter) {
       shooter.kills = numberOr(shooter.kills, 0) + 1;
       shooter.points = numberOr(shooter.points, 0) + 1;
+      shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
+      if (hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
+      if (hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
+    } else {
+      shooter.matchSuicides = numberOr(shooter.matchSuicides, 0) + 1;
     }
     clearSpawnMoveWarningTimer(targetSession);
     clearSpawnSelfRetryTimers(targetSession);
@@ -3164,8 +3319,13 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     postBattleEvent(targetSession, "death", {
       health: targetSession.health,
       energy: targetSession.energy,
+      killerPlayerId: shooter.playerId,
+      victimPlayerId: targetSession.playerId,
       killerActorId: shooter.actorId,
+      victimActorId: targetSession.actorId,
+      weaponId: numberOr(damageState?.weaponId, weaponType),
       weaponType,
+      weaponSystemName: stringOr(damageState?.systemName, ""),
       hitZone,
       healthDamage,
       energyDamage,
@@ -3183,6 +3343,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
   const killedSessions = new Set();
   let shotCrit = false;
   const summaries = [];
+  const stats = { shots: 1, hits: 0, playerTargets: 0, headHits: 0, nutsHits: 0, kills: 0 };
 
   if (targetItems?.length && targets.value.itemType === 0x68) {
     const damageState = shotDamageState(session, weaponType, state);
@@ -3191,6 +3352,13 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
       shotCrit = shotCrit || damage.crit;
       if (damage.killEvent) killEvents.push(damage.killEvent);
       if (damage.killedSession) killedSessions.add(damage.killedSession);
+      if (damage.hit) {
+        stats.hits += 1;
+        stats.playerTargets += 1;
+        if (damage.hitZone === HIT_ZONE_CABIN) stats.headHits += 1;
+        if (damage.hitZone === HIT_ZONE_ENGINE) stats.nutsHits += 1;
+      }
+      if (damage.killed) stats.kills += 1;
       summaries.push(damage.summary);
       return hashtableBodyWithReplacements(target, new Map([
         [92, rawDamageShort(damage.healthDamage)],
@@ -3210,6 +3378,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
     ]),
     killEvents,
     killedSessions: Array.from(killedSessions),
+    stats,
     summary: summaries.length ? ` damage=${summaries.join(",")}` : "",
   };
 }
@@ -3236,6 +3405,7 @@ function buildShotEvent(session, parsed) {
     : "";
   const response = buildShotDamagePayload(session, data, state, weaponType, launchMode);
   response.weaponConfirm = buildShotWeaponConfirm(session, state);
+  recordAcceptedShotStats(session, response, state, weaponType, launchMode);
   console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${response.summary}`);
   return response;
 }
@@ -3582,6 +3752,76 @@ function queueSelfSpawnRetry(session, reliableCommand, spawnSeq, reason) {
   }
 }
 
+function resetSessionMatchStats(session) {
+  if (!session) return;
+  session.matchStartedAt = 0;
+  session.matchStatsPosted = false;
+  session.matchShots = 0;
+  session.matchHits = 0;
+  session.matchKills = 0;
+  session.matchDeaths = 0;
+  session.matchHeadKills = 0;
+  session.matchNutsKills = 0;
+  session.matchSuicides = 0;
+}
+
+function beginSessionMatchStats(session) {
+  resetSessionMatchStats(session);
+  session.matchStartedAt = Date.now();
+}
+
+function recordAcceptedShotStats(session, response, state, weaponType, launchMode) {
+  if (!session) return;
+  const stats = response?.stats || {};
+  const shots = Math.max(1, numberOr(stats.shots, 1));
+  const hits = Math.max(0, numberOr(stats.hits, 0));
+  session.matchShots = numberOr(session.matchShots, 0) + shots;
+  session.matchHits = numberOr(session.matchHits, 0) + hits;
+  postBattleEvent(session, "shot", {
+    weaponId: numberOr(state?.weaponId, weaponType),
+    weaponType: numberOr(state?.type, weaponType),
+    weaponSystemName: stringOr(state?.systemName, ""),
+    shots,
+    hits,
+    eventData: {
+      launchMode,
+      playerTargets: numberOr(stats.playerTargets, 0),
+      headHits: numberOr(stats.headHits, 0),
+      nutsHits: numberOr(stats.nutsHits, 0),
+      kills: numberOr(stats.kills, 0),
+    },
+  });
+}
+
+function postSessionBattleSummary(session, reason = "leave") {
+  if (!session || session.matchStatsPosted || !session.matchStartedAt || !session.room) return;
+  const elapsedMs = Math.max(0, Date.now() - session.matchStartedAt);
+  const playTimeMinutes = elapsedMs > 0 ? Math.max(1, Math.ceil(elapsedMs / 60000)) : 0;
+  if (
+    playTimeMinutes <= 0 &&
+    !numberOr(session.matchShots, 0) &&
+    !numberOr(session.matchKills, 0) &&
+    !numberOr(session.matchDeaths, 0)
+  ) {
+    return;
+  }
+
+  session.matchStatsPosted = true;
+  postBattleEvent(session, "summary", {
+    playTimeMinutes,
+    kills: numberOr(session.matchKills, 0),
+    deaths: numberOr(session.matchDeaths, 0),
+    headshots: numberOr(session.matchHeadKills, 0),
+    shots: numberOr(session.matchShots, 0),
+    hits: numberOr(session.matchHits, 0),
+    eventData: {
+      reason,
+      nutsKills: numberOr(session.matchNutsKills, 0),
+      suicides: numberOr(session.matchSuicides, 0),
+    },
+  });
+}
+
 function resetSessionRoomProgress(session) {
   if (!session) return;
   session.spawned = false;
@@ -3604,9 +3844,11 @@ function resetSessionRoomProgress(session) {
   session.team = -1;
   session.lastTransform = null;
   session.pendingSpawnBroadcast = null;
+  resetSessionMatchStats(session);
 }
 
 function detachSessionFromRoom(session, reason = "leave") {
+  postSessionBattleSummary(session, reason);
   if (session?.room?.players) {
     for (const [actorId, playerSession] of session.room.players.entries()) {
       if (playerSession === session) {
@@ -4193,6 +4435,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.kills = 0;
     session.deaths = 0;
     session.points = 0;
+    beginSessionMatchStats(session);
     {
       const stats = sessionRuntimeStats(session);
       session.health = stats.maxHealth;
@@ -4224,7 +4467,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.room.players.set(session.actorId, session);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
-    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
+    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
       waitForProfile: profileSource === "fallback",
@@ -4477,6 +4720,15 @@ async function handleUdp(port, socket, msg, rinfo) {
       kills: 0,
       deaths: 0,
       points: 0,
+      matchStartedAt: 0,
+      matchStatsPosted: false,
+      matchShots: 0,
+      matchHits: 0,
+      matchKills: 0,
+      matchDeaths: 0,
+      matchHeadKills: 0,
+      matchNutsKills: 0,
+      matchSuicides: 0,
     };
     session.roomRaw = makeRoomSettingsRaw(session.room);
     sessions.set(sessionId, session);
@@ -4614,7 +4866,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} shotWeaponConfirm=on`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} trainingAbilities=1-11 weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} lobbyRoomSplit=on reliableDedupe=on roomSync=on preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} shotWeaponConfirm=on`);
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");

@@ -408,6 +408,43 @@ const shopWeapons = shopWeaponCatalog.map((item) =>
   weapon(item.id, weaponTypeForSname(item.sname), item.slot, item.sname, item.price ?? SHOP_PRICE, shopWeaponExtra(item))
 );
 
+function numericField(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function scaledStat(value, multiplier, fallback = 0) {
+  return Math.max(0, Math.round(numericField(value, fallback) * multiplier));
+}
+
+function upgradedWeaponItem(item) {
+  const base = clone(item);
+  const ammo = numericField(base.ammo, 0);
+  const ammoTotal = numericField(base.ammo_tot, 0);
+  const upgradePrice = Math.max(25, Math.round(numericField(base.sc?.tPv, SHOP_PRICE) * 0.35));
+  return {
+    ...base,
+    u_id: 5000 + numericField(base.w_id ?? base.id, 0),
+    rap: Math.max(60, scaledStat(base.rap, 0.9, 100)),
+    dev: Math.max(0, scaledStat(base.dev, 0.9, 0)),
+    krit: numericField(base.krit, 0) + 2,
+    smindam: scaledStat(base.smindam, 1.1, 0),
+    smaxdam: Math.max(scaledStat(base.smaxdam, 1.1, 0), scaledStat(base.smindam, 1.1, 0)),
+    mmindam: scaledStat(base.mmindam, 1.1, 0),
+    mmaxdam: Math.max(scaledStat(base.mmaxdam, 1.1, 0), scaledStat(base.mmindam, 1.1, 0)),
+    lmindam: scaledStat(base.lmindam, 1.1, 0),
+    lmaxdam: Math.max(scaledStat(base.lmaxdam, 1.1, 0), scaledStat(base.lmindam, 1.1, 0)),
+    ammo_tot: ammoTotal > 0 ? Math.max(ammo, Math.round(ammoTotal * 1.1)) : ammoTotal,
+    stRa: Math.min(5, numericField(base.stRa, 1) + 1),
+    stDi: Math.min(5, numericField(base.stDi, 1) + 1),
+    stDa: Math.min(5, numericField(base.stDa, 1) + 1),
+    sc: timedPermanentCost(5000 + numericField(base.w_id ?? base.id, 0), upgradePrice)
+  };
+}
+
+const shopWeaponUpgrades = shopWeapons.map((item) => upgradedWeaponItem(item));
+const shopWeaponUpgradesById = new Map(shopWeaponUpgrades.map((item) => [Number(item.u_id), item]));
+
 const wearSlotIds = {
   Hats: 1,
   Masks: 2,
@@ -594,7 +631,9 @@ const abilityValueDefinitions = {
   6: { type: "2", key: "wcrit", values: [5, 10, 15, 20, 25] },
   7: { type: "2", key: "wam", values: [10, 30, 40, 50, 60] },
   8: { type: "1", key: "wmdam", values: [1, 2, 3, 4, 5] },
-  9: { type: "1", key: "wmxdam", values: [1, 2, 3, 4, 5] }
+  9: { type: "1", key: "wmxdam", values: [1, 2, 3, 4, 5] },
+  10: { type: "1", key: "wacc", values: [1, 2, 3, 4, 5] },
+  11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] }
 };
 
 const abilityCatalog = [];
@@ -615,19 +654,7 @@ const mapEntry = (id, systemName, modes = 3) => ({ i: id, n: systemName, m: mode
 
 const maps = [
   mapEntry(1, "Arena_3lvl"),
-  mapEntry(2, "7000"),
-  mapEntry(3, "ArenaRing"),
-  mapEntry(4, "Arena_well"),
-  mapEntry(5, "Bit_map"),
-  mapEntry(6, "Cache"),
-  mapEntry(7, "Dedust"),
-  mapEntry(8, "Faccility"),
-  mapEntry(9, "Inferno"),
-  mapEntry(10, "LegoTurnament"),
-  mapEntry(11, "Sniper_night"),
-  mapEntry(12, "TF3_Arena_map"),
-  mapEntry(13, "Zombi_2", 1),
-  mapEntry(14, "Zombi")
+  mapEntry(13, "Zombi_2", 1)
 ];
 
 function starterAccount(name = "ContraCity") {
@@ -972,7 +999,10 @@ async function savePostgresStore(nextStore) {
       );
 
       const ownedWeapons = [...defaultWeapons, ...(account.inventory || []).filter((item) => Number(item.itype) === 1)];
+      const accountWeaponStats = new Map((account.weaponStats || []).map((item) => [Number(item.wid || item.weapon_id || 0), item]));
       for (const weaponItem of ownedWeapons) {
+        const weaponId = Number(weaponItem.w_id || weaponItem.id || 0);
+        const weaponStats = accountWeaponStats.get(weaponId) || {};
         await client.query(
           `INSERT INTO player_weapon_stats (player_id, weapon_id, weapon_type, system_name, kills, headshots, nuts, shots, hits, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
@@ -987,14 +1017,14 @@ async function savePostgresStore(nextStore) {
              updated_at = now()`,
           [
             account.id,
-            Number(weaponItem.w_id || weaponItem.id || 0),
-            Number(weaponItem.wt || 0),
-            String(weaponItem.sn || weaponItem.sname || ""),
-            Number(account.stats?.k || 0),
-            Number(account.stats?.hs || 0),
-            Number(account.stats?.ns || 0),
-            Number(account.stats?.sh || 0),
-            Number(account.stats?.hi || 0)
+            weaponId,
+            Number(weaponStats.wt ?? weaponStats.weapon_type ?? weaponItem.wt ?? 0),
+            String(weaponStats.sn || weaponStats.system_name || weaponItem.sn || weaponItem.sname || ""),
+            statNumber(weaponStats.k ?? weaponStats.kills, 0),
+            statNumber(weaponStats.hs ?? weaponStats.headshots, 0),
+            statNumber(weaponStats.ns ?? weaponStats.nuts, 0),
+            statNumber(weaponStats.sh ?? weaponStats.shots, 0),
+            statNumber(weaponStats.hi ?? weaponStats.hits, 0)
           ]
         );
       }
@@ -1042,10 +1072,30 @@ function weaponAllowedInSlot(item, slot) {
   return Number(item?.ws || 0) === Number(slot);
 }
 
+function hasActiveWeaponUpgrade(item, now = currentUnixSeconds()) {
+  if (Number(item?.itype || 0) !== 1 || item?.u_id == null) return false;
+  const expiresAt = Number(item?.eD || 0);
+  return Number.isFinite(expiresAt) && expiresAt > now;
+}
+
 function normalizeInventoryItem(item) {
   const type = Number(item?.itype || 0);
   if (type === 1) {
     const canonical = canonicalWeaponForRawItem(item);
+    if (canonical && item?.u_id != null) {
+      if (!hasActiveWeaponUpgrade(item)) return clone(canonical);
+      return {
+        ...clone(canonical),
+        ...clone(item),
+        id: canonical.id,
+        w_id: canonical.w_id,
+        sname: canonical.sname,
+        sn: canonical.sn,
+        wt: canonical.wt,
+        ws: canonical.ws,
+        name: canonical.name
+      };
+    }
     return canonical
       ? {
           ...clone(item),
@@ -1184,7 +1234,10 @@ function normalizeAccount(account) {
     taun: { ...fresh.taun, ...(account?.taun || {}) },
     stats: { ...fresh.stats, ...(account?.stats || {}) },
     inventory: viewInventory.inventory,
-    abilities: Array.isArray(account?.abilities) ? account.abilities : []
+    abilities: Array.isArray(account?.abilities) ? account.abilities : [],
+    weaponStats: Array.isArray(account?.weaponStats) ? account.weaponStats : [],
+    modeStats: Array.isArray(account?.modeStats) ? account.modeStats : [],
+    mapStats: Array.isArray(account?.mapStats) ? account.mapStats : []
   };
 }
 
@@ -1262,7 +1315,7 @@ function postgresTimestamp(value) {
   return value?.toISOString?.() || value;
 }
 
-function accountFromPostgresRow(row, inventory = [], abilities = []) {
+function accountFromPostgresRow(row, inventory = [], abilities = [], weaponStats = [], modeStats = [], mapStats = []) {
   return normalizeAccount({
     id: Number(row.id),
     key: row.cckey,
@@ -1279,6 +1332,9 @@ function accountFromPostgresRow(row, inventory = [], abilities = []) {
     stats: jsonValue(row.stats, {}),
     inventory,
     abilities,
+    weaponStats,
+    modeStats,
+    mapStats,
     createdAt: postgresTimestamp(row.created_at),
     updatedAt: postgresTimestamp(row.updated_at)
   });
@@ -1298,11 +1354,56 @@ async function loadPostgresAccount(id) {
     "SELECT ability_id, ability_level FROM player_abilities WHERE player_id = $1 ORDER BY ability_id",
     [Number(row.id)]
   );
+  const weaponStats = await pgPool.query(
+    `SELECT weapon_id, weapon_type, system_name, kills, headshots, nuts, shots, hits
+     FROM player_weapon_stats
+     WHERE player_id = $1
+     ORDER BY kills DESC, weapon_id`,
+    [Number(row.id)]
+  );
+  const modeStats = await pgPool.query(
+    `SELECT mode, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
+     FROM player_match_stats
+     WHERE player_id = $1
+     GROUP BY mode
+     ORDER BY play_time DESC, mode`,
+    [Number(row.id)]
+  );
+  const mapStats = await pgPool.query(
+    `SELECT map_name, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
+     FROM player_match_stats
+     WHERE player_id = $1
+     GROUP BY map_name
+     ORDER BY play_time DESC, map_name`,
+    [Number(row.id)]
+  );
 
   return accountFromPostgresRow(
     row,
     inventory.rows.map((itemRow) => jsonValue(itemRow.item_data, {})),
-    abilities.rows.map((abilityRow) => ({ i: Number(abilityRow.ability_id), l: Number(abilityRow.ability_level) }))
+    abilities.rows.map((abilityRow) => ({ i: Number(abilityRow.ability_id), l: Number(abilityRow.ability_level) })),
+    weaponStats.rows.map((statRow) => ({
+      wid: Number(statRow.weapon_id),
+      wt: Number(statRow.weapon_type),
+      sn: String(statRow.system_name || ""),
+      k: Number(statRow.kills || 0),
+      hs: Number(statRow.headshots || 0),
+      ns: Number(statRow.nuts || 0),
+      sh: Number(statRow.shots || 0),
+      hi: Number(statRow.hits || 0)
+    })),
+    modeStats.rows.map((statRow) => ({
+      m: Number(statRow.mode || 0),
+      w: Number(statRow.wins || 0),
+      l: Number(statRow.losses || 0),
+      pt: Number(statRow.play_time || 0)
+    })),
+    mapStats.rows.map((statRow) => ({
+      n: String(statRow.map_name || ""),
+      w: Number(statRow.wins || 0),
+      l: Number(statRow.losses || 0),
+      pt: Number(statRow.play_time || 0)
+    }))
   );
 }
 
@@ -1340,6 +1441,17 @@ function cookieHeaders(account) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+const playerStatKeys = ["k", "d", "s", "hs", "ns", "pt", "w", "l", "dhs", "dns", "do", "re", "mdo", "mre", "sh", "hi"];
+
+function statNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : fallback;
+}
+
+function normalizePlayerStats(rawStats = {}) {
+  return Object.fromEntries(playerStatKeys.map((key) => [key, statNumber(rawStats?.[key], 0)]));
 }
 
 function profilePayload(account, full = false) {
@@ -1391,7 +1503,7 @@ function shopPayload() {
   return {
     result: true,
     weap: {
-      upg: [],
+      upg: clone(shopWeaponUpgrades),
       items: clone(shopWeapons)
     },
     wear: {
@@ -1507,28 +1619,12 @@ function leaguePayload(account) {
 }
 
 function playerStats(account) {
-  return {
-    k: Number(account.stats?.k || 1),
-    d: Number(account.stats?.d || 0),
-    s: Number(account.stats?.s || 0),
-    hs: Number(account.stats?.hs || 1),
-    ns: Number(account.stats?.ns || 0),
-    pt: Number(account.stats?.pt || 12),
-    w: Number(account.stats?.w || 1),
-    l: Number(account.stats?.l || 0),
-    dhs: Number(account.stats?.dhs || 0),
-    dns: Number(account.stats?.dns || 0),
-    do: Number(account.stats?.do || 0),
-    re: Number(account.stats?.re || 0),
-    mdo: Number(account.stats?.mdo || 0),
-    mre: Number(account.stats?.mre || 0),
-    sh: Number(account.stats?.sh || 25),
-    hi: Number(account.stats?.hi || 9)
-  };
+  return normalizePlayerStats(account.stats || {});
 }
 
 function weaponStatItems(account) {
   const owned = [...defaultWeapons, ...(account.inventory || []).filter((item) => Number(item.itype) === 1)];
+  const statByWeaponId = new Map((account.weaponStats || []).map((item) => [Number(item.wid || item.weapon_id || 0), item]));
   const seen = new Set();
   return owned
     .filter((item) => {
@@ -1537,41 +1633,54 @@ function weaponStatItems(account) {
       seen.add(key);
       return true;
     })
-    .map((item, index) => ({
-      wid: Number(item.w_id || item.id),
-      wt: Number(item.wt || 0),
-      sn: item.sn || item.sname || `weapon_${item.w_id || item.id}`,
-      k: index === 0 ? 1 : 0,
-      hs: index === 0 ? 1 : 0,
-      ns: 0,
-      sh: index === 0 ? 25 : 0,
-      hi: index === 0 ? 9 : 0
-    }));
+    .map((item) => {
+      const weaponId = Number(item.w_id || item.id);
+      const stats = statByWeaponId.get(weaponId) || {};
+      return {
+        wid: weaponId,
+        wt: Number(stats.wt ?? stats.weapon_type ?? item.wt ?? 0),
+        sn: String(stats.sn || stats.system_name || item.sn || item.sname || `weapon_${weaponId}`),
+        k: statNumber(stats.k ?? stats.kills, 0),
+        hs: statNumber(stats.hs ?? stats.headshots, 0),
+        ns: statNumber(stats.ns ?? stats.nuts, 0),
+        sh: statNumber(stats.sh ?? stats.shots, 0),
+        hi: statNumber(stats.hi ?? stats.hits, 0)
+      };
+    });
 }
 
-function gameModeStatItems() {
-  return [
-    { m: 1, w: 1, l: 0, pt: 12 },
-    { m: 2, w: 0, l: 0, pt: 0 },
-    { m: 3, w: 0, l: 0, pt: 0 }
-  ];
+function gameModeStatItems(account) {
+  const statByMode = new Map((account.modeStats || []).map((item) => [Number(item.m || item.mode || 0), item]));
+  return [1, 2, 3].map((mode) => {
+    const stats = statByMode.get(mode) || {};
+    return {
+      m: mode,
+      w: statNumber(stats.w ?? stats.wins, 0),
+      l: statNumber(stats.l ?? stats.losses, 0),
+      pt: statNumber(stats.pt ?? stats.play_time, 0)
+    };
+  });
 }
 
-function mapStatItems() {
-  return maps.map((map, index) => ({
-    n: map.n,
-    w: index === 0 ? 1 : 0,
-    l: 0,
-    pt: index === 0 ? 12 : 0
-  }));
+function mapStatItems(account) {
+  const statByMap = new Map((account.mapStats || []).map((item) => [String(item.n || item.map_name || ""), item]));
+  return maps.map((map) => {
+    const stats = statByMap.get(map.n) || {};
+    return {
+      n: map.n,
+      w: statNumber(stats.w ?? stats.wins, 0),
+      l: statNumber(stats.l ?? stats.losses, 0),
+      pt: statNumber(stats.pt ?? stats.play_time, 0)
+    };
+  });
 }
 
 function statsBlock(account) {
   return {
     wd: JSON.stringify(weaponStatItems(account)),
     ud: JSON.stringify(playerStats(account)),
-    md: JSON.stringify(gameModeStatItems()),
-    mad: JSON.stringify(mapStatItems())
+    md: JSON.stringify(gameModeStatItems(account)),
+    mad: JSON.stringify(mapStatItems(account))
   };
 }
 
@@ -1654,6 +1763,71 @@ function findShopItem(collection, idField, id) {
 
 function itemPrice(item) {
   return Number(item?.sc?.tPv || 0);
+}
+
+const SHOP_DURATION = Object.freeze({
+  DAY: 1,
+  WEEK: 2,
+  MONTH: 3,
+  PERMANENT: 4
+});
+const SHOP_DAY_SECONDS = 86460;
+
+function currentUnixSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function normalizeShopDuration(value) {
+  const duration = Number(value);
+  return Object.values(SHOP_DURATION).includes(duration) ? duration : SHOP_DURATION.PERMANENT;
+}
+
+function shopDurationSeconds(duration) {
+  switch (normalizeShopDuration(duration)) {
+    case SHOP_DURATION.DAY:
+      return SHOP_DAY_SECONDS;
+    case SHOP_DURATION.WEEK:
+      return SHOP_DAY_SECONDS * 7;
+    case SHOP_DURATION.MONTH:
+      return SHOP_DAY_SECONDS * 30;
+    case SHOP_DURATION.PERMANENT:
+    default:
+      return 0;
+  }
+}
+
+function shopDurationPrice(item, duration) {
+  const sc = item?.sc || {};
+  const keyByDuration = {
+    [SHOP_DURATION.DAY]: "t1v",
+    [SHOP_DURATION.WEEK]: "t7v",
+    [SHOP_DURATION.MONTH]: "t30v",
+    [SHOP_DURATION.PERMANENT]: "tPv"
+  };
+  const value = Number(sc[keyByDuration[normalizeShopDuration(duration)]]);
+  return Number.isFinite(value) ? value : itemPrice(item);
+}
+
+function findOwnedInventoryItem(account, item) {
+  return (account.inventory || []).find(
+    (owned) =>
+      Number(owned.itype) === Number(item.itype) &&
+      Number(owned.id ?? owned.w_id ?? owned.t_id ?? owned.e_id) === Number(item.id ?? item.w_id ?? item.t_id ?? item.e_id)
+  );
+}
+
+function withPurchasedDuration(item, duration, existingItem = null, now = currentUnixSeconds()) {
+  const itemData = clone(item);
+  const seconds = shopDurationSeconds(duration);
+  if (seconds === 0) {
+    itemData.eD = 0;
+    return itemData;
+  }
+
+  const existingExpiry = Number(existingItem?.eD || 0);
+  const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
+  itemData.eD = base + seconds;
+  return itemData;
 }
 
 function hasInventoryItem(account, item) {
@@ -1762,6 +1936,212 @@ async function buyItem(account, item) {
   recordPurchase(account, item, price);
   persist(account);
   return ok({ req: "" });
+}
+
+async function buyEnhancerPostgres(account, item, duration, price) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      const row = player.rows[0];
+      if (!row || row.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const money = Number(row.money || 0);
+      if (money < price) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [2] };
+      }
+
+      const itemKey = inventoryItemKey(item);
+      const existing = await client.query(
+        "SELECT item_data FROM player_inventory WHERE player_id = $1 AND item_key = $2 FOR UPDATE",
+        [Number(account.id), itemKey]
+      );
+      const itemData = withPurchasedDuration(item, duration, jsonValue(existing.rows[0]?.item_data, null));
+      const nextMoney = money - price;
+
+      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
+      await client.query(
+        `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [Number(account.id), itemKey, Number(itemData?.itype || 0), JSON.stringify(itemData)]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
+         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
+        [
+          Number(account.id),
+          itemKey,
+          Number(itemData?.itype || 0),
+          inventoryItemId(itemData),
+          Number(price || 0),
+          JSON.stringify(itemData)
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      const fresh = await loadPostgresAccount(account.id);
+      if (fresh) {
+        store.accounts[String(fresh.id)] = fresh;
+      }
+
+      return ok({ req: "", vcur: nextMoney });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original error is more useful for diagnostics.
+      }
+      console.error("[postgres] buy enhancer failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function buyEnhancer(account, item, duration) {
+  if (!item) return { result: false, err: [1] };
+  const selectedDuration = normalizeShopDuration(duration);
+  const price = shopDurationPrice(item, selectedDuration);
+  if (pgPool) return buyEnhancerPostgres(account, item, selectedDuration, price);
+  if (account.money < price) return { result: false, err: [2] };
+  if (!Array.isArray(account.inventory)) account.inventory = [];
+
+  const existingItem = findOwnedInventoryItem(account, item);
+  const itemData = withPurchasedDuration(item, selectedDuration, existingItem);
+  const itemKey = inventoryItemKey(itemData);
+  const existingIndex = (account.inventory || []).findIndex((owned) => inventoryItemKey(owned) === itemKey);
+  if (existingIndex >= 0) {
+    account.inventory[existingIndex] = itemData;
+  } else {
+    account.inventory.push(itemData);
+  }
+
+  account.money -= price;
+  persist(account);
+  return ok({ req: "", vcur: account.money });
+}
+
+function weaponUpgradePrice(item) {
+  return shopDurationPrice(item, SHOP_DURATION.DAY);
+}
+
+function withWeaponUpgradeDuration(upgrade, existingItem = null, now = currentUnixSeconds()) {
+  const itemData = clone(upgrade);
+  const existingExpiry = Number(existingItem?.eD || 0);
+  const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
+  itemData.eD = base + SHOP_DAY_SECONDS;
+  return itemData;
+}
+
+async function buyWeaponUpgradePostgres(account, upgrade, price) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      const row = player.rows[0];
+      if (!row || row.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const money = Number(row.money || 0);
+      if (money < price) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [2] };
+      }
+
+      const itemKey = inventoryItemKey(upgrade);
+      const existing = await client.query(
+        "SELECT item_data FROM player_inventory WHERE player_id = $1 AND item_key = $2 FOR UPDATE",
+        [Number(account.id), itemKey]
+      );
+      const existingItem = jsonValue(existing.rows[0]?.item_data, null);
+      if (!existingItem || Number(existingItem?.itype || 0) !== 1) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [1] };
+      }
+
+      const itemData = withWeaponUpgradeDuration(upgrade, existingItem);
+      const nextMoney = money - price;
+
+      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
+      await client.query(
+        `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [Number(account.id), itemKey, Number(itemData?.itype || 0), JSON.stringify(itemData)]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
+         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
+        [
+          Number(account.id),
+          itemKey,
+          Number(itemData?.itype || 0),
+          inventoryItemId(itemData),
+          Number(price || 0),
+          JSON.stringify(itemData)
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      const fresh = await loadPostgresAccount(account.id);
+      if (fresh) {
+        store.accounts[String(fresh.id)] = fresh;
+      }
+
+      return ok({ req: "", vcur: nextMoney });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // The original error is more useful for diagnostics.
+      }
+      console.error("[postgres] buy weapon upgrade failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function buyWeaponUpgrade(account, upgrade) {
+  if (!upgrade) return { result: false, err: [1] };
+  const price = weaponUpgradePrice(upgrade);
+  if (pgPool) return buyWeaponUpgradePostgres(account, upgrade, price);
+  if (account.money < price) return { result: false, err: [2] };
+  if (!Array.isArray(account.inventory)) account.inventory = [];
+
+  const itemKey = inventoryItemKey(upgrade);
+  const existingIndex = account.inventory.findIndex((owned) => inventoryItemKey(owned) === itemKey && Number(owned?.itype || 0) === 1);
+  if (existingIndex < 0) return { result: false, err: [1] };
+
+  const itemData = withWeaponUpgradeDuration(upgrade, account.inventory[existingIndex]);
+  account.inventory[existingIndex] = itemData;
+  account.money -= price;
+  recordPurchase(account, itemData, price);
+  persist(account);
+  return ok({ req: "", vcur: account.money });
 }
 
 function saveView(account, url) {
@@ -1965,9 +2345,10 @@ async function routeAjax(url, resolvedAccount = null) {
   if (page === "buy") {
     const id = Number(url.searchParams.get("id") || url.searchParams.get("i") || 0);
     if (act === "bweap") return await buyItem(account, findShopItem(shopWeapons, "w_id", id));
+    if (act === "bweapupg") return await buyWeaponUpgrade(account, shopWeaponUpgradesById.get(id));
     if (act === "bwear") return await buyItem(account, findShopItem(shopWears, "w_id", id));
     if (act === "btaunt") return await buyItem(account, findShopItem(shopTaunts, "t_id", id));
-    if (act === "benh") return await buyItem(account, findShopItem(shopEnhancers, "e_id", id));
+    if (act === "benh") return await buyEnhancer(account, findShopItem(shopEnhancers, "e_id", id), url.searchParams.get("dur"));
     if (act === "babil") return await buyAbility(account, url);
     if (act === "bmap") return ok({ req: "" });
     return { result: false, err: [1] };
@@ -2186,6 +2567,131 @@ function asBattleJson(value) {
   return {};
 }
 
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value || {}, key);
+}
+
+function eventNumber(event, details, key, fallback = 0) {
+  return statNumber(event?.[key] ?? details?.[key], fallback);
+}
+
+async function incrementPlayerStats(client, playerId, delta) {
+  const id = Number(playerId || 0);
+  if (!Number.isInteger(id) || id <= 0) return;
+
+  const row = await client.query("SELECT stats FROM players WHERE id = $1 FOR UPDATE", [id]);
+  if (!row.rows[0]) return;
+
+  const nextStats = normalizePlayerStats(jsonValue(row.rows[0].stats, {}));
+  for (const [key, value] of Object.entries(delta || {})) {
+    if (!playerStatKeys.includes(key)) continue;
+    nextStats[key] = statNumber(nextStats[key], 0) + statNumber(value, 0);
+  }
+
+  await client.query(
+    "UPDATE players SET stats = $2::jsonb, updated_at = now() WHERE id = $1",
+    [id, JSON.stringify(nextStats)]
+  );
+}
+
+async function incrementWeaponStats(client, playerId, event, details, delta) {
+  const id = Number(playerId || 0);
+  const weaponId = Number(event.weaponId ?? details.weaponId ?? event.weaponType ?? details.weaponType ?? 0);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(weaponId) || weaponId <= 0) return;
+
+  const weaponType = Number(event.weaponType ?? details.weaponType ?? 0);
+  const systemName = String(event.weaponSystemName || details.weaponSystemName || details.systemName || "").slice(0, 120);
+  const kills = statNumber(delta.kills, 0);
+  const headshots = statNumber(delta.headshots, 0);
+  const nuts = statNumber(delta.nuts, 0);
+  const shots = statNumber(delta.shots, 0);
+  const hits = statNumber(delta.hits, 0);
+
+  if (!kills && !headshots && !nuts && !shots && !hits) return;
+
+  await client.query(
+    `INSERT INTO player_weapon_stats (player_id, weapon_id, weapon_type, system_name, kills, headshots, nuts, shots, hits, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+     ON CONFLICT (player_id, weapon_id) DO UPDATE SET
+       weapon_type = CASE WHEN EXCLUDED.weapon_type <> 0 THEN EXCLUDED.weapon_type ELSE player_weapon_stats.weapon_type END,
+       system_name = CASE WHEN EXCLUDED.system_name <> '' THEN EXCLUDED.system_name ELSE player_weapon_stats.system_name END,
+       kills = player_weapon_stats.kills + EXCLUDED.kills,
+       headshots = player_weapon_stats.headshots + EXCLUDED.headshots,
+       nuts = player_weapon_stats.nuts + EXCLUDED.nuts,
+       shots = player_weapon_stats.shots + EXCLUDED.shots,
+       hits = player_weapon_stats.hits + EXCLUDED.hits,
+       updated_at = now()`,
+    [id, Math.trunc(weaponId), statNumber(weaponType, 0), systemName, kills, headshots, nuts, shots, hits]
+  );
+}
+
+async function recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details) {
+  if (type === "shot") {
+    const shots = eventNumber(event, details, "shots", 0);
+    const hits = eventNumber(event, details, "hits", 0);
+    await incrementPlayerStats(client, playerId, { sh: shots, hi: hits });
+    await incrementWeaponStats(client, playerId, event, details, { shots, hits });
+    return;
+  }
+
+  if (type === "death" || type === "score") {
+    const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
+    const victimPlayerId = Number(event.victimPlayerId || details.victimPlayerId || playerId || 0);
+    const hitZone = Number(event.hitZone ?? details.hitZone ?? 0);
+    const headshot = hitZone === 32 ? 1 : 0;
+    const nuts = hitZone === 16 ? 1 : 0;
+    const suicide = killerPlayerId > 0 && killerPlayerId === victimPlayerId;
+
+    if (victimPlayerId > 0) {
+      await incrementPlayerStats(client, victimPlayerId, {
+        d: 1,
+        s: suicide ? 1 : 0,
+        dhs: headshot,
+        dns: nuts
+      });
+    }
+    if (!suicide && killerPlayerId > 0) {
+      await incrementPlayerStats(client, killerPlayerId, {
+        k: 1,
+        hs: headshot,
+        ns: nuts
+      });
+      await incrementWeaponStats(client, killerPlayerId, event, details, {
+        kills: 1,
+        headshots: headshot,
+        nuts
+      });
+    }
+
+    await client.query(
+      `INSERT INTO battle_score_events (room_id, killer_player_id, victim_player_id, weapon_id, hit_zone, event_data)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+      [roomId, killerPlayerId || playerId, victimPlayerId || playerId, Number(event.weaponId || details.weaponId || event.weaponType || details.weaponType || 0), hitZone, JSON.stringify(details)]
+    );
+    return;
+  }
+
+  if (type === "summary") {
+    const playTimeMinutes = eventNumber(event, details, "playTimeMinutes", 0);
+    const kills = eventNumber(event, details, "kills", 0);
+    const deaths = eventNumber(event, details, "deaths", 0);
+    const headshots = eventNumber(event, details, "headshots", 0);
+    const hasWon = hasOwn(event, "won") || hasOwn(details, "won");
+    const won = Boolean(event.won ?? details.won);
+    const statDelta = { pt: playTimeMinutes };
+    if (hasWon) statDelta[won ? "w" : "l"] = 1;
+    await incrementPlayerStats(client, playerId, statDelta);
+
+    if (playTimeMinutes > 0 || kills > 0 || deaths > 0 || headshots > 0 || hasWon) {
+      await client.query(
+        `INSERT INTO player_match_stats (player_id, map_name, mode, kills, deaths, headshots, play_time, won)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false]
+      );
+    }
+  }
+}
+
 async function recordBattleEvent(event) {
   if (BATTLE_EVENT_TOKEN && event.token !== BATTLE_EVENT_TOKEN) {
     return { ok: false, error: "invalid_token", status: 403 };
@@ -2210,7 +2716,7 @@ async function recordBattleEvent(event) {
   const roomSettings = JSON.stringify(asBattleJson(event.roomSettings));
   const playerData = JSON.stringify(asBattleJson(event.playerData));
   const transform = JSON.stringify(asBattleJson(event.transform));
-  const eventData = JSON.stringify(asBattleJson(event.eventData));
+  const details = asBattleJson(event.eventData);
   const type = String(event.type || "event");
 
   const client = await pgPool.connect();
@@ -2268,12 +2774,6 @@ async function recordBattleEvent(event) {
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
         [roomId, playerId, actorId, team, health, energy, transform]
       );
-    } else if (type === "score") {
-      await client.query(
-        `INSERT INTO battle_score_events (room_id, killer_player_id, victim_player_id, weapon_id, hit_zone, event_data)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-        [roomId, Number(event.killerPlayerId || playerId), Number(event.victimPlayerId || playerId), Number(event.weaponId || 0), Number(event.hitZone || 0), eventData]
-      );
     } else if (type === "chat" && event.message) {
       await client.query(
         `INSERT INTO battle_chat_events (room_id, player_id, actor_id, channel, message)
@@ -2281,6 +2781,8 @@ async function recordBattleEvent(event) {
         [roomId, playerId, actorId, Number(event.channel || 0), String(event.message).slice(0, 500)]
       );
     }
+
+    await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
 
     await client.query("COMMIT");
     return { ok: true, storage: "postgres", roomId, type };
