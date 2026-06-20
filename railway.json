@@ -1,6 +1,6 @@
-﻿{
-    "$schema":  "https://railway.app/railway.schema.json",
-    "deploy":  {
-                   "startCommand":  "npm start"
-               }
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "npm start"
+  }
 }
