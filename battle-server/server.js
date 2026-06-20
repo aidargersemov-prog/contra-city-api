@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-20-join-start-map-load-v203";
+const BUILD_ID = "battle-server-2026-06-21-immediate-self-join-v204";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -83,7 +83,7 @@ const ENET_MAX_FRAGMENT_COUNT = Math.max(1, Number(process.env.ENET_MAX_FRAGMENT
 const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX_FRAGMENT_TOTAL_BYTES || 65536));
 const SHOT_LOCAL_RESPONSE_TRACE = process.env.SHOT_LOCAL_RESPONSE_TRACE !== "0";
 const ACTOR_JOIN_MAX_PACKET_BYTES = Math.max(0, Number(process.env.ACTOR_JOIN_MAX_PACKET_BYTES || 1160));
-const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 600));
+const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 0));
 const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
 const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETRY_MS || 1000));
 const JOIN_PROFILE_MAX_WAIT_MS = Math.max(JOIN_SELF_PROFILE_WAIT_MS, Number(process.env.JOIN_PROFILE_MAX_WAIT_MS || 70000));
@@ -7778,10 +7778,8 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
 
       console.log(`[event] delayed join-self actor=${actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} profileWait=${options.waitForProfile ? "on" : "off"}`);
       sendReliablePayload(socket, rinfo, session, makeJoinSelfEvent(session), channel);
-      // MainNetworkController starts the map loader only from Event103.
-      console.log(`[event] join-start actor=${actorId} source=self-join`);
-      sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
       queueJoinSettingsPushes(port, socket, rinfo, session, channel);
+      queueJoinStartFallback(port, socket, rinfo, session, channel);
       queueJoinLateStartPulses(port, socket, rinfo, session, channel);
     }, delayMs);
     if (typeof session.joinSelfEventTimer.unref === "function") {
