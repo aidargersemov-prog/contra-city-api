@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-18-reliable-respawn-leave-v202";
+const BUILD_ID = "battle-server-2026-06-20-join-start-map-load-v203";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -7778,8 +7778,10 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
 
       console.log(`[event] delayed join-self actor=${actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} profileWait=${options.waitForProfile ? "on" : "off"}`);
       sendReliablePayload(socket, rinfo, session, makeJoinSelfEvent(session), channel);
+      // MainNetworkController starts the map loader only from Event103.
+      console.log(`[event] join-start actor=${actorId} source=self-join`);
+      sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
       queueJoinSettingsPushes(port, socket, rinfo, session, channel);
-      queueJoinStartFallback(port, socket, rinfo, session, channel);
       queueJoinLateStartPulses(port, socket, rinfo, session, channel);
     }, delayMs);
     if (typeof session.joinSelfEventTimer.unref === "function") {
