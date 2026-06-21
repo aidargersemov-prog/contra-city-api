@@ -1,4 +1,4 @@
-const dgram = require("dgram");
+﻿const dgram = require("dgram");
 const net = require("net");
 
 const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-21-immediate-self-join-v204";
+const BUILD_ID = "battle-server-2026-06-21-control-points-v208";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -22,6 +22,9 @@ const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1
 const ZOMBIE_MIN_PLAYERS = 2;
 const ZOMBIE_BOSS_INFECTION_MS = 10000;
 const ZOMBIE_ROUND_RESTART_MS = 10500;
+// The active client keeps its result screen for this interval before Event91.
+// It is intentionally shared with zombie rounds so all modes have one round cadence.
+const STANDARD_ROUND_RESTART_MS = Math.max(1000, Number(process.env.STANDARD_ROUND_RESTART_MS || ZOMBIE_ROUND_RESTART_MS));
 const ZOMBIE_REGULAR_INFECTION_HITS = Math.max(2, Math.min(3, Number(process.env.ZOMBIE_REGULAR_INFECTION_HITS || 3) || 3));
 const ZOMBIE_REGULAR_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_REGULAR_MAX_HEALTH || 1000) || 1000);
 const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 3000) || 3000);
@@ -132,12 +135,54 @@ const MAX_PLAYER_JUMP = Math.max(1, Number(process.env.MAX_PLAYER_JUMP || 32));
 const ROOM_INTERPOLATION_MODE_RAW = Number(process.env.ROOM_INTERPOLATION_MODE ?? 3);
 const ROOM_INTERPOLATION_MODE = Math.max(0, Math.min(255, Number.isFinite(ROOM_INTERPOLATION_MODE_RAW) ? ROOM_INTERPOLATION_MODE_RAW : 0));
 const ADD_MOVE_ROTATION_KEY = process.env.ADD_MOVE_ROTATION_KEY !== "0";
+const MAX_UDP_DATAGRAM_BYTES = Math.max(512, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
+const MAX_ENET_COMMANDS_PER_PACKET = Math.max(1, Number(process.env.MAX_ENET_COMMANDS_PER_PACKET || 64));
+// Compatibility-first defaults: one public/NAT address may represent many real players,
+// and every client maintains several Photon endpoints at the same time.
+const MAX_SESSIONS_TOTAL = Math.max(50000, Number(process.env.MAX_SESSIONS_TOTAL || 50000));
+const MAX_SESSIONS_PER_IP = Math.max(512, Number(process.env.MAX_SESSIONS_PER_IP || 512));
+const UDP_RATE_WINDOW_MS = Math.max(1000, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
+const UDP_RATE_PACKETS_PER_IP = Math.max(100000, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
+const UDP_RATE_BYTES_PER_IP = Math.max(512 * 1024 * 1024, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
+const TCP_MAX_CONNECTIONS_PER_IP = Math.max(128, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
+const TCP_IDLE_TIMEOUT_MS = Math.max(120000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
+const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
 
 const sessions = new Map();
 const rooms = new Map();
 const masterSessionsByPlayerId = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
+const udpRateByIp = new Map();
+const tcpConnectionsByIp = new Map();
+
+function allowUdpPacket(rinfo, byteLength) {
+  const address = String(rinfo?.address || "unknown");
+  const now = Date.now();
+  let bucket = udpRateByIp.get(address);
+  if (!bucket || now - bucket.startedAt >= UDP_RATE_WINDOW_MS) {
+    bucket = { startedAt: now, packets: 0, bytes: 0, dropped: 0 };
+    udpRateByIp.set(address, bucket);
+  }
+  bucket.packets++;
+  bucket.bytes += Math.max(0, Number(byteLength || 0));
+  const allowed = bucket.packets <= UDP_RATE_PACKETS_PER_IP && bucket.bytes <= UDP_RATE_BYTES_PER_IP;
+  if (!allowed) bucket.dropped++;
+  if (udpRateByIp.size > 10000) {
+    for (const [ip, value] of udpRateByIp) {
+      if (now - value.startedAt > UDP_RATE_WINDOW_MS * 2) udpRateByIp.delete(ip);
+    }
+  }
+  return allowed;
+}
+
+function sessionCountForIp(address) {
+  let count = 0;
+  for (const session of sessions.values()) {
+    if (session?.rinfo?.address === address || String(session?.remoteKey || "").startsWith(`${address}:`)) count++;
+  }
+  return count;
+}
 let shopCatalogCache = { loadedAt: 0, weapons: [], wears: [] };
 const PROCESS_START_MS = Date.now();
 let lastRoomSessionPruneAt = 0;
@@ -459,6 +504,8 @@ const MAP_SPAWN_POINTS = {
 
 const MAP_MODE_DEATHMATCH = 1;
 const MAP_MODE_TEAM_DEATHMATCH = 2;
+const MAP_MODE_CAPTURE_THE_FLAG = 4;
+const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
 const ZOMBIE_MODE = {
   PAUSE: 1,
@@ -476,9 +523,30 @@ const HUMAN_TEAM = 2;
 const MAP_ALLOWED_MODES = {
   zombi_2: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
   zombi: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
-  arenaring: [MAP_MODE_TEAM_DEATHMATCH],
-  legoturnament: [MAP_MODE_TEAM_DEATHMATCH],
+  arenaring: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
+  arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
 };
+const CTF_MAPS = {
+  arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
+  arenaring: [{team:1,x:-52.497,y:-65,z:282},{team:2,x:117.454,y:-65,z:295}],
+  inferno: [{team:1,x:394.08,y:-66.15,z:157.5},{team:2,x:-10.84,y:-51.73,z:-37.88}],
+  legoturnament: [{team:1,x:79.72,y:-65.41,z:65.65},{team:2,x:202.58,y:-71.92,z:70.62}],
+};
+
+// Centers are the exported Game/finish4/ControlPointN/ControlPoint transforms.
+// Bit_map deliberately has no entry: its active bundle has point prefabs only, not map objects.
+const CONTROL_POINT_MAPS = {
+  arena_3lvl: [{ id: 1, x: 26.692, y: -64.946, z: 288.789 }],
+  arenaring: [{ id: 1, x: 30.08, y: -24.095, z: 297.007 }],
+  inferno: [
+    { id: 1, x: 56.31, y: -60.76, z: 45.83 },
+    { id: 2, x: 238.08, y: -99.91, z: 43.89 },
+  ],
+};
+const CONTROL_POINT_CAPTURE_TICK_MS = Math.max(50, Number(process.env.CONTROL_POINT_CAPTURE_TICK_MS || 100));
+const CONTROL_POINT_CAPTURE_STEP = Math.max(1, Math.min(100, Number(process.env.CONTROL_POINT_CAPTURE_STEP || 1)));
 
 function photonNow() {
   return Math.max(0, Math.floor(Date.now() - PROCESS_START_MS)) >>> 0;
@@ -519,6 +587,9 @@ function normalizeRoomModeValue(value, fallback = MAP_MODE_DEATHMATCH) {
 
 function normalizeModeForMap(mapName, requestedMode) {
   const mode = normalizeRoomModeValue(requestedMode);
+  if (mode === MAP_MODE_CONTROL_POINTS && !CONTROL_POINT_MAPS[mapKey(mapName)]?.length) {
+    return MAP_MODE_DEATHMATCH;
+  }
   const allowed = MAP_ALLOWED_MODES[mapKey(mapName)];
   if (!allowed?.length) return mode;
   return allowed.includes(mode) ? mode : allowed[0];
@@ -1921,41 +1992,41 @@ const SET_BONUS_DEFINITIONS = [
 ];
 
 const ASSEMBLAGE_BONUS_TEXTS = {
-  1: "+15% защита от ракетниц\n+5% к Здоровью",
-  2: "+15% защита от дробовиков\n+5% к Здоровью",
-  3: "+5% защита от дробовиков\nНебольшой бонус к прыжку после выстрела из дробовика",
-  6: "+10% защита от снайперок\n+5% к Броне",
-  7: "+5% защита от пистолетов\n+10% защита от огнеметов\n+5% к Здоровью\n+2% защиты от дробовиков",
-  8: "+10% защиты от дробовиков\n+2% защита от снайперок\n+2% защита от оружия ближнего боя\n+5% к Здоровью",
-  9: "+35% защиты от ледометов\n+5% к Здоровью\n-20% защиты от поджигающего оружия",
-  10: "+5% защиты от оружия ближнего боя\n+5% защиты от ракетниц\n+5% защиты от снайперок\n+5% к Здоровью",
-  11: "Урон снайперок на сред. дистанции +2\nЗащита от дробовиков +5%\nЗащита от снайперок +15%\n+5% к Здоровью",
-  12: "+10% защиты от пулеметов\n+15% защиты от снайперок\n+5% защиты от ракетниц\n+15% защиты от дробовиков\n+15% защиты от огнеметов\n+7% к здоровью\nурон автоматов на дальней дистанции +3\nурон снайперок на средней дистанции +2",
-  14: "Урон снайперок на сред. дистанции +2\nЗащита от дробовиков +10%\nЗащита от снайперок +10%\n+5% к Здоровью",
-  15: "Здоровье +7%\nЗащита от:\nракетниц +15%\nавтоматов +11%\nдробовиков +10%\nснайперок +15%\nпистолетов +7%\nУрон автоматов на дальней дистанции +4",
-  16: "Здоровье +5%\nЗащита от:\nракетниц +13%\nавтоматов +10%\nдробовиков +9%\nснайперок +15%\nпистолетов +5%\nУрон автоматов на дальней дистанции +3",
-  17: "Здоровье +5%\nЗащита от:\nракетниц +11%\nавтоматов +9%\nдробовиков +8%\nснайперок +15%\nпистолетов +3%\nУрон автоматов на дальней дистанции +2",
-  18: "+6% к Здоровью\n+10% защита от дробовиков\n+8% защита от автоматов\n+5% защита от огнеметов\n+7% защита от снайперок\nурон автоматов на дальней дистанции +3",
-  19: "+3% к Здоровью\n+3% защита от снайперок\n+5% защита от дробовиков\n+5% Защита от пулеметов\nувеличивает скорость передвижения",
-  20: "+6% к Здоровью\n+10% защита от дробовиков\n+8% защита от автоматов\n+5% защита от огнеметов\n+7% защита от снайперок\nурон автоматов на дальней дистанции +3",
-  21: "+7% защита от автоматов\n+7% защита от дробовиков\n+3% защита от гранатометов\n+10% защита от снайперок\n+5% к Здоровью\nурон снайперок на средней дистанции +2",
-  22: "+15% защиты от снайперок\n+10% Здоровью",
-  23: "+6% Здоровью\n+10% защиты от дробовиков\n+12% защиты от снайперок\n+3% защиты от автомата Провокатор\n+3% защиты от пистолетов",
-  24: "+5% Здоровью\n+10% защиты от оружия ближнего боя\n+7% защиты от снайперок\n+5% защиты от ракетниц\n+5% защиты от дробовика Сибиряк",
-  25: "+7% Здоровью\n+7% защиты от дробовиков\n+12% защиты от снайперок\n+7% защиты от пулеметов \n+10% защиты от огнеметов\nурон автоматов на дальней дистанции +3",
-  26: "+6% Здоровью\n+5% защиты от дробовиков\n+10% защиты от снайперок\n+5% защиты от автоматов\n+10% защиты от огнеметов\nурон автоматов на дальней дистанции +3",
-  27: "+10% защиты от пулеметов\n+12% защиты от снайперок\n+10% защиты от оружия ближнего боя\n+5% защиты от автоматов",
-  28: "+10% защиты от ручного\n+5% защиты от снайперок\n+10% защиты от ракетниц\n+5% защиты от снайперки Писец\nурон автоматов на дальней дистанции +2",
-  29: "+10% защиты от пулеметов\n+10% защиты от снайперок\n+5% защиты от ракетниц\n+10% защиты от дробовиков\n+15% защиты от огнеметов\n+7% к здоровью\nурон автоматов на дальней дистанции +4",
-  30: "+5% защиты от снайперок\n+5% защиты от ракетниц\n+10% защиты от гранатометов\n+4% к здоровью\nурон пулеметов на дальней дистанции +3\nурон пистолетов на средней дистанции +3",
-  31: "+5% защиты от оружия ближнего боя\n+10% защиты от снайперок\n+12% защиты от пистолетов\n+8% защиты от дробовиков\n+6% к здоровью\nурон автоматов на средней дистанции +2\nурон пулеметов на ближней дистанции +5",
-  32: "+10% защиты от дробовиков\n+5% защиты от снайперок\n+5% защиты от ракетниц\n+10% защиты от огнеметов\n+5% защиты от гранатометов\n+20% защиты от оружия ближнего боя\n+15% к здоровью\n+2% к скорости\nурон снайперок на средней дистанции +2\nурон автоматов на дальней дистанции +4",
-  33: "+3% защиты от автоматов\n+10% защиты от оружия пистолетов\n+10% защиты от снайперок\n+5% защиты от ракетниц\n+15% защиты от огнеметов\n+4% к здоровью\nурон автоматов на дальней дистанции +4\nурон пистолетов на средней дистанции +2",
-  34: "+5% защиты от автоматов\n+10% защиты от оружия ближнего боя\n+10% защиты от снайперок\n+15% защиты от огнеметов\n+4% защиты от гранатометов\n+5% к здоровью\nурон автоматов на дальней дистанции +3\nурон пулеметов на средней дистанции +5",
-  35: "+15% защиты от дробовиков\n+15% защиты от огнеметов\n+5% защиты от снайперок\n+5% защиты от оружия ближнего боя\n+12% к здоровью\nурон дробовиков на средней дистанции +6\nурон автоматов на дальней дистанции +5",
-  36: "+10% защиты от пистолетов\n+10% защиты от снайперок\n+9% к здоровью\nурон пистолетов на средней дистанции +7\nурон автоматов на средней дистанции +6",
-  37: "+10% защиты от автоматов\n+5% защиты от снайперок\n+4% защиты от пистолетов\n+15% защиты от оружия ближнего боя\n+15% защиты от ракетниц\n+15% защиты от гранатометов\n+5% защиты от дробовиков\n+4% к здоровью\nурон ракетниц на дальней дистанции +6\nурон автоматов на средней дистанции +3",
-  38: "+50% защиты от дробовиков\n+50% защиты от огнеметов\n+150 к здоровью\n+20 к броне\nурон автоматов на дальней дистанции +3\nурон пулеметов на средней дистанции +5",
+  1: "+15% Р·Р°С‰РёС‚Р° РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  2: "+15% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  3: "+5% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\nРќРµР±РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  6: "+10% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Рє Р‘СЂРѕРЅРµ",
+  7: "+5% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+2% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ",
+  8: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  9: "+35% Р·Р°С‰РёС‚С‹ РѕС‚ Р»РµРґРѕРјРµС‚РѕРІ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ\n-20% Р·Р°С‰РёС‚С‹ РѕС‚ РїРѕРґР¶РёРіР°СЋС‰РµРіРѕ РѕСЂСѓР¶РёСЏ",
+  10: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  11: "РЈСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґ. РґРёСЃС‚Р°РЅС†РёРё +2\nР—Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ +5%\nР—Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє +15%\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  12: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  14: "РЈСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґ. РґРёСЃС‚Р°РЅС†РёРё +2\nР—Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ +10%\nР—Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє +10%\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  15: "Р—РґРѕСЂРѕРІСЊРµ +7%\nР—Р°С‰РёС‚Р° РѕС‚:\nСЂР°РєРµС‚РЅРёС† +15%\nР°РІС‚РѕРјР°С‚РѕРІ +11%\nРґСЂРѕР±РѕРІРёРєРѕРІ +10%\nСЃРЅР°Р№РїРµСЂРѕРє +15%\nРїРёСЃС‚РѕР»РµС‚РѕРІ +7%\nРЈСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4",
+  16: "Р—РґРѕСЂРѕРІСЊРµ +5%\nР—Р°С‰РёС‚Р° РѕС‚:\nСЂР°РєРµС‚РЅРёС† +13%\nР°РІС‚РѕРјР°С‚РѕРІ +10%\nРґСЂРѕР±РѕРІРёРєРѕРІ +9%\nСЃРЅР°Р№РїРµСЂРѕРє +15%\nРїРёСЃС‚РѕР»РµС‚РѕРІ +5%\nРЈСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  17: "Р—РґРѕСЂРѕРІСЊРµ +5%\nР—Р°С‰РёС‚Р° РѕС‚:\nСЂР°РєРµС‚РЅРёС† +11%\nР°РІС‚РѕРјР°С‚РѕРІ +9%\nРґСЂРѕР±РѕРІРёРєРѕРІ +8%\nСЃРЅР°Р№РїРµСЂРѕРє +15%\nРїРёСЃС‚РѕР»РµС‚РѕРІ +3%\nРЈСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  18: "+6% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+8% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  19: "+3% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+3% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+5% Р—Р°С‰РёС‚Р° РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\nСѓРІРµР»РёС‡РёРІР°РµС‚ СЃРєРѕСЂРѕСЃС‚СЊ РїРµСЂРµРґРІРёР¶РµРЅРёСЏ",
+  20: "+6% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+8% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  21: "+7% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+7% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+3% Р·Р°С‰РёС‚Р° РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  22: "+15% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+10% Р—РґРѕСЂРѕРІСЊСЋ",
+  23: "+6% Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+3% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚Р° РџСЂРѕРІРѕРєР°С‚РѕСЂ\n+3% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ",
+  24: "+5% Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+7% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєР° РЎРёР±РёСЂСЏРє",
+  25: "+7% Р—РґРѕСЂРѕРІСЊСЋ\n+7% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+7% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ \n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  26: "+6% Р—РґРѕСЂРѕРІСЊСЋ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  27: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ",
+  28: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЂСѓС‡РЅРѕРіРѕ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРєРё РџРёСЃРµС†\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  29: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4",
+  30: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+4% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ РїРёСЃС‚РѕР»РµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  31: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+8% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+6% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° Р±Р»РёР¶РЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+  32: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+20% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+15% Рє Р·РґРѕСЂРѕРІСЊСЋ\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\nСѓСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4",
+  33: "+3% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+4% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4\nСѓСЂРѕРЅ РїРёСЃС‚РѕР»РµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  34: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+4% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+5% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+  35: "+15% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+12% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ РґСЂРѕР±РѕРІРёРєРѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +6\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+  36: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+9% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ РїРёСЃС‚РѕР»РµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +7\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +6",
+  37: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+4% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+4% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ СЂР°РєРµС‚РЅРёС† РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +6\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  38: "+50% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+50% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+150 Рє Р·РґРѕСЂРѕРІСЊСЋ\n+20 Рє Р±СЂРѕРЅРµ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
 };
 
 const RESTORED_SET_BONUS_DEFINITIONS = [
@@ -2479,52 +2550,52 @@ function wearBonusKey(selectedWear) {
 }
 
 const RESTORED_WEAR_BONUS_TEXTS = new Map(Object.entries({
-  "6:boot02": "+3% защита от пистолетов\n+3% к скорости\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:sneakolimpic": "Большой бонус к прыжку после выстрела из дробовика\nЗащита от автоматов +3%",
-  "6:tacticalb01": "+1% к скорости передвижения\n+2% защита от автоматов\nВыше среднего бонус к прыжку после выстрела из дробовика",
-  "6:sneakv2b05": "+2% защита от автоматов\n+1% к скорости передвижения\nВыше среднего бонус к прыжку после выстрела из дробовика",
-  "6:sneakv2b02": "Выше среднего бонус к прыжку после выстрела из дробовика",
-  "6:sneakv2b06": "+2% к скорости передвижения\n+1% защита от автоматов\nВыше среднего бонус к прыжку после выстрела из дробовика",
-  "6:sneakv2b03": "+2% защита от автоматов\n+1% к скорости передвижения",
-  "6:sneakv2b04": "+3% защита от автоматов\n+1% к скорости",
-  "6:infernal": "Большой бонус к прыжку после выстрела из дробовика\n+2% защита от автоматов\n+1% к скорости",
-  "6:franky": "Большой бонус к прыжку после выстрела из дробовика\n+4% защита от автоматов",
-  "6:sneakv2b10": "Большой бонус к прыжку после выстрела из дробовика\n+2% к скорости\n+3% защита от автоматов",
-  "6:anarch": "Большой бонус к прыжку после выстрела из дробовика\n+5% к скорости",
-  "6:avenger": "+3% защита от снайперок\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:zadira": "+4% защита от автоматов\n+2% защита от оружия ближнего боя\n+1% к скорости\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:prizrak": "+1% защита от снайперок\n+3% к скорости\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:sneakv201": "+5% защита от оружия ближнего боя\n+10% защита от пистолетов\n+8% к скорости\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:business": "+5% защита от снайперок\n+3% защита от пистолетов\n+2% защита от дробовиков\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:stalker": "+10% защита от ракетниц\n+10% защита от огнеметов\n+2% к скорости\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:thanos": "+5% защита от пулеметов\n+5% защита от пистолетов\n+10% защита от гранатометов\nБольшой бонус к прыжку после выстрела из дробовика",
-  "6:slip99": "+2% защита от автоматов\n+4% защита от пистолетов\n+2% защита от оружия ближнего боя\n+40% к прыжку после выстрела из дробовика",
+  "6:boot02": "+3% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+3% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakolimpic": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\nР—Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ +3%",
+  "6:tacticalb01": "+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b05": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b02": "Р’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b06": "+2% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\n+1% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b03": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ",
+  "6:sneakv2b04": "+3% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё",
+  "6:infernal": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё",
+  "6:franky": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+4% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ",
+  "6:sneakv2b10": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\n+3% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ",
+  "6:anarch": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+5% Рє СЃРєРѕСЂРѕСЃС‚Рё",
+  "6:avenger": "+3% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:zadira": "+4% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:prizrak": "+1% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+3% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv201": "+5% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+8% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:business": "+5% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+3% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:stalker": "+10% Р·Р°С‰РёС‚Р° РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:thanos": "+5% Р·Р°С‰РёС‚Р° РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:slip99": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+4% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+40% Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
 }));
 
 const SHOTGUN_JUMP_PERCENT_BY_BOOT = new Map(Object.entries({
-  "6:sneak02": 5,      // Форест
-  "6:slip01": 5,       // Тараканья смерть
-  "6:boot01": 5,       // Берцы
-  "6:sneakv202": 10,   // Шнур
-  "6:sneakv203": 10,   // Прыгун
-  "6:sneakolimpic": 15, // Легкоступ
-  "6:skeleton": 15,    // Смертоходы
-  "6:santa": 15,       // Санирайдеры
-  "6:bear": 15,        // Медведолапы
-  "6:tacticalb01": 15, // Дельтовики
-  "6:tactical01": 15,  // Армейцы
-  "6:tactical02": 15,  // Сверхпроходимец
-  "6:sneakv2b06": 16,  // Кислоходы
-  "6:sneakv2b10": 16,  // Лаймабутсы
-  "6:santa2": 16,      // Трескуны
-  "6:sneakv2b05": 17,  // Кросы
-  "6:mummy": 17,       // Пескоходы
-  "6:infernal": 17,    // Ходящие по углям
-  "6:franky": 17,      // Единение с почвой
-  "6:boot02": 17,      // Танжеры
-  "6:anarch": 20,      // Кедоны
-  "6:avenger": 20,     // СиньДикаты
-  "6:slip99": 40,      // Шлепаны
+  "6:sneak02": 5,      // Р¤РѕСЂРµСЃС‚
+  "6:slip01": 5,       // РўР°СЂР°РєР°РЅСЊСЏ СЃРјРµСЂС‚СЊ
+  "6:boot01": 5,       // Р‘РµСЂС†С‹
+  "6:sneakv202": 10,   // РЁРЅСѓСЂ
+  "6:sneakv203": 10,   // РџСЂС‹РіСѓРЅ
+  "6:sneakolimpic": 15, // Р›РµРіРєРѕСЃС‚СѓРї
+  "6:skeleton": 15,    // РЎРјРµСЂС‚РѕС…РѕРґС‹
+  "6:santa": 15,       // РЎР°РЅРёСЂР°Р№РґРµСЂС‹
+  "6:bear": 15,        // РњРµРґРІРµРґРѕР»Р°РїС‹
+  "6:tacticalb01": 15, // Р”РµР»СЊС‚РѕРІРёРєРё
+  "6:tactical01": 15,  // РђСЂРјРµР№С†С‹
+  "6:tactical02": 15,  // РЎРІРµСЂС…РїСЂРѕС…РѕРґРёРјРµС†
+  "6:sneakv2b06": 16,  // РљРёСЃР»РѕС…РѕРґС‹
+  "6:sneakv2b10": 16,  // Р›Р°Р№РјР°Р±СѓС‚СЃС‹
+  "6:santa2": 16,      // РўСЂРµСЃРєСѓРЅС‹
+  "6:sneakv2b05": 17,  // РљСЂРѕСЃС‹
+  "6:mummy": 17,       // РџРµСЃРєРѕС…РѕРґС‹
+  "6:infernal": 17,    // РҐРѕРґСЏС‰РёРµ РїРѕ СѓРіР»СЏРј
+  "6:franky": 17,      // Р•РґРёРЅРµРЅРёРµ СЃ РїРѕС‡РІРѕР№
+  "6:boot02": 17,      // РўР°РЅР¶РµСЂС‹
+  "6:anarch": 20,      // РљРµРґРѕРЅС‹
+  "6:avenger": 20,     // РЎРёРЅСЊР”РёРєР°С‚С‹
+  "6:slip99": 40,      // РЁР»РµРїР°РЅС‹
 }));
 
 function restoredWearBonusText(selectedWear) {
@@ -2565,31 +2636,31 @@ function addProtectionBonus(target, key, amount) {
 }
 
 const WEAR_PROTECTION_TERMS = [
-  { key: "automatic", pattern: /автомат/ },
-  { key: "machinegun", pattern: /пулем/ },
-  { key: "pistol", pattern: /пистолет/ },
-  { key: "shotgun", pattern: /дробов/ },
-  { key: "sniper", pattern: /снайпер|анаконд/ },
-  { key: "rocket", pattern: /ракет|троллебуз/ },
-  { key: "grenade", pattern: /гранатом|гранатин/ },
-  { key: "snow", pattern: /ледом|снегом/ },
-  { key: "flamer", pattern: /огнем|поджига/ },
-  { key: "melee", pattern: /ближнего\s+боя|ручн|лезви/ },
+  { key: "automatic", pattern: /Р°РІС‚РѕРјР°С‚/ },
+  { key: "machinegun", pattern: /РїСѓР»РµРј/ },
+  { key: "pistol", pattern: /РїРёСЃС‚РѕР»РµС‚/ },
+  { key: "shotgun", pattern: /РґСЂРѕР±РѕРІ/ },
+  { key: "sniper", pattern: /СЃРЅР°Р№РїРµСЂ|Р°РЅР°РєРѕРЅРґ/ },
+  { key: "rocket", pattern: /СЂР°РєРµС‚|С‚СЂРѕР»Р»РµР±СѓР·/ },
+  { key: "grenade", pattern: /РіСЂР°РЅР°С‚РѕРј|РіСЂР°РЅР°С‚РёРЅ/ },
+  { key: "snow", pattern: /Р»РµРґРѕРј|СЃРЅРµРіРѕРј/ },
+  { key: "flamer", pattern: /РѕРіРЅРµРј|РїРѕРґР¶РёРіР°/ },
+  { key: "melee", pattern: /Р±Р»РёР¶РЅРµРіРѕ\s+Р±РѕСЏ|СЂСѓС‡РЅ|Р»РµР·РІРё/ },
 ];
 
 const ALL_WEAR_PROTECTION_KEYS = WEAR_PROTECTION_TERMS.map((term) => term.key);
 const ALL_DAMAGE_RANGES = ["short", "medium", "long"];
 const WEAR_DAMAGE_TERMS = [
-  { types: [4], pattern: /автомат/ },
-  { types: [6], pattern: /пулем/ },
-  { types: [3], pattern: /пистолет/ },
-  { types: [7], pattern: /дробов/ },
-  { types: [10], pattern: /снайпер|анаконд/ },
-  { types: [8], pattern: /ракет|троллебуз/ },
-  { types: [9, 15], pattern: /гранатом|гранатин/ },
-  { types: [11], pattern: /ледом|снегом/ },
-  { types: [5], pattern: /огнем/ },
-  { types: [1, 2], pattern: /ближнего\s+боя|ручн|лезви/ },
+  { types: [4], pattern: /Р°РІС‚РѕРјР°С‚/ },
+  { types: [6], pattern: /РїСѓР»РµРј/ },
+  { types: [3], pattern: /РїРёСЃС‚РѕР»РµС‚/ },
+  { types: [7], pattern: /РґСЂРѕР±РѕРІ/ },
+  { types: [10], pattern: /СЃРЅР°Р№РїРµСЂ|Р°РЅР°РєРѕРЅРґ/ },
+  { types: [8], pattern: /СЂР°РєРµС‚|С‚СЂРѕР»Р»РµР±СѓР·/ },
+  { types: [9, 15], pattern: /РіСЂР°РЅР°С‚РѕРј|РіСЂР°РЅР°С‚РёРЅ/ },
+  { types: [11], pattern: /Р»РµРґРѕРј|СЃРЅРµРіРѕРј/ },
+  { types: [5], pattern: /РѕРіРЅРµРј/ },
+  { types: [1, 2], pattern: /Р±Р»РёР¶РЅРµРіРѕ\s+Р±РѕСЏ|СЂСѓС‡РЅ|Р»РµР·РІРё/ },
 ];
 
 function protectionKeyFromText(text) {
@@ -2599,7 +2670,7 @@ function protectionKeyFromText(text) {
 
 function protectionKeysFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (/всех\s+типов\s+(?:оруж|оруд)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
+  if (/РІСЃРµС…\s+С‚РёРїРѕРІ\s+(?:РѕСЂСѓР¶|РѕСЂСѓРґ)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
   const keys = WEAR_PROTECTION_TERMS
     .filter((term) => term.pattern.test(normalized))
     .map((term) => term.key);
@@ -2618,9 +2689,9 @@ function damageTypesFromText(text) {
 
 function damageRangeFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (/ближн/.test(normalized)) return "short";
-  if (/средн|сред\./.test(normalized)) return "medium";
-  if (/дальн/.test(normalized)) return "long";
+  if (/Р±Р»РёР¶РЅ/.test(normalized)) return "short";
+  if (/СЃСЂРµРґРЅ|СЃСЂРµРґ\./.test(normalized)) return "medium";
+  if (/РґР°Р»СЊРЅ/.test(normalized)) return "long";
   return "";
 }
 
@@ -2647,19 +2718,19 @@ function applyWearProtectionBonuses(modifiers, text) {
     }
 
     const lineRange = damageRangeFromText(line);
-    if (/защит/.test(line) && lineRange) rangeContext = lineRange;
-    if (/защит.*от\s*:/.test(line)) {
+    if (/Р·Р°С‰РёС‚/.test(line) && lineRange) rangeContext = lineRange;
+    if (/Р·Р°С‰РёС‚.*РѕС‚\s*:/.test(line)) {
       protectionList = true;
       continue;
     }
 
-    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*защит[аы]?\s+от\s+(.+)/);
+    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*Р·Р°С‰РёС‚[Р°С‹]?\s+РѕС‚\s+(.+)/);
     if (prefixMatch) {
       addWearProtectionBonuses(modifiers, protectionKeysFromText(prefixMatch[2]), prefixMatch[1], lineRange);
       continue;
     }
 
-    const suffixMatch = line.match(/защит[аы]?\s+от\s+(.+?)\s*([+-]?\d+)\s*%/);
+    const suffixMatch = line.match(/Р·Р°С‰РёС‚[Р°С‹]?\s+РѕС‚\s+(.+?)\s*([+-]?\d+)\s*%/);
     if (suffixMatch) {
       addWearProtectionBonuses(modifiers, protectionKeysFromText(suffixMatch[1]), suffixMatch[2], lineRange);
       continue;
@@ -2691,16 +2762,16 @@ function applyWearDamageBonuses(modifiers, text) {
       protectionList = false;
       continue;
     }
-    if (/защит.*от\s*:/.test(line)) {
+    if (/Р·Р°С‰РёС‚.*РѕС‚\s*:/.test(line)) {
       protectionList = true;
       continue;
     }
-    if (/защит/.test(line)) continue;
-    if (protectionList && !/урон/.test(line)) continue;
-    if (/урон/.test(line)) protectionList = false;
+    if (/Р·Р°С‰РёС‚/.test(line)) continue;
+    if (protectionList && !/СѓСЂРѕРЅ/.test(line)) continue;
+    if (/СѓСЂРѕРЅ/.test(line)) protectionList = false;
 
     const lineRange = damageRangeFromText(line);
-    if (/урон\s+на\s+/.test(line) && lineRange) rangeContext = lineRange;
+    if (/СѓСЂРѕРЅ\s+РЅР°\s+/.test(line) && lineRange) rangeContext = lineRange;
 
     const amountMatch = line.match(/\+(\d+)\s*%?/);
     if (!amountMatch) continue;
@@ -2715,16 +2786,16 @@ function applyWearDamageBonuses(modifiers, text) {
 
 function shotgunJumpBonusFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (!/(прыж|jump)/.test(normalized) || !/(дробов|shotgun)/.test(normalized)) return 0;
-  if (/огром|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
-  if (/выше\s+средн|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
-  if (/мал|небольш|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
-  if (/больш|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
+  if (!/(РїСЂС‹Р¶|jump)/.test(normalized) || !/(РґСЂРѕР±РѕРІ|shotgun)/.test(normalized)) return 0;
+  if (/РѕРіСЂРѕРј|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
+  if (/РІС‹С€Рµ\s+СЃСЂРµРґРЅ|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
+  if (/РјР°Р»|РЅРµР±РѕР»СЊС€|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
+  if (/Р±РѕР»СЊС€|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
   return SHOTGUN_RECOIL_JUMP_BONUS;
 }
 
 function applyJumpPercentBonuses(modifiers, text) {
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?прыж/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?РїСЂС‹Р¶/g)) {
     modifiers.jumpPercent += numberOr(match[1], 0);
   }
   for (const match of text.matchAll(/\+(\d+)\s*%\s*to\s+jump/g)) {
@@ -2765,31 +2836,31 @@ function applyWearTextBonuses(modifiers, item = {}, options = {}) {
   applyWearDamageBonuses(modifiers, text);
   applyJumpPercentBonuses(modifiers, text);
 
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?здоров(?:ью|ья|ье)?/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?Р·РґРѕСЂРѕРІ(?:СЊСЋ|СЊСЏ|СЊРµ)?/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/здоров(?:ье|ью|ья)?\s*\+(\d+)\s*%/g)) {
+  for (const match of text.matchAll(/Р·РґРѕСЂРѕРІ(?:СЊРµ|СЊСЋ|СЊСЏ)?\s*\+(\d+)\s*%/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/жизн[ьи]\s*\+(\d+)\s*%/g)) {
+  for (const match of text.matchAll(/Р¶РёР·РЅ[СЊРё]\s*\+(\d+)\s*%/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?жизн[ьи]/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?Р¶РёР·РЅ[СЊРё]/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*к\s*здоров(?:ью|ья|ье)?/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*Рє\s*Р·РґРѕСЂРѕРІ(?:СЊСЋ|СЊСЏ|СЊРµ)?/g)) {
     modifiers.healthFlat += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*скорости/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*Рє\s*СЃРєРѕСЂРѕСЃС‚Рё/g)) {
     modifiers.speedPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*брон[еия]/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*Рє\s*Р±СЂРѕРЅ[РµРёСЏ]/g)) {
     modifiers.armorPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*к\s*броне/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*Рє\s*Р±СЂРѕРЅРµ/g)) {
     modifiers.armorFlat += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/брон[яе]\s*\+(\d+)/g)) {
+  for (const match of text.matchAll(/Р±СЂРѕРЅ[СЏРµ]\s*\+(\d+)/g)) {
     modifiers.armorFlat += numberOr(match[1], 0);
   }
   if (!options.suppressShotgunJump) {
@@ -3296,7 +3367,11 @@ async function postApiJson(path, body) {
   if (!API_BASE_URL || typeof fetch !== "function") return null;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
-    headers: { accept: "application/json", "content-type": "application/json" },
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
+    },
     body: JSON.stringify(body || {}),
   });
   if (!response.ok) throw new Error(`status=${response.status}`);
@@ -3577,13 +3652,18 @@ function makeZombieModeStateRaw(mode) {
 function makeGameStateRaw(session) {
   const entries = [
     { key: rawByte(88), value: makeScoreRaw(session) },
-    { key: rawByte(77), value: rawBool(false) },
+    { key: rawByte(77), value: rawBool(isStandardRoundPaused(session.room)) },
     { key: rawByte(95), value: rawLong(session.room.startedAt) },
   ];
 
   if (isZombieRoom(session.room)) {
     entries.push({ key: rawByte(51), value: makeZombieModeStateRaw(zombieModeForRoom(session.room)) });
   }
+
+  const controlPoints = makeControlPointsRaw(session.room);
+  if (controlPoints) entries.push({ key: rawByte(78), value: controlPoints });
+  const flags = makeFlagsRaw(session.room);
+  if (flags) entries.push({ key: rawByte(79), value: flags });
 
   if (INCLUDE_PEERS_IN_GAMESTATE) {
     entries.unshift({ key: rawByte(99), value: makeRoomActorListRaw(session.room, session) });
@@ -3602,6 +3682,123 @@ function makeGameStateRaw(session) {
   }
 
   return rawHashtable(entries);
+}
+
+function isCtfRoom(room) { return Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG && Boolean(CTF_MAPS[mapKey(room?.map)]?.length); }
+function makeFlagState(mapName) { return new Map((CTF_MAPS[mapKey(mapName)] || []).map((p) => [p.team, {...p, bearer:-1, state:0}])); }
+function makeFlagRaw(flag) { return rawHashtable([{key:rawByte(64),value:rawShort(flag.team)},{key:rawByte(65),value:makeTransformRaw(flag)},{key:rawByte(62),value:rawInt(flag.state)},{key:rawByte(63),value:rawInt(flag.bearer)}]); }
+function makeFlagsRaw(room) { return isCtfRoom(room) ? rawHashtable(Array.from(room.flags.values()).map((f)=>({key:rawShort(f.team),value:makeFlagRaw(f)}))) : null; }
+function makeFlagEvent(type, flag) { return rawEvent(89,[{key:254,value:rawInt(0)},{key:245,value:rawHashtable([{key:rawByte(85),value:rawShort(type)},{key:rawByte(84),value:makeFlagRaw(flag)}])}]); }
+function ctfDistance(a,b) { return a && b ? Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z) : Infinity; }
+function updateCtfOnMove(session, channel) {
+  const room=session.room; if(!isCtfRoom(room)||!session.spawned||session.dead) return;
+  for(const flag of room.flags.values()) {
+    if(flag.bearer===session.actorId) {
+      const home=room.flags.get(session.team); if(home && home.bearer<0 && home.state===0 && ctfDistance(session.lastTransform,home)<=8) { flag.bearer=-1; flag.state=0; flag.x=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).x; flag.y=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).y; flag.z=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).z; session.points=numberOr(session.points,0)+1; broadcastReliableToRoom(null,makeFlagEvent(1,flag),channel,'flag-deliver',{requireLiveReady:false}); broadcastReliableToRoom(null,makeScoreUpdateEvent(session),channel,'flag-score',{requireLiveReady:false}); maybeFinishStandardRound(room,'flag-deliver',channel); }
+    } else if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
+      if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); broadcastReliableToRoom(null,makeFlagEvent(3,flag),channel,'flag-return',{requireLiveReady:false}); }
+      else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; broadcastReliableToRoom(null,makeFlagEvent(0,flag),channel,'flag-capture',{requireLiveReady:false}); }
+    }
+  }
+}
+function resetCtfFlag(room, flag, type, channel) {
+  const home=(CTF_MAPS[mapKey(room.map)]||[]).find((item)=>item.team===flag.team); if(!home)return;
+  Object.assign(flag,home,{bearer:-1,state:0}); broadcastReliableToRoom(null,makeFlagEvent(type,flag),channel,'flag-reset',{requireLiveReady:false});
+}
+function dropCtfFlagsForSession(session, type=2, channel=0) {
+  const room=session?.room; if(!isCtfRoom(room))return;
+  for(const flag of room.flags.values()) if(flag.bearer===session.actorId) { flag.bearer=-1; flag.state=0; Object.assign(flag,session.lastTransform||flag); broadcastReliableToRoom(null,makeFlagEvent(type,flag),channel,'flag-drop',{requireLiveReady:false}); }
+}
+
+function isControlPointsRoom(room) {
+  return Number(room?.mode) === MAP_MODE_CONTROL_POINTS && Boolean(CONTROL_POINT_MAPS[mapKey(room?.map)]?.length);
+}
+
+function makeControlPointsRaw(room) {
+  if (!isControlPointsRoom(room) || !room.controlPoints?.size) return null;
+  return rawHashtable(Array.from(room.controlPoints.values()).map((point) => ({
+    key: rawShort(point.id),
+    value: rawHashtable([
+      { key: rawByte(61), value: rawShort(point.id) },
+      { key: rawByte(59), value: rawInt(point.state) },
+      { key: rawByte(58), value: rawByte(point.progress) },
+      { key: rawByte(60), value: rawShort(point.team) },
+    ]),
+  })));
+}
+
+function makeControlPointEvent(point) {
+  return rawEvent(88, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([{ key: rawByte(82), value: rawHashtable([
+      { key: rawByte(61), value: rawShort(point.id) },
+      { key: rawByte(59), value: rawInt(point.state) },
+      { key: rawByte(58), value: rawByte(point.progress) },
+      { key: rawByte(60), value: rawShort(point.team) },
+    ]) }]) },
+  ]);
+}
+
+function makeControlPointState(mapName) {
+  return new Map((CONTROL_POINT_MAPS[mapKey(mapName)] || []).map((definition) => [definition.id, {
+    ...definition, state: 0, progress: 0, team: -1, occupants: new Set(),
+  }]));
+}
+
+function controlPointContains(point, transform) {
+  if (!point || !transform) return false;
+  return Math.hypot(transform.x - point.x, transform.z - point.z) <= 6 && Math.abs(transform.y - point.y) <= 7.2;
+}
+
+function updateControlPoint(room, point, channel) {
+  const teams = new Set();
+  for (const actorId of Array.from(point.occupants)) {
+    const player = room.players.get(actorId);
+    if (!player || !player.spawned || player.dead || isRoundPausedSession(player) || !controlPointContains(point, player.lastTransform)) {
+      point.occupants.delete(actorId);
+      continue;
+    }
+    if (player.team === 1 || player.team === 2) teams.add(player.team);
+  }
+  if (teams.size !== 1) return false;
+  const team = Array.from(teams)[0];
+  const before = `${point.state}/${point.progress}/${point.team}`;
+  const wasCaptured = point.state === 2;
+  if (point.team !== team) {
+    if (point.team > 0 && point.progress > 0) point.progress = Math.max(0, point.progress - CONTROL_POINT_CAPTURE_STEP);
+    else { point.team = team; point.state = 1; point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP); }
+  } else if (point.state !== 2) {
+    point.state = 1;
+    point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP);
+  }
+  if (point.progress >= 100) { point.progress = 100; point.state = 2; }
+  if (before === `${point.state}/${point.progress}/${point.team}`) return false;
+  const event = makeControlPointEvent(point);
+  broadcastReliableToRoom(null, event, channel, "control-point", { requireLiveReady: false });
+  if (!wasCaptured && point.state === 2) {
+    for (const actorId of point.occupants) {
+      const player = room.players.get(actorId);
+      if (!player || player.team !== point.team) continue;
+      player.points = numberOr(player.points, 0) + 1;
+    }
+    const source = Array.from(room.players.values()).find((player) => player?.team === point.team);
+    if (source) broadcastReliableToRoom(null, makeScoreUpdateEvent(source), channel, "control-point-score", { requireLiveReady: false });
+    maybeFinishStandardRound(room, "control-point", channel);
+  }
+  return true;
+}
+
+function startControlPointTicker(room, channel = 0) {
+  if (!isControlPointsRoom(room) || room.controlPointTimer) return;
+  room.controlPointTimer = setInterval(() => {
+    if (!isControlPointsRoom(room)) return;
+    for (const point of room.controlPoints.values()) updateControlPoint(room, point, channel);
+  }, CONTROL_POINT_CAPTURE_TICK_MS);
+}
+
+function stopControlPointTicker(room) {
+  if (room?.controlPointTimer) clearInterval(room.controlPointTimer);
+  if (room) room.controlPointTimer = null;
 }
 
 function makeTransformRaw(point) {
@@ -4372,6 +4569,231 @@ function sendZombiePayloadsToReadyRoom(room, payloads, channel = 0, currentSessi
     sent += sendZombiePayloadToReadyRoom(room, payload, channel, currentSession, currentResponses);
   }
   return sent;
+}
+
+function isStandardRoundRoom(room) {
+  const mode = Number(room?.mode || 0);
+  return mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CONTROL_POINTS;
+}
+
+function isStandardRoundPaused(room) {
+  return isStandardRoundRoom(room) && room?.standardRoundState === "pause";
+}
+
+function isRoundPausedSession(session) {
+  return isZombieRoundPausedSession(session) || isStandardRoundPaused(session?.room);
+}
+
+function standardReadyPlayers(room) {
+  return zombieReadyPlayers(room);
+}
+
+function sendStandardPayloadToReadyRoom(room, payload, channel = 0, currentSession = null, currentResponses = null) {
+  if (!payload || !room?.players?.size) return 0;
+  let sent = 0;
+  for (const playerSession of standardReadyPlayers(room)) {
+    if (currentSession && playerSession === currentSession && Array.isArray(currentResponses)) {
+      currentResponses.push(payload);
+      sent += 1;
+      continue;
+    }
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function resetStandardRoundScore(playerSession) {
+  playerSession.kills = 0;
+  playerSession.deaths = 0;
+  playerSession.points = 0;
+  playerSession.domination = 0;
+  playerSession.revenge = 0;
+  resetSessionFragState(playerSession);
+}
+
+function clearStandardRoundTimer(room) {
+  if (!room?.standardRoundTimer) return;
+  clearTimeout(room.standardRoundTimer);
+  room.standardRoundTimer = null;
+}
+
+function clearStandardRestartTimer(room) {
+  if (!room?.standardRestartTimer) return;
+  clearTimeout(room.standardRestartTimer);
+  room.standardRestartTimer = null;
+}
+
+function clearStandardRoundTimers(room) {
+  clearStandardRoundTimer(room);
+  clearStandardRestartTimer(room);
+}
+
+function makeStandardNewGameEvent(room) {
+  return rawEvent(91, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(95), value: rawLong(room.startedAt) },
+    ]) },
+  ]);
+}
+
+function makeStandardTimeOverEvent(room) {
+  const entries = [{ key: rawByte(95), value: rawLong(room.startedAt) }];
+  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
+    entries.push({ key: rawByte(50), value: rawShortArray([room.standardTeam1Wins || 0, room.standardTeam2Wins || 0]) });
+  }
+  return rawEvent(92, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable(entries) },
+  ]);
+}
+
+function standardRoundWinner(room) {
+  const players = zombieRoomPlayers(room);
+  if (Number(room?.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room?.mode) === MAP_MODE_CONTROL_POINTS) {
+    const source = players[0];
+    if (!source) return 0;
+    const red = teamScorePoints(source, 1);
+    const blue = teamScorePoints(source, 2);
+    return red === blue ? 0 : (red > blue ? 1 : 2);
+  }
+  const ranked = players
+    .slice()
+    .sort((left, right) => numberOr(right.points, right.kills) - numberOr(left.points, left.kills));
+  if (!ranked.length) return 0;
+  const first = numberOr(ranked[0].points, ranked[0].kills);
+  const second = ranked[1] ? numberOr(ranked[1].points, ranked[1].kills) : -1;
+  return first === second ? 0 : Number(ranked[0].actorId || 0);
+}
+
+function resetStandardPlayerForNextRound(playerSession) {
+  resetStandardRoundScore(playerSession);
+  resetZombieInfectionProgress(playerSession);
+  clearSpawnMoveWarningTimer(playerSession);
+  clearSpawnSelfRetryTimers(playerSession);
+  clearSessionWeaponReloadTimers(playerSession);
+  clearSessionActiveShotLedgers(playerSession);
+  clearSessionImpactTimers(playerSession);
+  clearPeerSpawnTimers(playerSession);
+  clearPickupSpawnRepairTimers(playerSession);
+  clearSpawnStallRecovery(playerSession);
+  playerSession.pendingSpawnBroadcast = null;
+  playerSession.pendingPickupSync = null;
+  playerSession.visibleItemIds = new Set();
+  playerSession.team = normalizeTeamForRoom(playerSession, playerSession.team);
+  playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
+  playerSession.spawned = false;
+  playerSession.dead = false;
+  playerSession.moveSeen = false;
+  playerSession.moveCount = 0;
+  playerSession.waitingSelfSpawnMove = false;
+  const stats = sessionRuntimeStats(playerSession);
+  playerSession.health = stats.maxHealth;
+  playerSession.energy = stats.maxEnergy;
+}
+
+function scheduleStandardRoundLimit(room, channel = 0) {
+  clearStandardRoundTimer(room);
+  const timeLimitMs = Math.max(0, numberOr(room?.timeLimit, 0) * 60 * 1000);
+  if (!timeLimitMs) return;
+  const roundSeq = Number(room.standardRoundSeq || 0);
+  room.standardRoundTimer = setTimeout(() => {
+    if (!room || rooms.get(room.name) !== room) return;
+    if (!isStandardRoundRoom(room) || room.standardRoundState !== "active" || Number(room.standardRoundSeq || 0) !== roundSeq) return;
+    finishStandardRound(room, standardRoundWinner(room), "time-limit", channel);
+  }, timeLimitMs);
+  if (typeof room.standardRoundTimer.unref === "function") room.standardRoundTimer.unref();
+}
+
+function startStandardRound(room, channel = 0, reason = "sync") {
+  if (!isStandardRoundRoom(room) || room.standardRoundState === "pause" || room.standardRoundState === "active") return 0;
+  room.standardRoundSeq = Number(room.standardRoundSeq || 0) + 1;
+  room.standardRoundState = "active";
+  room.standardRoundWinner = 0;
+  room.startedAt = photonNow();
+  scheduleStandardRoundLimit(room, channel);
+  console.log(`[round] start room=${room.name} map=${room.map} mode=${room.mode} reason=${reason} players=${standardReadyPlayers(room).length} timeLimit=${room.timeLimit} fragLimit=${room.fragLimit}`);
+  return 1;
+}
+
+function beginNextStandardRound(room, roundSeq, channel = 0) {
+  if (!room || rooms.get(room.name) !== room) return;
+  if (!isStandardRoundRoom(room) || Number(room.standardRoundSeq || 0) !== Number(roundSeq)) return;
+
+  clearStandardRestartTimer(room);
+  if (isCtfRoom(room)) for (const flag of room.flags.values()) resetCtfFlag(room, flag, 4, channel);
+  room.startedAt = photonNow();
+  room.standardRoundState = "ready";
+  room.standardRoundWinner = 0;
+  for (const playerSession of zombieRoomPlayers(room)) resetStandardPlayerForNextRound(playerSession);
+
+  const ready = standardReadyPlayers(room);
+  const newGameSent = sendStandardPayloadToReadyRoom(room, makeStandardNewGameEvent(room), channel);
+  const started = startStandardRound(room, channel, "round-restart");
+  let spawnSent = 0;
+  for (const playerSession of ready) {
+    const spawnEvent = buildSpawnEvent(playerSession, playerSession.team, "standard-round-restart");
+    spawnSent += sendStandardPayloadToReadyRoom(room, spawnEvent, channel);
+  }
+  console.log(`[round] restart room=${room.name} map=${room.map} mode=${room.mode} ready=${ready.length} newGamePeers=${newGameSent} spawnPeers=${spawnSent} started=${started}`);
+}
+
+function scheduleStandardRestart(room, channel = 0) {
+  clearStandardRestartTimer(room);
+  const roundSeq = Number(room.standardRoundSeq || 0);
+  room.standardRestartTimer = setTimeout(() => beginNextStandardRound(room, roundSeq, channel), STANDARD_ROUND_RESTART_MS);
+  if (typeof room.standardRestartTimer.unref === "function") room.standardRestartTimer.unref();
+}
+
+function finishStandardRound(room, winner, reason = "unknown", channel = 0, currentSession = null, currentResponses = null) {
+  if (!isStandardRoundRoom(room) || room.standardRoundState === "pause") return 0;
+  clearStandardRoundTimer(room);
+  room.standardRoundState = "pause";
+  room.standardRoundWinner = Number(winner || 0);
+  room.startedAt = photonNow();
+  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
+    if (Number(winner) === 1) room.standardTeam1Wins = numberOr(room.standardTeam1Wins, 0) + 1;
+    if (Number(winner) === 2) room.standardTeam2Wins = numberOr(room.standardTeam2Wins, 0) + 1;
+  }
+
+  for (const playerSession of zombieRoomPlayers(room)) {
+    clearSpawnMoveWarningTimer(playerSession);
+    clearSpawnSelfRetryTimers(playerSession);
+    clearSessionWeaponReloadTimers(playerSession);
+    clearSessionActiveShotLedgers(playerSession);
+    clearSessionImpactTimers(playerSession);
+    clearPeerSpawnTimers(playerSession);
+    clearPickupSpawnRepairTimers(playerSession);
+    clearSpawnStallRecovery(playerSession);
+    playerSession.pendingSpawnBroadcast = null;
+    playerSession.waitingSelfSpawnMove = false;
+  }
+
+  const scoreSource = currentSession || standardReadyPlayers(room)[0] || zombieRoomPlayers(room)[0];
+  const payloads = [
+    scoreSource ? makeScoreUpdateEvent(scoreSource) : null,
+    makeStandardTimeOverEvent(room),
+  ].filter(Boolean);
+  let sent = 0;
+  for (const payload of payloads) sent += sendStandardPayloadToReadyRoom(room, payload, channel, currentSession, currentResponses);
+  scheduleStandardRestart(room, channel);
+  console.log(`[round] end room=${room.name} map=${room.map} mode=${room.mode} winner=${winner || "draw"} reason=${reason} players=${standardReadyPlayers(room).length} score=${Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH ? `${teamScorePoints(scoreSource, 1)}:${teamScorePoints(scoreSource, 2)}` : "ffa"} sent=${sent}`);
+  return sent;
+}
+
+function maybeFinishStandardRound(room, reason = "state", channel = 0, currentSession = null, currentResponses = null) {
+  if (!isStandardRoundRoom(room) || room.standardRoundState !== "active") return 0;
+  const fragLimit = Math.max(1, numberOr(room.fragLimit, 50));
+  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
+    const source = currentSession || zombieRoomPlayers(room)[0];
+    if (!source) return 0;
+    const red = teamScorePoints(source, 1);
+    const blue = teamScorePoints(source, 2);
+    if (red >= fragLimit || blue >= fragLimit) return finishStandardRound(room, red === blue ? 0 : (red > blue ? 1 : 2), reason, channel, currentSession, currentResponses);
+    return 0;
+  }
+  const winner = zombieRoomPlayers(room).find((playerSession) => numberOr(playerSession.points, playerSession.kills) >= fragLimit);
+  return winner ? finishStandardRound(room, winner.actorId, reason, channel, currentSession, currentResponses) : 0;
 }
 
 function resetZombieRoundScore(playerSession) {
@@ -6229,6 +6651,7 @@ function applyImpactDotTick(effect, targetSession) {
     console.log(`[sync] impact-dot-kill actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} scorePeers=${scorePeers} kills=${numberOr(effect.shooter.kills, 0)} deaths=${numberOr(targetSession.deaths, 0)}`);
     gateKilledSessionsAfterDelivery({ killedSessions: [targetSession] });
     maybeFinishZombieRound(effect.shooter.room, "impact-dot-kill", effect.channel ?? 0);
+    maybeFinishStandardRound(effect.shooter.room, "impact-dot-kill", effect.channel ?? 0);
     return;
   }
 
@@ -6550,8 +6973,8 @@ function buildShotEvent(session, parsed) {
 
   const weaponType = htGet(data, 91)?.value;
   const launchMode = shotLaunchMode(data);
-  if (isZombieRoundPausedSession(session)) {
-    console.log(`[zombie] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=round-paused`);
+  if (isRoundPausedSession(session)) {
+    console.log(`[round] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=round-paused`);
     return null;
   }
   if (!session?.spawned || session.dead) {
@@ -6593,6 +7016,7 @@ function buildShotEvent(session, parsed) {
 function gateKilledSessionsAfterDelivery(response) {
   for (const targetSession of response?.killedSessions || []) {
     if (!targetSession) continue;
+    dropCtfFlagsForSession(targetSession);
     targetSession.moveSeen = false;
     targetSession.waitingSelfSpawnMove = false;
     clearSpawnSelfRetryTimers(targetSession);
@@ -6708,8 +7132,8 @@ function buildProximityPickItemEvent(session, point) {
 function buildWeaponChangeEvent(session, parsed) {
   const data = parsed?.params?.get(245);
   if (!data?.raw) return null;
-  if (isZombieRoundPausedSession(session)) {
-    console.log(`[zombie] weapon-change ignored actor=${session?.actorId ?? "?"} reason=round-paused`);
+  if (isRoundPausedSession(session)) {
+    console.log(`[round] weapon-change ignored actor=${session?.actorId ?? "?"} reason=round-paused`);
     return null;
   }
   if (!session?.spawned || session.dead) {
@@ -6742,8 +7166,8 @@ function buildWeaponChangeEvent(session, parsed) {
 function buildReloadEvent(session, parsed, channel = 0) {
   const data = parsed?.params?.get(245);
   const requestedType = htGet(data, 89)?.value;
-  if (isZombieRoundPausedSession(session)) {
-    console.log(`[zombie] reload ignored actor=${session?.actorId ?? "?"} type=${requestedType} reason=round-paused`);
+  if (isRoundPausedSession(session)) {
+    console.log(`[round] reload ignored actor=${session?.actorId ?? "?"} type=${requestedType} reason=round-paused`);
     return null;
   }
   if (!session?.spawned || session.dead) {
@@ -6926,6 +7350,9 @@ function ensureRoom(settings) {
       players: new Map(),
       moves: 0,
       items: makeRoomItemState(requestedMap),
+      controlPoints: makeControlPointState(requestedMap),
+      flags: makeFlagState(requestedMap),
+      controlPointTimer: null,
       zombieMode: zombieRoom ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0,
       zombieRoundSeq: 0,
       zombieBossActorId: 0,
@@ -6935,6 +7362,13 @@ function ensureRoom(settings) {
       zombieRoundWinnerTeam: 0,
       zombieWins: 0,
       humanWins: 0,
+      standardRoundState: zombieRoom ? null : "ready",
+      standardRoundSeq: 0,
+      standardRoundWinner: 0,
+      standardRoundTimer: null,
+      standardRestartTimer: null,
+      standardTeam1Wins: 0,
+      standardTeam2Wins: 0,
     });
   } else {
     const room = rooms.get(name);
@@ -6953,22 +7387,35 @@ function ensureRoom(settings) {
       room.startedAt = photonNow();
       room.moves = 0;
       room.items = makeRoomItemState(room.map);
+      stopControlPointTicker(room);
+      room.controlPoints = makeControlPointState(room.map);
+      room.flags = makeFlagState(room.map);
       room.zombieMode = room.mode === MAP_MODE_ZOMBIE ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0;
       room.zombieRoundSeq = 0;
       room.zombieBossActorId = 0;
       room.zombieRoundWinnerTeam = 0;
       room.zombieWins = 0;
       room.humanWins = 0;
+      clearStandardRoundTimers(room);
+      room.standardRoundState = room.mode === MAP_MODE_ZOMBIE ? null : "ready";
+      room.standardRoundSeq = 0;
+      room.standardRoundWinner = 0;
+      room.standardTeam1Wins = 0;
+      room.standardTeam2Wins = 0;
     }
     ensureRoomItems(room);
   }
-  return rooms.get(name);
+  const room = rooms.get(name);
+  startControlPointTicker(room);
+  return room;
 }
 
 function clearZombieTimers(room) {
   clearZombieBossTimer(room);
   clearZombieRoundTimer(room);
   clearZombieRestartTimer(room);
+  clearStandardRoundTimers(room);
+  stopControlPointTicker(room);
 }
 
 function nextRoomActorId(room) {
@@ -7232,6 +7679,7 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
 
 function detachSessionFromRoom(session, reason = "leave") {
   const room = session?.room;
+  dropCtfFlagsForSession(session, 2, session?.lastChannel || 0);
   let removed = false;
   if (room?.players) {
     for (const [actorId, playerSession] of Array.from(room.players.entries())) {
@@ -7873,7 +8321,10 @@ async function postBattleEvent(session, type, extra = {}) {
   try {
     const response = await fetch(`${API_BASE_URL}/battle/event`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
+      },
       body: JSON.stringify(jsonForDb(session, { type, ...extra })),
     });
     if (!response.ok) {
@@ -8219,6 +8670,33 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[photon] op=${parsed.opCode} params=${Array.from(parsed.params.keys()).join(",")}`);
   }
 
+  // BaseEnter is also the client contract for ControlPointProximity.
+  if (parsed.opCode === 79) {
+    if (!isControlPointsRoom(session.room) || !session.spawned || session.dead || isRoundPausedSession(session)) {
+      console.log(`[control] enter ignored actor=${session.actorId} reason=room-or-session`);
+      return [];
+    }
+    const data = parsed.params.get(245);
+    const declaredTeam = Number(htGet(data, 239)?.value);
+    const pointData = htGet(data, 98);
+    const pointId = Number(htGet(pointData, 61)?.value);
+    const entering = Number(htGet(pointData, 1)?.value) === 1;
+    const point = session.room.controlPoints?.get(pointId);
+    if (!point || declaredTeam !== session.team) {
+      console.log(`[control] enter ignored actor=${session.actorId} point=${pointId || 0} reason=contract`);
+      return [];
+    }
+    if (entering && !controlPointContains(point, session.lastTransform)) {
+      console.log(`[control] enter ignored actor=${session.actorId} point=${pointId} reason=position pos=${fmtPoint(session.lastTransform)}`);
+      return [];
+    }
+    if (entering) point.occupants.add(session.actorId);
+    else point.occupants.delete(session.actorId);
+    updateControlPoint(session.room, point, channel);
+    console.log(`[control] ${entering ? "enter" : "exit"} actor=${session.actorId} point=${pointId} team=${session.team}`);
+    return [];
+  }
+
   if (parsed.opCode === 255) {
     const roomNameParam = parsed.params.get(255);
     const roomPropsParam = parsed.params.get(248);
@@ -8408,6 +8886,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       if (!session.spawned) {
         console.log(`[zombie] waiting actor=${session.actorId} ready=${zombieReadyPlayers(session.room).length}/${ZOMBIE_MIN_PLAYERS} mode=${zombieModeForRoom(session.room)}`);
       }
+    } else if (isStandardRoundPaused(session.room)) {
+      console.log(`[round] game-state pause actor=${session.actorId} room=${session.room.name} waiting-restart=yes`);
     } else if (AUTO_SPAWN_AFTER_GAMESTATE && !session.spawned) {
       const spawnResponse = buildSpawnEvent(session, null, "auto-after-gamestate");
       responses.push(spawnResponse);
@@ -8416,6 +8896,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     } else if (!session.spawned) {
       console.log(`[event] waiting client spawn request actor=${session.actorId} team=${normalizeTeamForRoom(session)} mode=${roomMode(session)}`);
     }
+    if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
+      startStandardRound(session.room, channel, "post-gamestate");
+    }
     queuePeerActorRepair(session, channel, "post-gamestate");
     return responses;
   }
@@ -8423,6 +8906,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   if (eventCode === 100) {
     if (isZombieRoom(session.room)) {
       console.log(`[zombie] spawn request ignored actor=${session.actorId} reason=server-driven mode=${zombieModeForRoom(session.room)} ready=${zombieReadyPlayers(session.room).length}/${ZOMBIE_MIN_PLAYERS}`);
+      return [];
+    }
+    if (isStandardRoundPaused(session.room)) {
+      console.log(`[round] spawn request ignored actor=${session.actorId} reason=round-paused`);
       return [];
     }
     if (session.spawned && !session.dead) {
@@ -8453,9 +8940,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === 99) {
-    if (isZombieRoundPausedSession(session)) {
+    if (isRoundPausedSession(session)) {
       if (DEBUG_MOVE_PACKETS) {
-        console.log(`[zombie] move ignored actor=${session.actorId} reason=round-paused`);
+        console.log(`[round] move ignored actor=${session.actorId} reason=round-paused`);
       }
       return [];
     }
@@ -8478,6 +8965,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     const point = transformFromEventData(parsed);
     if (point) {
       session.lastTransform = point;
+      updateCtfOnMove(session, channel);
     }
     if (DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) {
       console.log(`[event] move actor=${session.actorId} count=${session.room.moves}${point ? ` pos=${fmtPoint(point)}` : ""}`);
@@ -8529,6 +9017,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   if (eventCode === 97) {
     const response = buildShotEvent(session, parsed);
     const zombieRoundEndEvents = [];
+    const standardRoundEndEvents = [];
     if (response?.shotEvent) {
       if (response.weaponConfirm) {
         const confirmPeers = broadcastShotWeaponConfirmToRoom(session, response.weaponConfirm, channel);
@@ -8554,6 +9043,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       gateKilledSessionsAfterDelivery(response);
       if (response.killEvents.length) {
         maybeFinishZombieRound(session.room, "kill", channel, session, zombieRoundEndEvents);
+        maybeFinishStandardRound(session.room, "kill", channel, session, standardRoundEndEvents);
       }
     }
     return response?.shotEvent
@@ -8564,6 +9054,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
           ...(response.scoreEvent ? [response.scoreEvent] : []),
           ...(response.localAmmoSync ? [response.localAmmoSync] : []),
           ...zombieRoundEndEvents,
+          ...standardRoundEndEvents,
         ]
       : [];
   }
@@ -8592,10 +9083,15 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 }
 
 async function handleUdp(port, socket, msg, rinfo) {
+  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) return;
+  if (!allowUdpPacket(rinfo, msg.length)) return;
+
   let offset = 12;
   const sessionId = key(port, rinfo);
   let session = sessions.get(sessionId);
   if (!session) {
+    if (sessions.size >= MAX_SESSIONS_TOTAL) return;
+    if (sessionCountForIp(rinfo.address) >= MAX_SESSIONS_PER_IP) return;
     session = {
       peerId: 1,
       actorId: 1,
@@ -8718,6 +9214,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   let lastChannel = 0;
   let transportDisconnected = false;
   const commandCount = msg[3] || 0;
+  if (commandCount > MAX_ENET_COMMANDS_PER_PACKET) return;
   const sentTime = readU32(msg, 4);
   if (DEBUG_PACKETS) {
     console.log(`[udp:${port}] peer=${msg.readUInt16BE(0)} count=${commandCount} len=${msg.length}`);
@@ -8731,6 +9228,12 @@ async function handleUdp(port, socket, msg, rinfo) {
     const commandLength = readU32(msg, offset + 4);
     const reliableSeq = readU32(msg, offset + 8);
     const commandEnd = offset + commandLength;
+    if (commandLength < 12 || commandEnd > msg.length) {
+      if (DEBUG_PACKETS) {
+        console.log(`[security] invalid command length ip=${rinfo.address} port=${port} type=${commandType} bytes=${commandLength}/${msg.length - offset}`);
+      }
+      break;
+    }
     const payloadOffset = commandType === 0x07 ? offset + 16 : (commandType === 0x08 ? offset + 32 : offset + 12);
     if (DEBUG_PACKETS || ![0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0c].includes(commandType)) {
       console.log(`[cmd:${port}] type=${commandType} seq=${reliableSeq} size=${commandLength}`);
@@ -8860,6 +9363,7 @@ async function handleUdp(port, socket, msg, rinfo) {
 
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=1-11 weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=spawned+dead liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
+console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
@@ -8876,10 +9380,38 @@ for (const port of PORTS) {
   udp.bind(port, "0.0.0.0", () => console.log(`[udp] ${port} listening`));
 
   const tcp = net.createServer((socket) => {
-    console.log(`[tcp:${port}] client ${socket.remoteAddress}:${socket.remotePort}`);
+    const address = String(socket.remoteAddress || "unknown");
+    const active = Number(tcpConnectionsByIp.get(address) || 0);
+    if (active >= TCP_MAX_CONNECTIONS_PER_IP) {
+      socket.destroy();
+      return;
+    }
+    tcpConnectionsByIp.set(address, active + 1);
+    socket.setTimeout(TCP_IDLE_TIMEOUT_MS);
+    socket.setNoDelay(true);
+    let receivedBytes = 0;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const current = Number(tcpConnectionsByIp.get(address) || 1) - 1;
+      if (current > 0) tcpConnectionsByIp.set(address, current);
+      else tcpConnectionsByIp.delete(address);
+    };
+    socket.once("close", release);
+    socket.once("error", release);
+    socket.on("timeout", () => socket.destroy());
+    console.log(`[tcp:${port}] client ${address}:${socket.remotePort}`);
     socket.on("data", (data) => {
-      console.log(`[tcp:${port}] ${data.length} bytes`);
+      receivedBytes += data.length;
+      if (receivedBytes > TCP_MAX_BYTES_PER_CONNECTION) {
+        socket.destroy();
+        return;
+      }
+      if (DEBUG_PACKETS) console.log(`[tcp:${port}] ${data.length} bytes`);
     });
   });
+  tcp.maxConnections = Math.max(100, MAX_SESSIONS_TOTAL);
   tcp.listen(port, "0.0.0.0", () => console.log(`[tcp] ${port} listening`));
 }
+

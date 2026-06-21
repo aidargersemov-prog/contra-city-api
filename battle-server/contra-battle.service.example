@@ -1,0 +1,30 @@
+[Unit]
+Description=Contra City battle server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=contra-battle
+Group=contra-battle
+WorkingDirectory=/opt/contra-city/battle-server
+EnvironmentFile=/etc/contra-city/battle.env
+ExecStart=/usr/bin/node /opt/contra-city/battle-server/server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
