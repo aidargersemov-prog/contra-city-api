@@ -5,6 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
+const API_BUILD_ID = "railway-api-2026-06-21-security-compat-v2";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -22,6 +23,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 const MIGRATIONS_DIR = path.join(process.cwd(), "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);
@@ -32,11 +34,77 @@ const SHOP_PRICE = 100;
 const BATTLE_HOST = process.env.BATTLE_HOST || "";
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
+const MAX_REQUEST_URL_BYTES = Math.max(1024, Number(process.env.MAX_REQUEST_URL_BYTES || 16384));
+const HTTP_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15000));
+const HTTP_HEADERS_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 10000));
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = Math.max(1000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 5000));
+const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
+const RATE_LIMIT_REQUESTS = Math.max(30, Number(process.env.RATE_LIMIT_REQUESTS || 600));
+const BATTLE_RATE_LIMIT_REQUESTS = Math.max(60000, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
+const TRUST_PROXY_HEADERS = Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_PROJECT_ID) ||
+  process.env.TRUST_PROXY_HEADERS === "1";
+const rateLimitBuckets = new Map();
 const LAUNCHER_VERSION = process.env.LAUNCHER_VERSION || "1.2.0";
 const LAUNCHER_MANIFEST_URL = process.env.LAUNCHER_MANIFEST_URL || "";
 const LAUNCHER_UPDATE_KEY = process.env.LAUNCHER_UPDATE_KEY || "";
 const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESSION_TTL_MS || 6 * 60 * 60 * 1000));
 const launcherSessions = new Map();
+
+function safeTokenEquals(left, right) {
+  const a = Buffer.from(String(left || ""), "utf8");
+  const b = Buffer.from(String(right || ""), "utf8");
+  if (a.length === 0 || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function requestClientIp(req) {
+  const forwarded = TRUST_PROXY_HEADERS
+    ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
+    : "";
+  return forwarded || req.socket?.remoteAddress || "unknown";
+}
+
+function requestRatePolicy(pathname) {
+  if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
+  // Both endpoints are called by the single battle VPS for all online players.
+  // Keep the service token as the real authorization boundary and avoid throttling
+  // legitimate aggregate battle/social traffic.
+  if (pathname === "/battle/event" || pathname === "/battle/social") {
+    return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
+  }
+  if (pathname === "/launcher-session" || pathname === "/session" || pathname === "/vk-login") {
+    return { windowMs: 60000, limit: 120 };
+  }
+  return { windowMs: RATE_LIMIT_WINDOW_MS, limit: RATE_LIMIT_REQUESTS };
+}
+
+function allowHttpRequest(req, pathname) {
+  const now = Date.now();
+  const policy = requestRatePolicy(pathname);
+  const bucketKey = `${requestClientIp(req)}|${pathname}`;
+  let bucket = rateLimitBuckets.get(bucketKey);
+  if (!bucket || now - bucket.startedAt >= policy.windowMs) {
+    bucket = { startedAt: now, count: 0 };
+    rateLimitBuckets.set(bucketKey, bucket);
+  }
+  bucket.count++;
+  if (rateLimitBuckets.size > 10000) {
+    for (const [key, value] of rateLimitBuckets) {
+      if (now - value.startedAt > 10 * 60 * 1000) rateLimitBuckets.delete(key);
+    }
+  }
+  return bucket.count <= policy.limit;
+}
+
+function hasValidBattleServiceToken(req, body) {
+  const presented = req.headers["x-battle-token"] || body?.token || "";
+  return Boolean(BATTLE_EVENT_TOKEN) && safeTokenEquals(presented, BATTLE_EVENT_TOKEN);
+}
+
+function hasValidAdminToken(req) {
+  return Boolean(ADMIN_API_TOKEN) && safeTokenEquals(req.headers["x-admin-token"], ADMIN_API_TOKEN);
+}
 
 const CLAN_CREATE_LEVEL = 30;
 const CLAN_JOIN_LEVEL = 15;
@@ -974,6 +1042,7 @@ function newAccountKey(id) {
 function createNewAccount(name) {
   const id = nextAccountId();
   const account = starterAccount(name, id, newAccountKey(id));
+  account.namePending = true;
   store.accounts[String(id)] = account;
   saveStore(store);
   return account;
@@ -2110,7 +2179,7 @@ function sessionAuth(account) {
 }
 
 function publicBaseUrl(requestOrigin = null) {
-  return String(requestOrigin || PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+  return String((ALLOW_DYNAMIC_PUBLIC_ORIGIN ? requestOrigin : "") || PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 }
 
 function loginLink(account, requestOrigin = null) {
@@ -2307,7 +2376,8 @@ function profilePayload(account, full = false) {
       cst: {
         cn: 30
       }
-    }
+    },
+    name_pending: Boolean(account.namePending)
   };
 
   if (full) {
@@ -3400,10 +3470,6 @@ async function mutateBattleSocial(action, userId, targetId) {
 }
 
 async function battleSocialRequest(body) {
-  if (BATTLE_EVENT_TOKEN && body.token !== BATTLE_EVENT_TOKEN) {
-    return { ok: false, error: "invalid_token", status: 403 };
-  }
-
   const action = String(body.action || "list");
   const userId = Number(body.userId || body.playerId || 0);
   if (action === "list") return battleSocialList(userId);
@@ -4973,7 +5039,9 @@ async function changeName(account, url) {
   if (!setRequested && url.searchParams.get("action") === "cname") {
     return ok({ names: [] });
   }
+  if (setRequested && !account.namePending) return ok({ names: [], err: [{ n: 1 }] });
   account.name = name;
+  account.namePending = false;
   persist(account);
   refreshAllAccountClanSummaries(store);
   saveStore(store);
@@ -5150,20 +5218,36 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
 }
 
 function requestPublicOrigin(req, url) {
-  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const forwardedHost = TRUST_PROXY_HEADERS
+    ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()
+    : "";
   const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
   if (!host) return url.origin;
-  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const forwardedProto = TRUST_PROXY_HEADERS
+    ? String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
+    : "";
   const proto = forwardedProto || url.protocol.replace(/:$/, "") || "http";
   return `${proto}://${host}`;
+}
+
+function securityHeaders() {
+  return {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "cross-origin-resource-policy": "same-site"
+  };
 }
 
 function sendJson(res, payload, status = 200, headers = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
+    ...securityHeaders(),
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
+    "content-length": String(Buffer.byteLength(body)),
     ...headers
   });
   res.end(body);
@@ -5171,8 +5255,11 @@ function sendJson(res, payload, status = 200, headers = {}) {
 
 function sendHtml(res, html, status = 200, headers = {}) {
   res.writeHead(status, {
+    ...securityHeaders(),
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    "content-length": String(Buffer.byteLength(html)),
     ...headers
   });
   res.end(html);
@@ -5181,14 +5268,14 @@ function sendHtml(res, html, status = 200, headers = {}) {
 function createAccountPage(url, requestOrigin = null) {
   const code = url.searchParams.get("code") || "";
   const name = cleanName(url.searchParams.get("name") || "");
-  if (code && code !== CREATE_CODE) {
+  if (code && !safeTokenEquals(code, CREATE_CODE)) {
     return {
       status: 403,
       html: "<h1>\u041a\u043e\u0434 \u043d\u0435\u0432\u0435\u0440\u043d\u044b\u0439</h1><p>\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043a\u043e\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430.</p>"
     };
   }
 
-  if (code === CREATE_CODE && name) {
+  if (safeTokenEquals(code, CREATE_CODE) && name) {
     const account = createNewAccount(name);
     const session = sessionPayload(account, requestOrigin);
     console.log(`[game-link] create player=${account.id} name=${account.name} link=${session.loginLink}`);
@@ -5599,10 +5686,6 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
 }
 
 async function recordBattleEvent(event) {
-  if (BATTLE_EVENT_TOKEN && event.token !== BATTLE_EVENT_TOKEN) {
-    return { ok: false, error: "invalid_token", status: 403 };
-  }
-
   const account = ensureDesktopAccount();
   if (!pgPool) {
     return { ok: true, storage: "json-file", skipped: "postgres_disabled" };
@@ -5716,8 +5799,21 @@ async function recordBattleEvent(event) {
 ensureDesktopAccount();
 
 const server = http.createServer(async (req, res) => {
+  if (Buffer.byteLength(req.url || "", "utf8") > MAX_REQUEST_URL_BYTES) {
+    sendJson(res, { ok: false, error: "uri_too_long" }, 414);
+    return;
+  }
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  if (!allowHttpRequest(req, url.pathname)) {
+    sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+    return;
+  }
   const requestOrigin = requestPublicOrigin(req, url);
+
+  if (url.pathname === "/" || url.pathname === "/auth") {
+    sendHtml(res, "<h1>Contra City legacy API</h1><p>API online.</p>");
+    return;
+  }
 
   if (tryServeAssetBundle(req, res, url)) {
     return;
@@ -5817,7 +5913,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/health") {
-    sendJson(res, { ok: true, storage: pgPool ? "postgres" : "json-file" });
+    sendJson(res, { ok: true, build: API_BUILD_ID, storage: pgPool ? "postgres" : "json-file" });
     return;
   }
 
@@ -5827,7 +5923,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, 128 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
       const result = await battleSocialRequest(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
@@ -5842,7 +5942,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, 256 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
       const result = await recordBattleEvent(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
@@ -5852,6 +5956,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/db") {
+    if (!hasValidAdminToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
     sendJson(res, {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
@@ -5869,5 +5977,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Contra City legacy API listening on ${PORT}`);
+  console.log(`Contra City legacy API listening on ${PORT} build=${API_BUILD_ID}`);
+  if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
+  if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
+  if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
+  if (DEFAULT_KEY === "contra-revive-key") console.warn("[security] DEFAULT_KEY still uses the public fallback; rotate it");
+});
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
+server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+server.maxHeadersCount = 64;
+server.on("clientError", (_error, socket) => {
+  if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
 });
