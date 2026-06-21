@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-21-control-points-v208";
+const BUILD_ID = "battle-server-2026-06-21-explicit-map-modes-v209";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -1563,6 +1563,9 @@ function roomSettingsFrom(rawRoom) {
   const modeValue = htGet(rawRoom, "game_mode")?.value;
   const requestedMode = Number(modeValue ?? 1);
   const mode = normalizeModeForMap(map, FORCE_TEAM_MODE ? MAP_MODE_TEAM_DEATHMATCH : requestedMode);
+  if (mode !== requestedMode) {
+    console.log(`[state] room mode normalized map=${map} requested=${requestedMode} accepted=${mode}`);
+  }
   const maxUsers = htGet(rawRoom, "max_users")?.value;
   const friendly = htGet(rawRoom, "friendly_fire")?.value;
   const guestMode = htGet(rawRoom, "guest_mode")?.value;
