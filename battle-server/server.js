@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-21-control-points-disabled-v210";
+const BUILD_ID = "battle-server-2026-06-21-server-control-points-v212";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -523,10 +523,10 @@ const HUMAN_TEAM = 2;
 const MAP_ALLOWED_MODES = {
   zombi_2: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
   zombi: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
-  arenaring: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
+  arenaring: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
-  arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
-  inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
+  arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
 };
 const CTF_MAPS = {
   arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
@@ -3697,24 +3697,24 @@ function updateCtfOnMove(session, channel) {
   const room=session.room; if(!isCtfRoom(room)||!session.spawned||session.dead) return;
   for(const flag of room.flags.values()) {
     if(flag.bearer===session.actorId) {
-      const home=room.flags.get(session.team); if(home && home.bearer<0 && home.state===0 && ctfDistance(session.lastTransform,home)<=8) { flag.bearer=-1; flag.state=0; flag.x=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).x; flag.y=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).y; flag.z=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).z; session.points=numberOr(session.points,0)+1; broadcastReliableToRoom(null,makeFlagEvent(1,flag),channel,'flag-deliver',{requireLiveReady:false}); broadcastReliableToRoom(null,makeScoreUpdateEvent(session),channel,'flag-score',{requireLiveReady:false}); maybeFinishStandardRound(room,'flag-deliver',channel); }
+      const home=room.flags.get(session.team); if(home && home.bearer<0 && home.state===0 && ctfDistance(session.lastTransform,home)<=8) { flag.bearer=-1; flag.state=0; flag.x=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).x; flag.y=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).y; flag.z=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).z; session.points=numberOr(session.points,0)+1; sendReliableToWholeRoom(room,makeFlagEvent(1,flag),channel,{requireGameState:false}); sendReliableToWholeRoom(room,makeScoreUpdateEvent(session),channel,{requireGameState:false}); console.log(`[flag] delivered actor=${session.actorId} flagTeam=${flag.team} score=${teamScorePoints(session,session.team)}`); maybeFinishStandardRound(room,'flag-deliver',channel); }
     } else if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
-      if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); broadcastReliableToRoom(null,makeFlagEvent(3,flag),channel,'flag-return',{requireLiveReady:false}); }
-      else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; broadcastReliableToRoom(null,makeFlagEvent(0,flag),channel,'flag-capture',{requireLiveReady:false}); }
+      if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); sendReliableToWholeRoom(room,makeFlagEvent(3,flag),channel,{requireGameState:false}); console.log(`[flag] returned actor=${session.actorId} flagTeam=${flag.team}`); }
+      else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; sendReliableToWholeRoom(room,makeFlagEvent(0,flag),channel,{requireGameState:false}); console.log(`[flag] captured actor=${session.actorId} flagTeam=${flag.team} pos=${fmtPoint(session.lastTransform)}`); }
     }
   }
 }
 function resetCtfFlag(room, flag, type, channel) {
   const home=(CTF_MAPS[mapKey(room.map)]||[]).find((item)=>item.team===flag.team); if(!home)return;
-  Object.assign(flag,home,{bearer:-1,state:0}); broadcastReliableToRoom(null,makeFlagEvent(type,flag),channel,'flag-reset',{requireLiveReady:false});
+  Object.assign(flag,home,{bearer:-1,state:0}); sendReliableToWholeRoom(room,makeFlagEvent(type,flag),channel,{requireGameState:false});
 }
 function dropCtfFlagsForSession(session, type=2, channel=0) {
   const room=session?.room; if(!isCtfRoom(room))return;
-  for(const flag of room.flags.values()) if(flag.bearer===session.actorId) { flag.bearer=-1; flag.state=0; Object.assign(flag,session.lastTransform||flag); broadcastReliableToRoom(null,makeFlagEvent(type,flag),channel,'flag-drop',{requireLiveReady:false}); }
+  for(const flag of room.flags.values()) if(flag.bearer===session.actorId) { flag.bearer=-1; flag.state=0; Object.assign(flag,session.lastTransform||flag); sendReliableToWholeRoom(room,makeFlagEvent(type,flag),channel,{requireGameState:false}); console.log(`[flag] dropped actor=${session.actorId} flagTeam=${flag.team} reason=${type}`); }
 }
 
 function isControlPointsRoom(room) {
-  return false;
+  return Number(room?.mode) === MAP_MODE_CONTROL_POINTS && Boolean(CONTROL_POINT_MAPS[mapKey(room?.map)]?.length);
 }
 
 function makeControlPointsRaw(room) {
@@ -3753,6 +3753,19 @@ function controlPointContains(point, transform) {
   return Math.hypot(transform.x - point.x, transform.z - point.z) <= 6 && Math.abs(transform.y - point.y) <= 7.2;
 }
 
+function updateControlPointOccupancyFromMove(session) {
+  const room = session?.room;
+  if (!isControlPointsRoom(room) || !session.spawned || session.dead || isRoundPausedSession(session)) return;
+  for (const point of room.controlPoints.values()) {
+    const inside = controlPointContains(point, session.lastTransform);
+    const present = point.occupants.has(session.actorId);
+    if (inside === present) continue;
+    if (inside) point.occupants.add(session.actorId);
+    else point.occupants.delete(session.actorId);
+    console.log(`[control] ${inside ? "enter" : "exit"} actor=${session.actorId} point=${point.id} team=${session.team} source=move pos=${fmtPoint(session.lastTransform)}`);
+  }
+}
+
 function updateControlPoint(room, point, channel) {
   const teams = new Set();
   for (const actorId of Array.from(point.occupants)) {
@@ -3777,7 +3790,8 @@ function updateControlPoint(room, point, channel) {
   if (point.progress >= 100) { point.progress = 100; point.state = 2; }
   if (before === `${point.state}/${point.progress}/${point.team}`) return false;
   const event = makeControlPointEvent(point);
-  broadcastReliableToRoom(null, event, channel, "control-point", { requireLiveReady: false });
+  sendReliableToWholeRoom(room, event, channel, { requireGameState: false });
+  console.log(`[control] state point=${point.id} state=${point.state} progress=${point.progress} team=${point.team} occupants=${Array.from(point.occupants).join(",") || "none"}`);
   if (!wasCaptured && point.state === 2) {
     for (const actorId of point.occupants) {
       const player = room.players.get(actorId);
@@ -3785,7 +3799,8 @@ function updateControlPoint(room, point, channel) {
       player.points = numberOr(player.points, 0) + 1;
     }
     const source = Array.from(room.players.values()).find((player) => player?.team === point.team);
-    if (source) broadcastReliableToRoom(null, makeScoreUpdateEvent(source), channel, "control-point-score", { requireLiveReady: false });
+    if (source) sendReliableToWholeRoom(room, makeScoreUpdateEvent(source), channel, { requireGameState: false });
+    console.log(`[control] captured point=${point.id} team=${point.team} score=${source ? teamScorePoints(source, point.team) : 0}`);
     maybeFinishStandardRound(room, "control-point", channel);
   }
   return true;
@@ -3802,6 +3817,17 @@ function startControlPointTicker(room, channel = 0) {
 function stopControlPointTicker(room) {
   if (room?.controlPointTimer) clearInterval(room.controlPointTimer);
   if (room) room.controlPointTimer = null;
+}
+
+function resetControlPointsForRound(room, channel = 0) {
+  if (!isControlPointsRoom(room)) return;
+  for (const point of room.controlPoints.values()) {
+    point.state = 0;
+    point.progress = 0;
+    point.team = -1;
+    point.occupants.clear();
+    sendReliableToWholeRoom(room, makeControlPointEvent(point), channel, { requireGameState: false });
+  }
 }
 
 function makeTransformRaw(point) {
@@ -4216,6 +4242,17 @@ function broadcastReliableToRoom(sourceSession, payload, channel = 0, reason = "
   return sent;
 }
 
+function sendReliableToWholeRoom(room, payload, channel = 0, options = {}) {
+  if (!room?.players?.size || !payload) return 0;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession) continue;
+    if (options.requireGameState !== false && !playerSession.gameStateRequested) continue;
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
 function maybeAppendRespawnItems(session, commands, channel) {
   if (!ENABLE_MAP_PICKUPS || !session?.room?.items || ITEM_RESPAWN_MS <= 0) return;
   const now = Date.now();
@@ -4576,7 +4613,7 @@ function sendZombiePayloadsToReadyRoom(room, payloads, channel = 0, currentSessi
 
 function isStandardRoundRoom(room) {
   const mode = Number(room?.mode || 0);
-  return mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CONTROL_POINTS;
+  return mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CAPTURE_THE_FLAG || mode === MAP_MODE_CONTROL_POINTS;
 }
 
 function isStandardRoundPaused(room) {
@@ -4725,6 +4762,7 @@ function beginNextStandardRound(room, roundSeq, channel = 0) {
 
   clearStandardRestartTimer(room);
   if (isCtfRoom(room)) for (const flag of room.flags.values()) resetCtfFlag(room, flag, 4, channel);
+  resetControlPointsForRound(room, channel);
   room.startedAt = photonNow();
   room.standardRoundState = "ready";
   room.standardRoundWinner = 0;
@@ -8969,6 +9007,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (point) {
       session.lastTransform = point;
       updateCtfOnMove(session, channel);
+      updateControlPointOccupancyFromMove(session);
     }
     if (DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) {
       console.log(`[event] move actor=${session.actorId} count=${session.room.moves}${point ? ` pos=${fmtPoint(point)}` : ""}`);
