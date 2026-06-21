@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-06-21-security-compat-v2";
+const API_BUILD_ID = "railway-api-2026-06-21-server-control-points-v3";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -972,13 +972,13 @@ const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
 const mapEntry = (id, systemName, modes = 3) => ({ i: id, n: systemName, m: modes, p: mapPlayers, dp: 4 });
 
 const maps = [
-  mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
+  mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(13, "Zombi_2", MAP_MODE_DM_ZOMBIE),
   mapEntry(14, "Zombi", MAP_MODE_DM_ZOMBIE),
-  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
+  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
-  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG)
+  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
