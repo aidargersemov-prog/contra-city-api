@@ -964,18 +964,21 @@ for (const [abilityIdText, definition] of Object.entries(abilityValueDefinitions
 
 const mapPlayers = "4,6,8,10,12,14,16";
 const MAP_MODE_DEATHMATCH = 1;
+const MAP_MODE_TEAM_DEATHMATCH = 2;
+const MAP_MODE_CAPTURE_THE_FLAG = 4;
+const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
 const mapEntry = (id, systemName, modes = 3) => ({ i: id, n: systemName, m: modes, p: mapPlayers, dp: 4 });
 
 const maps = [
-  mapEntry(1, "Arena_3lvl"),
+  mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(13, "Zombi_2", MAP_MODE_DM_ZOMBIE),
   mapEntry(14, "Zombi", MAP_MODE_DM_ZOMBIE),
-  mapEntry(15, "ArenaRing", 2),
-  mapEntry(16, "Bit_map"),
-  mapEntry(17, "LegoTurnament", 2),
-  mapEntry(18, "Inferno")
+  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
+  mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
+  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
+  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
@@ -2358,11 +2361,12 @@ async function awardClanExperience(client, playerId, amount) {
 }
 
 function profilePayload(account, full = false) {
+  const publicName = account.namePending ? "" : account.name;
   const payload = {
     result: true,
     info: {
       u_id: account.id,
-      un: account.name,
+      un: publicName,
       fname: account.fullName,
       lvl: account.level,
       vcur: account.money,
@@ -5025,23 +5029,37 @@ function saveTaunts(account, url) {
 }
 
 async function changeName(account, url) {
-  const setRequested = url.searchParams.get("set") === "1" || url.searchParams.get("action") === "cpname";
-  const name = cleanName(
+  const action = url.searchParams.get("action");
+  const initialSetRequested = action === "cname" && url.searchParams.get("set") === "1";
+  const paidSetRequested = action === "cpname";
+  const setRequested = initialSetRequested || paidSetRequested;
+  const requestedName = String(
     url.searchParams.get("ve") ||
     url.searchParams.get("v") ||
     url.searchParams.get("name") ||
     url.searchParams.get("un") ||
     account.name
-  );
-  if (url.searchParams.get("action") === "searcname") {
-    return searchPlayersByName(account, name);
+  ).trim();
+  const name = requestedName.slice(0, 16);
+  if (action === "searcname") {
+    return searchPlayersByName(account, requestedName);
   }
-  if (!setRequested && url.searchParams.get("action") === "cname") {
+  const invalidLength = requestedName.length < 3 || requestedName.length > 16;
+  const accounts = await allAccountsForStats();
+  const nameExists = accounts.some((candidate) =>
+    Number(candidate.id) !== Number(account.id) &&
+    String(candidate.name || "").trim().toLowerCase() === requestedName.toLowerCase()
+  );
+  if (!setRequested && action === "cname") {
+    if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
+    if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
     return ok({ names: [] });
   }
-  if (setRequested && !account.namePending) return ok({ names: [], err: [{ n: 1 }] });
+  if (initialSetRequested && !account.namePending) return { result: false, names: [], err: [{ n: 1 }] };
+  if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
+  if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
   account.name = name;
-  account.namePending = false;
+  if (initialSetRequested) account.namePending = false;
   persist(account);
   refreshAllAccountClanSummaries(store);
   saveStore(store);
