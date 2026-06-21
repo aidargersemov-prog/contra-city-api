@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-21-server-control-points-v212";
+const BUILD_ID = "battle-server-2026-06-21-control-points-scoring-v213";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -547,6 +547,7 @@ const CONTROL_POINT_MAPS = {
 };
 const CONTROL_POINT_CAPTURE_TICK_MS = Math.max(50, Number(process.env.CONTROL_POINT_CAPTURE_TICK_MS || 100));
 const CONTROL_POINT_CAPTURE_STEP = Math.max(1, Math.min(100, Number(process.env.CONTROL_POINT_CAPTURE_STEP || 1)));
+const CONTROL_POINT_SCORE_INTERVAL_MS = Math.max(250, Number(process.env.CONTROL_POINT_SCORE_INTERVAL_MS || 1000));
 
 function photonNow() {
   return Math.max(0, Math.floor(Date.now() - PROCESS_START_MS)) >>> 0;
@@ -3744,8 +3745,12 @@ function makeControlPointEvent(point) {
 
 function makeControlPointState(mapName) {
   return new Map((CONTROL_POINT_MAPS[mapKey(mapName)] || []).map((definition) => [definition.id, {
-    ...definition, state: 0, progress: 0, team: -1, occupants: new Set(),
+    ...definition, state: 0, progress: 0, team: -1, occupants: new Set(), nextScoreAt: 0,
   }]));
+}
+
+function makeControlPointScoreState() {
+  return { 1: 0, 2: 0 };
 }
 
 function controlPointContains(point, transform) {
@@ -3776,34 +3781,91 @@ function updateControlPoint(room, point, channel) {
     }
     if (player.team === 1 || player.team === 2) teams.add(player.team);
   }
-  if (teams.size !== 1) return false;
-  const team = Array.from(teams)[0];
+
   const before = `${point.state}/${point.progress}/${point.team}`;
   const wasCaptured = point.state === 2;
-  if (point.team !== team) {
-    if (point.team > 0 && point.progress > 0) point.progress = Math.max(0, point.progress - CONTROL_POINT_CAPTURE_STEP);
-    else { point.team = team; point.state = 1; point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP); }
-  } else if (point.state !== 2) {
-    point.state = 1;
-    point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP);
+  let captureTeam = 0;
+
+  if (teams.size === 0) {
+    if (point.state === 1 && point.progress > 0) {
+      point.progress = Math.max(0, point.progress - CONTROL_POINT_CAPTURE_STEP);
+      if (point.progress === 0) {
+        point.state = 0;
+        point.team = -1;
+      }
+    }
+  } else if (teams.size === 1) {
+    captureTeam = Array.from(teams)[0];
+    if (point.team !== captureTeam) {
+      if (point.team > 0 && point.progress > 0) {
+        point.state = 1;
+        point.progress = Math.max(0, point.progress - CONTROL_POINT_CAPTURE_STEP);
+        point.nextScoreAt = 0;
+        if (point.progress === 0) {
+          point.state = 0;
+          point.team = -1;
+        }
+      } else {
+        point.team = captureTeam;
+        point.state = 1;
+        point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP);
+      }
+    } else if (point.state !== 2) {
+      point.state = 1;
+      point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP);
+    }
   }
-  if (point.progress >= 100) { point.progress = 100; point.state = 2; }
-  if (before === `${point.state}/${point.progress}/${point.team}`) return false;
-  const event = makeControlPointEvent(point);
-  sendReliableToWholeRoom(room, event, channel, { requireGameState: false });
-  console.log(`[control] state point=${point.id} state=${point.state} progress=${point.progress} team=${point.team} occupants=${Array.from(point.occupants).join(",") || "none"}`);
+
+  if (point.progress >= 100) {
+    point.progress = 100;
+    point.state = 2;
+  }
+
+  const stateChanged = before !== `${point.state}/${point.progress}/${point.team}`;
+  if (stateChanged) {
+    const event = makeControlPointEvent(point);
+    sendReliableToWholeRoom(room, event, channel, { requireGameState: false });
+    console.log(`[control] state point=${point.id} state=${point.state} progress=${point.progress} team=${point.team} occupants=${Array.from(point.occupants).join(",") || "none"}`);
+  }
+
   if (!wasCaptured && point.state === 2) {
     for (const actorId of point.occupants) {
       const player = room.players.get(actorId);
       if (!player || player.team !== point.team) continue;
       player.points = numberOr(player.points, 0) + 1;
     }
-    const source = Array.from(room.players.values()).find((player) => player?.team === point.team);
-    if (source) sendReliableToWholeRoom(room, makeScoreUpdateEvent(source), channel, { requireGameState: false });
+    room.controlPointScores ||= makeControlPointScoreState();
+    room.controlPointScores[point.team] = numberOr(room.controlPointScores[point.team], 0) + 1;
+    point.nextScoreAt = Date.now() + CONTROL_POINT_SCORE_INTERVAL_MS;
+    const source = Array.from(room.players.values()).find((player) => player?.team === point.team)
+      || Array.from(room.players.values())[0];
+    if (source) {
+      sendReliableToWholeRoom(room, makeScoreUpdateEvent(source), channel, { requireGameState: false });
+    }
     console.log(`[control] captured point=${point.id} team=${point.team} score=${source ? teamScorePoints(source, point.team) : 0}`);
     maybeFinishStandardRound(room, "control-point", channel);
+    return true;
   }
-  return true;
+
+  if (point.state === 2 && (point.team === 1 || point.team === 2) && room.standardRoundState === "active") {
+    const now = Date.now();
+    if (!point.nextScoreAt) point.nextScoreAt = now + CONTROL_POINT_SCORE_INTERVAL_MS;
+    if (now >= point.nextScoreAt) {
+      const elapsedIntervals = Math.max(1, Math.floor((now - point.nextScoreAt) / CONTROL_POINT_SCORE_INTERVAL_MS) + 1);
+      room.controlPointScores ||= makeControlPointScoreState();
+      room.controlPointScores[point.team] = numberOr(room.controlPointScores[point.team], 0) + elapsedIntervals;
+      point.nextScoreAt += elapsedIntervals * CONTROL_POINT_SCORE_INTERVAL_MS;
+      const source = Array.from(room.players.values())[0];
+      if (source) {
+        sendReliableToWholeRoom(room, makeScoreUpdateEvent(source), channel, { requireGameState: false });
+        console.log(`[control] score point=${point.id} team=${point.team} add=${elapsedIntervals} total=${teamScorePoints(source, point.team)}`);
+      }
+      maybeFinishStandardRound(room, "control-point-hold", channel);
+      return true;
+    }
+  }
+
+  return stateChanged;
 }
 
 function startControlPointTicker(room, channel = 0) {
@@ -3821,10 +3883,12 @@ function stopControlPointTicker(room) {
 
 function resetControlPointsForRound(room, channel = 0) {
   if (!isControlPointsRoom(room)) return;
+  room.controlPointScores = makeControlPointScoreState();
   for (const point of room.controlPoints.values()) {
     point.state = 0;
     point.progress = 0;
     point.team = -1;
+    point.nextScoreAt = 0;
     point.occupants.clear();
     sendReliableToWholeRoom(room, makeControlPointEvent(point), channel, { requireGameState: false });
   }
@@ -4417,6 +4481,9 @@ function makeScorePlayerRaw(session, team, options = {}) {
 }
 
 function teamScorePoints(session, team) {
+  if (isControlPointsRoom(session?.room)) {
+    return Math.max(0, numberOr(session.room.controlPointScores?.[team], 0));
+  }
   if (isZombieRoom(session?.room) && zombieModeForRoom(session.room) === ZOMBIE_MODE.PAUSE) {
     const winnerTeam = Number(session.room.zombieRoundWinnerTeam || 0);
     if (winnerTeam === ZOMBIE_TEAM || winnerTeam === HUMAN_TEAM) {
@@ -7392,6 +7459,7 @@ function ensureRoom(settings) {
       moves: 0,
       items: makeRoomItemState(requestedMap),
       controlPoints: makeControlPointState(requestedMap),
+      controlPointScores: makeControlPointScoreState(),
       flags: makeFlagState(requestedMap),
       controlPointTimer: null,
       zombieMode: zombieRoom ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0,
@@ -7430,6 +7498,7 @@ function ensureRoom(settings) {
       room.items = makeRoomItemState(room.map);
       stopControlPointTicker(room);
       room.controlPoints = makeControlPointState(room.map);
+      room.controlPointScores = makeControlPointScoreState();
       room.flags = makeFlagState(room.map);
       room.zombieMode = room.mode === MAP_MODE_ZOMBIE ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0;
       room.zombieRoundSeq = 0;
