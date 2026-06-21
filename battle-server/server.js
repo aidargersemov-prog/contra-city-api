@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-21-control-points-scoring-v213";
+const BUILD_ID = "battle-server-2026-06-22-ctf-base-enter-v214";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -3694,12 +3694,38 @@ function makeFlagRaw(flag) { return rawHashtable([{key:rawByte(64),value:rawShor
 function makeFlagsRaw(room) { return isCtfRoom(room) ? rawHashtable(Array.from(room.flags.values()).map((f)=>({key:rawShort(f.team),value:makeFlagRaw(f)}))) : null; }
 function makeFlagEvent(type, flag) { return rawEvent(89,[{key:254,value:rawInt(0)},{key:245,value:rawHashtable([{key:rawByte(85),value:rawShort(type)},{key:rawByte(84),value:makeFlagRaw(flag)}])}]); }
 function ctfDistance(a,b) { return a && b ? Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z) : Infinity; }
+function ctfHomePoint(room, team) {
+  return (CTF_MAPS[mapKey(room?.map)] || []).find((point) => Number(point.team) === Number(team)) || null;
+}
+function ctfPlayerAtBase(session, team) {
+  const home = ctfHomePoint(session?.room, team);
+  if (!home || !session?.lastTransform) return false;
+  // Active FlagPoint checks the local player against FlagPoint + (0,3,0), radius 8.
+  return ctfDistance(session.lastTransform, { x: home.x, y: home.y + 3, z: home.z }) < 8;
+}
+function tryDeliverCtfFlag(session, channel, source = "move") {
+  const room = session?.room;
+  if (!isCtfRoom(room) || !session.spawned || session.dead || isRoundPausedSession(session)) return false;
+  const home = room.flags.get(session.team);
+  if (!home || home.bearer >= 0 || home.state !== 0 || !ctfPlayerAtBase(session, session.team)) return false;
+  const carried = Array.from(room.flags.values()).find((flag) => flag.team !== session.team && flag.bearer === session.actorId);
+  if (!carried) return false;
+  const carriedHome = ctfHomePoint(room, carried.team);
+  if (!carriedHome) return false;
+
+  Object.assign(carried, carriedHome, { bearer: -1, state: 0 });
+  session.points = numberOr(session.points, 0) + 1;
+  sendReliableToWholeRoom(room, makeFlagEvent(1, carried), channel, { requireGameState: false });
+  sendReliableToWholeRoom(room, makeScoreUpdateEvent(session), channel, { requireGameState: false });
+  console.log(`[flag] delivered actor=${session.actorId} flagTeam=${carried.team} score=${teamScorePoints(session, session.team)} source=${source} pos=${fmtPoint(session.lastTransform)}`);
+  maybeFinishStandardRound(room, "flag-deliver", channel);
+  return true;
+}
 function updateCtfOnMove(session, channel) {
   const room=session.room; if(!isCtfRoom(room)||!session.spawned||session.dead) return;
+  if (tryDeliverCtfFlag(session, channel, "move")) return;
   for(const flag of room.flags.values()) {
-    if(flag.bearer===session.actorId) {
-      const home=room.flags.get(session.team); if(home && home.bearer<0 && home.state===0 && ctfDistance(session.lastTransform,home)<=8) { flag.bearer=-1; flag.state=0; flag.x=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).x; flag.y=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).y; flag.z=CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team).z; session.points=numberOr(session.points,0)+1; sendReliableToWholeRoom(room,makeFlagEvent(1,flag),channel,{requireGameState:false}); sendReliableToWholeRoom(room,makeScoreUpdateEvent(session),channel,{requireGameState:false}); console.log(`[flag] delivered actor=${session.actorId} flagTeam=${flag.team} score=${teamScorePoints(session,session.team)}`); maybeFinishStandardRound(room,'flag-deliver',channel); }
-    } else if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
+    if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
       if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); sendReliableToWholeRoom(room,makeFlagEvent(3,flag),channel,{requireGameState:false}); console.log(`[flag] returned actor=${session.actorId} flagTeam=${flag.team}`); }
       else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; sendReliableToWholeRoom(room,makeFlagEvent(0,flag),channel,{requireGameState:false}); console.log(`[flag] captured actor=${session.actorId} flagTeam=${flag.team} pos=${fmtPoint(session.lastTransform)}`); }
     }
@@ -8780,15 +8806,34 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[photon] op=${parsed.opCode} params=${Array.from(parsed.params.keys()).join(",")}`);
   }
 
-  // BaseEnter is also the client contract for ControlPointProximity.
-  if (parsed.opCode === 79) {
+  // BaseEnter is used by CTF BaseEnterTrigger and by ControlPointProximity.
+  if (eventCode === 79) {
+    const data = parsed.params.get(245);
+    const declaredTeam = Number(htGet(data, 239)?.value);
+    const pointData = htGet(data, 98);
+
+    if (isCtfRoom(session.room) && pointData == null) {
+      if (!session.spawned || session.dead || isRoundPausedSession(session)) {
+        console.log(`[flag] base-enter ignored actor=${session.actorId} reason=session`);
+        return [];
+      }
+      if (declaredTeam !== session.team) {
+        console.log(`[flag] base-enter ignored actor=${session.actorId} declaredTeam=${declaredTeam || 0} actualTeam=${session.team} reason=team`);
+        return [];
+      }
+      if (!ctfPlayerAtBase(session, declaredTeam)) {
+        console.log(`[flag] base-enter ignored actor=${session.actorId} team=${declaredTeam} reason=position pos=${fmtPoint(session.lastTransform)}`);
+        return [];
+      }
+      const delivered = tryDeliverCtfFlag(session, channel, "base-enter");
+      console.log(`[flag] base-enter actor=${session.actorId} team=${declaredTeam} delivered=${delivered ? 1 : 0}`);
+      return [];
+    }
+
     if (!isControlPointsRoom(session.room) || !session.spawned || session.dead || isRoundPausedSession(session)) {
       console.log(`[control] enter ignored actor=${session.actorId} reason=room-or-session`);
       return [];
     }
-    const data = parsed.params.get(245);
-    const declaredTeam = Number(htGet(data, 239)?.value);
-    const pointData = htGet(data, 98);
     const pointId = Number(htGet(pointData, 61)?.value);
     const entering = Number(htGet(pointData, 1)?.value) === 1;
     const point = session.room.controlPoints?.get(pointId);
