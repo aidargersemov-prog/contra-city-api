@@ -9,7 +9,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-21-explicit-map-modes-v209";
+const BUILD_ID = "battle-server-2026-06-21-control-points-disabled-v210";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -523,10 +523,10 @@ const HUMAN_TEAM = 2;
 const MAP_ALLOWED_MODES = {
   zombi_2: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
   zombi: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
-  arenaring: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  arenaring: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
-  arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
-  inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
+  inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
 };
 const CTF_MAPS = {
   arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
@@ -3714,7 +3714,7 @@ function dropCtfFlagsForSession(session, type=2, channel=0) {
 }
 
 function isControlPointsRoom(room) {
-  return Number(room?.mode) === MAP_MODE_CONTROL_POINTS && Boolean(CONTROL_POINT_MAPS[mapKey(room?.map)]?.length);
+  return false;
 }
 
 function makeControlPointsRaw(room) {
