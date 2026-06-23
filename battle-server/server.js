@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-23-safe-anticheat-telemetry-v219";
+const BUILD_ID = "battle-server-2026-06-23-melee-segment-targeting-v224";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -2631,7 +2631,27 @@ function weaponCanonicalKey(item = {}) {
 function weaponImpactDefinition(item = {}) {
   const id = itemId(item);
   const key = weaponCanonicalKey(item);
-  return IMPACT_DOT_BY_WEAPON_ID.get(id) || IMPACT_DOT_BY_WEAPON_KEY.get(key) || null;
+  const base = IMPACT_DOT_BY_WEAPON_ID.get(id) || IMPACT_DOT_BY_WEAPON_KEY.get(key) || null;
+  if (!isActiveWorkshopWeaponUpgrade(item)) return base;
+
+  const workshopType = String(item.workshopImpactType || "").toLowerCase();
+  const type = ({
+    fire: IMPACT_TYPE.FIRE,
+    blood: IMPACT_TYPE.BLOOD,
+    poison: IMPACT_TYPE.POISON,
+    frost: IMPACT_TYPE.FROST,
+  })[workshopType] ?? base?.type ?? IMPACT_TYPE.NONE;
+  if (type === IMPACT_TYPE.NONE) return base;
+
+  const source = base || { type, min: 3, max: 5, ticks: IMPACT_DOT_DEFAULT_TICKS };
+  const damageMultiplier = 1 + Math.max(0, numberOr(item.workshopImpactDamagePercent, 0)) / 100;
+  return {
+    ...source,
+    type,
+    min: Math.max(1, Math.round(numberOr(source.min, 3) * damageMultiplier)),
+    max: Math.max(1, Math.round(numberOr(source.max, source.min ?? 5) * damageMultiplier)),
+    ticks: Math.max(1, numberOr(source.ticks, IMPACT_DOT_DEFAULT_TICKS) + Math.max(0, numberOr(item.workshopImpactTicksBonus, 0))),
+  };
 }
 
 function weaponImpactType(item = {}) {
@@ -2653,7 +2673,14 @@ function wearBonusKey(selectedWear) {
   return `${wearType}:${systemName}`;
 }
 
-const RESTORED_WEAR_BONUS_TEXTS = new Map(Object.entries({
+// Generated 1:1 from the active client TextAsset wear_*_desca entries.
+// The final spread below deliberately makes this UTF-8 client table authoritative.
+const CLIENT_WEAR_BONUS_TEXTS = require("./wear-bonus-texts.json");
+/* Historical malformed literals retained only as a migration reference; never evaluated.
+  ...CLIENT_WEAR_BONUS_TEXTS,
+  // "Прохладник" (Стужа) keeps its own armor bonus even when the full set is incomplete.
+  // Recovered from the active client TextAsset: wear_Shirts_santa2_desca = "Броня +17".
+  "4:santa2": "Броня +17",
   "6:boot02": "+3% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+3% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
   "6:sneakolimpic": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\nР—Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ +3%",
   "6:tacticalb01": "+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
@@ -2674,7 +2701,11 @@ const RESTORED_WEAR_BONUS_TEXTS = new Map(Object.entries({
   "6:stalker": "+10% Р·Р°С‰РёС‚Р° РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
   "6:thanos": "+5% Р·Р°С‰РёС‚Р° РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
   "6:slip99": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+4% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+40% Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
-}));
+  // The active-client UTF-8 table is authoritative. This final spread also prevents
+  // legacy mojibake overrides above from masking valid item bonuses.
+  ...CLIENT_WEAR_BONUS_TEXTS,
+*/
+const RESTORED_WEAR_BONUS_TEXTS = new Map(Object.entries(CLIENT_WEAR_BONUS_TEXTS));
 
 const SHOTGUN_JUMP_PERCENT_BY_BOOT = new Map(Object.entries({
   "6:sneak02": 5,      // Р¤РѕСЂРµСЃС‚
@@ -3133,7 +3164,17 @@ function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null)
   const mergedBase = override
     ? { ...base, ...override, ws: slot, w_id: numberOr(override.w_id, base.w_id ?? base.id), id: numberOr(override.id, base.id ?? base.w_id) }
     : base;
-  const merged = override && isActiveWorkshopWeaponUpgrade(base) ? workshopUpgradedWeaponStats(mergedBase) : mergedBase;
+  // The API persists the complete upgraded weapon payload. While eD is active,
+  // those exact fields win over canonical base stats once and are not regenerated.
+  const merged = isActiveWorkshopWeaponUpgrade(base)
+    ? {
+        ...mergedBase,
+        ...base,
+        ws: slot,
+        w_id: numberOr(mergedBase.w_id, base.w_id ?? base.id),
+        id: numberOr(mergedBase.id, base.id ?? base.w_id),
+      }
+    : mergedBase;
   return normalizeMeleeWeaponStats(applyWeaponGameplayBonuses(merged, profile));
 }
 
@@ -3228,6 +3269,7 @@ function makeWeaponRuntimeState(profile = null) {
       index: slot - 1,
       weaponId: numberOr(merged.w_id ?? merged.id, fallback.w_id ?? fallback.id),
       type: numberOr(merged.wt, fallback.wt),
+      workshopExpiresAt: isActiveWorkshopWeaponUpgrade(merged) ? numberOr(merged.eD, 0) : 0,
       rapidity,
       shotIntervalMs: shotIntervalMsFromRapidity(rapidity),
       nextShotAt: 0,
@@ -3240,6 +3282,8 @@ function makeWeaponRuntimeState(profile = null) {
       launchStartedAt: 0,
       meleeDelayedShotUntil: 0,
       meleeDelayedShotUsed: false,
+      meleeDistance: isColdArmsWeaponType(merged.wt) ? numberOr(merged.rad, MELEE_DEFAULT_DISTANCE) : 0,
+      meleeAngle: isColdArmsWeaponType(merged.wt) ? numberOr(merged.ang, MELEE_DEFAULT_ANGLE) : 0,
       activeProjectileShots: new Map(),
       reloadTimeMs,
       reloadDurationMs: reloadDurationMsFromRaw(reloadTimeMs),
@@ -5448,6 +5492,14 @@ function buildActorDataEvent(session, eventCode, parsed) {
 
 function weaponStateBySlot(session, slot) {
   if (!session.weaponStates) session.weaponStates = makeWeaponRuntimeState(null);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const expiredWorkshopState = Array.from(session.weaponStates.values()).some(
+    (state) => numberOr(state.workshopExpiresAt, 0) > 0 && numberOr(state.workshopExpiresAt, 0) <= nowSeconds
+  );
+  if (expiredWorkshopState) {
+    session.weaponStates = makeWeaponRuntimeState(session.loadedProfile || null);
+    console.log(`[workshop] expired runtime actor=${session.actorId || 0} player=${session.playerId || 0}`);
+  }
   return session.weaponStates.get(Number(slot)) || null;
 }
 
@@ -6273,6 +6325,88 @@ function distanceBetweenPoints(left, right) {
   const dz = Number(left.z) - Number(right.z);
   if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) return null;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function pointOffset(point, y = 0) {
+  if (!point) return null;
+  const x = Number(point.x);
+  const baseY = Number(point.y);
+  const z = Number(point.z);
+  if (!Number.isFinite(x) || !Number.isFinite(baseY) || !Number.isFinite(z)) return null;
+  return { x, y: baseY + y, z };
+}
+
+function angleBetweenVectorsRadians(left, right) {
+  if (!left || !right) return null;
+  const leftLength = Math.hypot(left.x, left.y, left.z);
+  const rightLength = Math.hypot(right.x, right.y, right.z);
+  if (leftLength <= 0 || rightLength <= 0) return null;
+  const cosine = clampNumber(
+    (left.x * right.x + left.y * right.y + left.z * right.z) / (leftLength * rightLength),
+    -1,
+    1
+  );
+  return Math.acos(cosine);
+}
+
+function isClientSegmentMeleeTarget(shooter, target) {
+  if (!shooter || !target || shooter === target) return false;
+  return Number(shooter.team) !== Number(target.team) ||
+    roomMode(shooter) === MAP_MODE_DEATHMATCH ||
+    Boolean(shooter.room?.friendlyFire);
+}
+
+function recoverMeleeSegmentTargetBodies(session, data, state, weaponType, launchMode) {
+  if (
+    !isColdArmsWeaponType(weaponType) ||
+    Number(launchMode ?? LAUNCH_MODE.SHOT) !== LAUNCH_MODE.SHOT ||
+    !session?.lastTransform ||
+    !state
+  ) {
+    return null;
+  }
+
+  // Exact client basis from ShotCalculator.SegmentShot(): both actors are
+  // evaluated at transform.position + (0, 3.5, 0), in weapon rad/ang.
+  const attackerCenter = pointOffset(session.lastTransform, 3.5);
+  const origin = pointFromHashtable(htGet(data, 11));
+  if (!attackerCenter || !origin) return null;
+  const aimVector = {
+    x: origin.x - attackerCenter.x,
+    y: origin.y - attackerCenter.y,
+    z: origin.z - attackerCenter.z,
+  };
+  if (Math.hypot(aimVector.x, aimVector.y, aimVector.z) <= 0) return null;
+
+  const distance = Math.max(0, numberOr(state.meleeDistance, MELEE_DEFAULT_DISTANCE));
+  const angle = Math.max(0, numberOr(state.meleeAngle, MELEE_DEFAULT_ANGLE));
+  const bodies = [];
+  for (const target of session.room?.players?.values?.() || []) {
+    if (
+      !target?.spawned ||
+      target.dead ||
+      !target.lastTransform ||
+      !isClientSegmentMeleeTarget(session, target)
+    ) {
+      continue;
+    }
+    const targetCenter = pointOffset(target.lastTransform, 3.5);
+    if (!targetCenter) continue;
+    const targetVector = {
+      x: targetCenter.x - attackerCenter.x,
+      y: targetCenter.y - attackerCenter.y,
+      z: targetCenter.z - attackerCenter.z,
+    };
+    if (Math.hypot(targetVector.x, targetVector.y, targetVector.z) > distance) continue;
+    const targetAngle = angleBetweenVectorsRadians(targetVector, aimVector);
+    if (targetAngle == null || targetAngle > angle) continue;
+
+    bodies.push(readTypedRaw(rawHashtable([
+      { key: rawByte(94), value: rawInt(target.actorId) },
+      { key: rawByte(68), value: rawByte(SHOT_TARGET_PLAYER) },
+    ]), 0));
+  }
+  return bodies;
 }
 
 function formatCaptureDistance(distance) {
@@ -7131,6 +7265,13 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
 function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
   const targets = htGet(data, 86);
   const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  const recoveredMeleeTargetBodies = !targetItems?.length
+    ? recoverMeleeSegmentTargetBodies(session, data, state, weaponType, launchMode)
+    : null;
+  const damageTargetItems = targetItems?.length
+    ? targetItems
+    : (recoveredMeleeTargetBodies || null);
+  const damageTargetItemType = targetItems?.length ? targets.value.itemType : 0x68;
   const replacements = new Map();
   const killEvents = [];
   const impactEvents = [];
@@ -7143,12 +7284,12 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
     replacements.set(16, rawByte(LAUNCH_MODE.LAUNCH));
   }
 
-  if (targetItems?.length && targets.value.itemType === 0x68) {
+  if (damageTargetItems?.length && damageTargetItemType === 0x68) {
     const damageState = shotDamageState(session, weaponType, state);
     if (!damageState) {
       summaries.push("damage-state=missing");
     } else {
-      const targetBodies = targetItems.map((target, index) => {
+      const targetBodies = damageTargetItems.map((target, index) => {
         const damage = applyShotDamageToTarget(session, data, damageState, weaponType, launchMode, target, index);
         shotCrit = shotCrit || damage.crit;
         if (damage.killEvent) killEvents.push(damage.killEvent);
@@ -7171,6 +7312,9 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
         ]));
       });
       replacements.set(86, rawTypedArray(0x68, targetBodies));
+      if (recoveredMeleeTargetBodies) {
+        summaries.unshift(`melee-segment-recovered=${recoveredMeleeTargetBodies.length}`);
+      }
     }
   } else if (targets && targetItems === null) {
     summaries.push("targets=unparsed");
