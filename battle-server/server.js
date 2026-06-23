@@ -1,5 +1,6 @@
 ﻿const dgram = require("dgram");
 const net = require("net");
+const { TextDecoder } = require("util");
 
 const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
   .split(",")
@@ -9,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-22-ctf-base-enter-v214";
+const BUILD_ID = "battle-server-2026-06-23-safe-anticheat-telemetry-v219";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -81,6 +82,7 @@ const OUTBOUND_RELIABLE_INITIAL_RTO_MS = Math.max(50, Number(process.env.OUTBOUN
 const OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE || 5));
 const OUTBOUND_RELIABLE_DISCONNECT_MS = Math.max(1000, Number(process.env.OUTBOUND_RELIABLE_DISCONNECT_MS || 10000));
 const OUTBOUND_RELIABLE_SWEEP_MS = Math.max(25, Number(process.env.OUTBOUND_RELIABLE_SWEEP_MS || 50));
+const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 15000));
 const ENET_FRAGMENT_TRACE = process.env.ENET_FRAGMENT_TRACE !== "0";
 const ENET_MAX_FRAGMENT_COUNT = Math.max(1, Number(process.env.ENET_MAX_FRAGMENT_COUNT || 128));
 const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX_FRAGMENT_TOTAL_BYTES || 65536));
@@ -208,6 +210,9 @@ const ITEM_TYPES = {
   ARMOR: 100,
   AMMO: 99,
 };
+const ARMOR_PICKUP_CAP = 100;
+const SMALL_PICKUP_PERCENT = 50;
+const FULL_PICKUP_PERCENT = 100;
 
 const RAPIDITY_FLOORS_BY_TYPE = new Map([
   [1, 340],
@@ -722,6 +727,51 @@ function readI32(buf, offset) {
 
 function key(port, rinfo) {
   return `${port}:${rinfo.address}:${rinfo.port}`;
+}
+
+function refreshSessionReliableEndpoint(session, socket, rinfo) {
+  if (!session || !socket || !rinfo) return;
+  const pending = session.outboundReliable;
+  if (!(pending instanceof Map)) return;
+  for (const entry of pending.values()) {
+    entry.socket = socket;
+    entry.rinfo = { address: rinfo.address, port: rinfo.port };
+  }
+}
+
+function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
+  const incomingPeerId = msg.readUInt16BE(0);
+  const incomingChallenge = readU32(msg, 8);
+  if (!incomingChallenge || incomingPeerId === 0xffff) return null;
+
+  const matches = [];
+  for (const candidate of sessions.values()) {
+    if (!candidate || candidate.transportDisconnected) continue;
+    if (Number(candidate.port) !== Number(port)) continue;
+    if (Number(candidate.peerId) !== Number(incomingPeerId)) continue;
+    if (Number(candidate.challenge) !== Number(incomingChallenge)) continue;
+    if (!candidate.room || !candidate.actorId || !candidate.spawned) continue;
+    if (now - numberOr(candidate.lastSeenAt, 0) > ENET_NAT_REBIND_MAX_IDLE_MS) continue;
+    matches.push(candidate);
+    if (matches.length > 1) return null;
+  }
+  return matches[0] || null;
+}
+
+function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
+  const previousSessionId = session.sessionId;
+  const previousRemote = session.remoteKey || "unknown";
+  if (previousSessionId && previousSessionId !== sessionId && sessions.get(previousSessionId) === session) {
+    sessions.delete(previousSessionId);
+  }
+  sessions.set(sessionId, session);
+  session.sessionId = sessionId;
+  session.remoteKey = `${rinfo.address}:${rinfo.port}`;
+  session.socket = socket;
+  session.rinfo = { address: rinfo.address, port: rinfo.port };
+  refreshSessionReliableEndpoint(session, socket, rinfo);
+  console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0}`);
+  return session;
 }
 
 function makeHeader(peerId, commandCount, sentTime, challenge) {
@@ -1521,6 +1571,56 @@ function numberOr(value, fallback) {
 function stringOr(value, fallback = "") {
   const text = String(value ?? "").trim();
   return text || fallback;
+}
+
+// Telemetry only: Contra City has legitimate weapon-propelled movement, so
+// movement is intentionally outside this first anti-cheat pass. These counters
+// cover only weapon events that the server has already rejected from its own
+// authoritative weapon state.
+function noteAntiCheatWeaponViolation(session, kind, reason, details = {}) {
+  if (!session) return;
+
+  const antiCheat = session.antiCheat || (session.antiCheat = {
+    weaponViolations: new Map(),
+    totalWeaponViolations: 0,
+  });
+  const key = `${kind}:${reason}`;
+  const count = numberOr(antiCheat.weaponViolations.get(key), 0) + 1;
+  antiCheat.weaponViolations.set(key, count);
+  antiCheat.totalWeaponViolations = numberOr(antiCheat.totalWeaponViolations, 0) + 1;
+
+  // Preserve useful evidence without turning an intentional packet flood into
+  // an AWS log flood.
+  if (count !== 1 && count !== 5 && count % 25 !== 0) return;
+
+  const weapon = details.weaponType == null ? "" : ` type=${details.weaponType}`;
+  const slot = details.slot == null ? "" : ` slot=${details.slot}`;
+  const wait = Number.isFinite(Number(details.waitMs)) && Number(details.waitMs) > 0
+    ? ` wait=${Math.round(Number(details.waitMs))}ms`
+    : "";
+  console.log(`[anticheat] weapon-rejected actor=${session.actorId ?? "?"} kind=${kind} reason=${reason}${weapon}${slot}${wait} count=${count} total=${antiCheat.totalWeaponViolations}`);
+}
+
+const WINDOWS_1251_DECODER = new TextDecoder("windows-1251");
+const WINDOWS_1251_ENCODER = new Map();
+for (let byte = 0; byte <= 0xff; byte += 1) {
+  WINDOWS_1251_ENCODER.set(WINDOWS_1251_DECODER.decode(Uint8Array.of(byte)), byte);
+}
+
+function decodeLegacyBonusText(value) {
+  const source = stringOr(value, "");
+  // Restored tooltip constants contain UTF-8 bytes decoded as Windows-1251.
+  // API strings can already be valid UTF-8, so accept the reversal only when
+  // every character maps losslessly and the resulting UTF-8 has no replacement.
+  if (!/[РС][^\s]/.test(source)) return source;
+  const bytes = [];
+  for (const character of source) {
+    const byte = WINDOWS_1251_ENCODER.get(character);
+    if (byte == null) return source;
+    bytes.push(byte);
+  }
+  const decoded = Buffer.from(bytes).toString("utf8");
+  return decoded.includes("\ufffd") ? source : decoded;
 }
 
 function shortRoomValue(value, fallback, min = 0, max = 32767) {
@@ -2640,31 +2740,31 @@ function addProtectionBonus(target, key, amount) {
 }
 
 const WEAR_PROTECTION_TERMS = [
-  { key: "automatic", pattern: /Р°РІС‚РѕРјР°С‚/ },
-  { key: "machinegun", pattern: /РїСѓР»РµРј/ },
-  { key: "pistol", pattern: /РїРёСЃС‚РѕР»РµС‚/ },
-  { key: "shotgun", pattern: /РґСЂРѕР±РѕРІ/ },
-  { key: "sniper", pattern: /СЃРЅР°Р№РїРµСЂ|Р°РЅР°РєРѕРЅРґ/ },
-  { key: "rocket", pattern: /СЂР°РєРµС‚|С‚СЂРѕР»Р»РµР±СѓР·/ },
-  { key: "grenade", pattern: /РіСЂР°РЅР°С‚РѕРј|РіСЂР°РЅР°С‚РёРЅ/ },
-  { key: "snow", pattern: /Р»РµРґРѕРј|СЃРЅРµРіРѕРј/ },
-  { key: "flamer", pattern: /РѕРіРЅРµРј|РїРѕРґР¶РёРіР°/ },
-  { key: "melee", pattern: /Р±Р»РёР¶РЅРµРіРѕ\s+Р±РѕСЏ|СЂСѓС‡РЅ|Р»РµР·РІРё/ },
+  { key: "automatic", pattern: /автомат/ },
+  { key: "machinegun", pattern: /пулем/ },
+  { key: "pistol", pattern: /пистолет/ },
+  { key: "shotgun", pattern: /дробов/ },
+  { key: "sniper", pattern: /снайпер|анаконд/ },
+  { key: "rocket", pattern: /ракет|троллебуз/ },
+  { key: "grenade", pattern: /гранатом|гранатин/ },
+  { key: "snow", pattern: /ледом|снегом/ },
+  { key: "flamer", pattern: /огнем|поджига/ },
+  { key: "melee", pattern: /ближнего\s+боя|ручн|лезви/ },
 ];
 
 const ALL_WEAR_PROTECTION_KEYS = WEAR_PROTECTION_TERMS.map((term) => term.key);
 const ALL_DAMAGE_RANGES = ["short", "medium", "long"];
 const WEAR_DAMAGE_TERMS = [
-  { types: [4], pattern: /Р°РІС‚РѕРјР°С‚/ },
-  { types: [6], pattern: /РїСѓР»РµРј/ },
-  { types: [3], pattern: /РїРёСЃС‚РѕР»РµС‚/ },
-  { types: [7], pattern: /РґСЂРѕР±РѕРІ/ },
-  { types: [10], pattern: /СЃРЅР°Р№РїРµСЂ|Р°РЅР°РєРѕРЅРґ/ },
-  { types: [8], pattern: /СЂР°РєРµС‚|С‚СЂРѕР»Р»РµР±СѓР·/ },
-  { types: [9, 15], pattern: /РіСЂР°РЅР°С‚РѕРј|РіСЂР°РЅР°С‚РёРЅ/ },
-  { types: [11], pattern: /Р»РµРґРѕРј|СЃРЅРµРіРѕРј/ },
-  { types: [5], pattern: /РѕРіРЅРµРј/ },
-  { types: [1, 2], pattern: /Р±Р»РёР¶РЅРµРіРѕ\s+Р±РѕСЏ|СЂСѓС‡РЅ|Р»РµР·РІРё/ },
+  { types: [4], pattern: /автомат/ },
+  { types: [6], pattern: /пулем/ },
+  { types: [3], pattern: /пистолет/ },
+  { types: [7], pattern: /дробов/ },
+  { types: [10], pattern: /снайпер|анаконд/ },
+  { types: [8], pattern: /ракет|троллебуз/ },
+  { types: [9, 15], pattern: /гранатом|гранатин/ },
+  { types: [11], pattern: /ледом|снегом/ },
+  { types: [5], pattern: /огнем/ },
+  { types: [1, 2], pattern: /ближнего\s+боя|ручн|лезви/ },
 ];
 
 function protectionKeyFromText(text) {
@@ -2674,7 +2774,7 @@ function protectionKeyFromText(text) {
 
 function protectionKeysFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (/РІСЃРµС…\s+С‚РёРїРѕРІ\s+(?:РѕСЂСѓР¶|РѕСЂСѓРґ)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
+  if (/всех\s+типов\s+(?:оруж|оруд)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
   const keys = WEAR_PROTECTION_TERMS
     .filter((term) => term.pattern.test(normalized))
     .map((term) => term.key);
@@ -2693,9 +2793,9 @@ function damageTypesFromText(text) {
 
 function damageRangeFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (/Р±Р»РёР¶РЅ/.test(normalized)) return "short";
-  if (/СЃСЂРµРґРЅ|СЃСЂРµРґ\./.test(normalized)) return "medium";
-  if (/РґР°Р»СЊРЅ/.test(normalized)) return "long";
+  if (/ближн/.test(normalized)) return "short";
+  if (/средн|сред\./.test(normalized)) return "medium";
+  if (/дальн/.test(normalized)) return "long";
   return "";
 }
 
@@ -2722,19 +2822,19 @@ function applyWearProtectionBonuses(modifiers, text) {
     }
 
     const lineRange = damageRangeFromText(line);
-    if (/Р·Р°С‰РёС‚/.test(line) && lineRange) rangeContext = lineRange;
-    if (/Р·Р°С‰РёС‚.*РѕС‚\s*:/.test(line)) {
+    if (/защит/.test(line) && lineRange) rangeContext = lineRange;
+    if (/защит.*от\s*:/.test(line)) {
       protectionList = true;
       continue;
     }
 
-    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*Р·Р°С‰РёС‚[Р°С‹]?\s+РѕС‚\s+(.+)/);
+    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*защит[аы]?\s+от\s+(.+)/);
     if (prefixMatch) {
       addWearProtectionBonuses(modifiers, protectionKeysFromText(prefixMatch[2]), prefixMatch[1], lineRange);
       continue;
     }
 
-    const suffixMatch = line.match(/Р·Р°С‰РёС‚[Р°С‹]?\s+РѕС‚\s+(.+?)\s*([+-]?\d+)\s*%/);
+    const suffixMatch = line.match(/защит[аы]?\s+от\s+(.+?)\s*([+-]?\d+)\s*%/);
     if (suffixMatch) {
       addWearProtectionBonuses(modifiers, protectionKeysFromText(suffixMatch[1]), suffixMatch[2], lineRange);
       continue;
@@ -2766,16 +2866,16 @@ function applyWearDamageBonuses(modifiers, text) {
       protectionList = false;
       continue;
     }
-    if (/Р·Р°С‰РёС‚.*РѕС‚\s*:/.test(line)) {
+    if (/защит.*от\s*:/.test(line)) {
       protectionList = true;
       continue;
     }
-    if (/Р·Р°С‰РёС‚/.test(line)) continue;
-    if (protectionList && !/СѓСЂРѕРЅ/.test(line)) continue;
-    if (/СѓСЂРѕРЅ/.test(line)) protectionList = false;
+    if (/защит/.test(line)) continue;
+    if (protectionList && !/урон/.test(line)) continue;
+    if (/урон/.test(line)) protectionList = false;
 
     const lineRange = damageRangeFromText(line);
-    if (/СѓСЂРѕРЅ\s+РЅР°\s+/.test(line) && lineRange) rangeContext = lineRange;
+    if (/урон\s+на\s+/.test(line) && lineRange) rangeContext = lineRange;
 
     const amountMatch = line.match(/\+(\d+)\s*%?/);
     if (!amountMatch) continue;
@@ -2790,16 +2890,16 @@ function applyWearDamageBonuses(modifiers, text) {
 
 function shotgunJumpBonusFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (!/(РїСЂС‹Р¶|jump)/.test(normalized) || !/(РґСЂРѕР±РѕРІ|shotgun)/.test(normalized)) return 0;
-  if (/РѕРіСЂРѕРј|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
-  if (/РІС‹С€Рµ\s+СЃСЂРµРґРЅ|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
-  if (/РјР°Р»|РЅРµР±РѕР»СЊС€|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
-  if (/Р±РѕР»СЊС€|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
+  if (!/(прыж|jump)/.test(normalized) || !/(дробов|shotgun)/.test(normalized)) return 0;
+  if (/огром|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
+  if (/выше\s+средн|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
+  if (/мал|небольш|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
+  if (/больш|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
   return SHOTGUN_RECOIL_JUMP_BONUS;
 }
 
 function applyJumpPercentBonuses(modifiers, text) {
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?РїСЂС‹Р¶/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?прыж/g)) {
     modifiers.jumpPercent += numberOr(match[1], 0);
   }
   for (const match of text.matchAll(/\+(\d+)\s*%\s*to\s+jump/g)) {
@@ -2833,38 +2933,38 @@ function formatDamageBonuses(bonuses = []) {
 }
 
 function applyWearTextBonuses(modifiers, item = {}, options = {}) {
-  const text = stringOr(item.desca ?? item.descAdditional ?? item.da, "").toLowerCase();
+  const text = decodeLegacyBonusText(item.desca ?? item.descAdditional ?? item.da).toLowerCase();
   if (!text) return;
 
   applyWearProtectionBonuses(modifiers, text);
   applyWearDamageBonuses(modifiers, text);
   applyJumpPercentBonuses(modifiers, text);
 
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?Р·РґРѕСЂРѕРІ(?:СЊСЋ|СЊСЏ|СЊРµ)?/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?здоров(?:ью|ья|ье)?/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/Р·РґРѕСЂРѕРІ(?:СЊРµ|СЊСЋ|СЊСЏ)?\s*\+(\d+)\s*%/g)) {
+  for (const match of text.matchAll(/здоров(?:ье|ью|ья)?[ \t]*\+(\d+)[ \t]*%/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/Р¶РёР·РЅ[СЊРё]\s*\+(\d+)\s*%/g)) {
+  for (const match of text.matchAll(/жизн[ьи][ \t]*\+(\d+)[ \t]*%/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?Р¶РёР·РЅ[СЊРё]/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?жизн[ьи]/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*Рє\s*Р·РґРѕСЂРѕРІ(?:СЊСЋ|СЊСЏ|СЊРµ)?/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*к\s*здоров(?:ью|ья|ье)?/g)) {
     modifiers.healthFlat += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*Рє\s*СЃРєРѕСЂРѕСЃС‚Рё/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*скорости/g)) {
     modifiers.speedPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*Рє\s*Р±СЂРѕРЅ[РµРёСЏ]/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*брон[еия]/g)) {
     modifiers.armorPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*Рє\s*Р±СЂРѕРЅРµ/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*к\s*броне/g)) {
     modifiers.armorFlat += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/Р±СЂРѕРЅ[СЏРµ]\s*\+(\d+)/g)) {
+  for (const match of text.matchAll(/брон[яе][ \t]*\+(\d+)/g)) {
     modifiers.armorFlat += numberOr(match[1], 0);
   }
   if (!options.suppressShotgunJump) {
@@ -4379,12 +4479,13 @@ function ammoPickupStates(session) {
     .filter((state) => state && !isColdArmsWeaponType(state.type) && reserveCapForState(state) > 0);
 }
 
-function ammoStateNeedsFullRefill(state) {
+function pickupPercent(item) {
+  return Number(item?.subType) === 1 ? SMALL_PICKUP_PERCENT : FULL_PICKUP_PERCENT;
+}
+
+function ammoStateCanBenefitFromPickup(state) {
   if (!state || isColdArmsWeaponType(state.type)) return false;
-  return (
-    numberOr(state.loadedAmmo, 0) < numberOr(state.maxLoadedAmmo, 0) ||
-    numberOr(state.ammoReserve, 0) < reserveCapForState(state)
-  );
+  return numberOr(state.ammoReserve, 0) < reserveCapForState(state);
 }
 
 function itemCanBenefitSession(session, item) {
@@ -4398,11 +4499,10 @@ function itemCanBenefitSession(session, item) {
     return numberOr(session.health, maxHealth) < maxHealth;
   }
   if (item.type === ITEM_TYPES.ARMOR) {
-    const stats = sessionRuntimeStats(session);
-    return numberOr(session.energy, stats.maxEnergy) < stats.maxEnergy;
+    return numberOr(session.energy, 0) < ARMOR_PICKUP_CAP;
   }
   if (item.type === ITEM_TYPES.AMMO) {
-    return ammoPickupStates(session).some(ammoStateNeedsFullRefill);
+    return ammoPickupStates(session).some(ammoStateCanBenefitFromPickup);
   }
   return true;
 }
@@ -4660,7 +4760,7 @@ function makePlayerHealthEnergyEvent(session) {
     { key: 254, value: rawInt(session.actorId) },
     { key: 245, value: rawHashtable([
       { key: rawByte(100), value: rawInt(Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth))) },
-      { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, stats.maxEnergy))) },
+      { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP))) },
     ]) },
   ]);
 }
@@ -6341,7 +6441,7 @@ function sessionCurrentHealthEnergy(session) {
     stats,
     maxHealth,
     health: Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth)),
-    energy: Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, stats.maxEnergy)),
+    energy: Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP)),
   };
 }
 
@@ -6892,6 +6992,10 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const explosive = isExplosiveDamageWeapon(weaponType, launchMode);
   const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
   if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
+    noteAntiCheatWeaponViolation(shooter, "damage", "melee-range", {
+      weaponType,
+      slot: weaponStateByType(shooter, weaponType)?.slot,
+    });
     result.hit = false;
     result.summary = `${targetActorId}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
     return result;
@@ -7122,6 +7226,11 @@ function buildShotEvent(session, parsed) {
   const state = weaponStateByType(session, weaponType);
   const gate = allowWeaponShot(session, state, weaponType, launchMode, data);
   if (!gate.ok) {
+    noteAntiCheatWeaponViolation(session, "shot", gate.reason, {
+      weaponType,
+      slot: state?.slot,
+      waitMs: gate.waitMs,
+    });
     console.log(`[event] shot blocked actor=${session.actorId} type=${weaponType} mode=${launchMode} reason=${gate.reason}${gate.waitMs ? ` wait=${gate.waitMs}ms` : ""}`);
     return null;
   }
@@ -7185,13 +7294,14 @@ function buildPickItemEvent(session, parsed) {
   return takeRoomItem(session, item, "client-request");
 }
 
-function refillSessionAmmoFromPickup(session) {
+function refillSessionAmmoFromPickup(session, percent) {
   const summaries = [];
   const reloadEvents = [];
-  const now = Date.now();
   for (const state of ammoPickupStates(session)) {
     const before = `${state.slot}:${state.loadedAmmo}/${state.ammoReserve}`;
-    resetWeaponStateForSpawn(state, now);
+    const reserveCap = reserveCapForState(state);
+    const add = Math.floor(Math.max(0, numberOr(state.maxAmmoReserve, 0)) * percent / 100);
+    state.ammoReserve = Math.min(reserveCap, Math.max(0, numberOr(state.ammoReserve, 0)) + add);
     summaries.push(`${before}->${state.loadedAmmo}/${state.ammoReserve}`);
     const reloadEvent = makeReloadUpdateEvent(session, state);
     if (reloadEvent) reloadEvents.push(reloadEvent);
@@ -7212,22 +7322,24 @@ function takeRoomItem(session, item, reason, context = {}) {
   let detail = "";
   const localEvents = [];
   if (item.type === ITEM_TYPES.AMMO) {
-    const refill = refillSessionAmmoFromPickup(session);
+    pickValue = pickupPercent(item);
+    const refill = refillSessionAmmoFromPickup(session, pickValue);
     localEvents.push(...refill.reloadEvents);
-    detail = refill.summary ? ` ammo=${refill.summary}` : " ammo=none";
+    detail = `${refill.summary ? ` ammo=${refill.summary}` : " ammo=none"} percent=${pickValue}`;
   } else if (item.type === ITEM_TYPES.HEALTH) {
     const stats = sessionRuntimeStats(session);
     const maxHealth = sessionMaxHealth(session, stats);
     const currentHealth = Math.max(0, numberOr(session.health, maxHealth));
-    pickValue = Math.max(0, maxHealth - currentHealth);
-    session.health = maxHealth;
+    const amount = Math.floor(maxHealth * pickupPercent(item) / 100);
+    pickValue = Math.min(Math.max(0, maxHealth - currentHealth), amount);
+    session.health = currentHealth + pickValue;
     detail = ` hp=${session.health}/${maxHealth} add=${pickValue}`;
   } else if (item.type === ITEM_TYPES.ARMOR) {
-    const stats = sessionRuntimeStats(session);
-    const currentEnergy = Math.max(0, numberOr(session.energy, stats.maxEnergy));
-    pickValue = Math.max(0, stats.maxEnergy - currentEnergy);
-    session.energy = stats.maxEnergy;
-    detail = ` en=${session.energy}/${stats.maxEnergy} add=${pickValue}`;
+    const currentEnergy = clampNumber(numberOr(session.energy, 0), 0, ARMOR_PICKUP_CAP);
+    const amount = Math.floor(ARMOR_PICKUP_CAP * pickupPercent(item) / 100);
+    pickValue = Math.min(Math.max(0, ARMOR_PICKUP_CAP - currentEnergy), amount);
+    session.energy = currentEnergy + pickValue;
+    detail = ` en=${session.energy}/${ARMOR_PICKUP_CAP} add=${pickValue}`;
   }
 
   const positionDetail = Number.isFinite(context.distance)
@@ -7314,11 +7426,13 @@ function buildReloadEvent(session, parsed, channel = 0) {
   }
   const state = weaponStateByType(session, requestedType);
   if (!state) {
+    noteAntiCheatWeaponViolation(session, "reload", "missing-weapon", { weaponType: requestedType });
     console.log(`[event] reload ignored actor=${session.actorId} missingType=${requestedType}`);
     return null;
   }
 
   if (isColdArmsWeaponType(state.type)) {
+    noteAntiCheatWeaponViolation(session, "reload", "cold-arms", { weaponType: requestedType, slot: state.slot });
     console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=cold-arms`);
     return null;
   }
@@ -7327,6 +7441,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   const reserve = Math.max(0, state.ammoReserve);
   const amount = Math.min(missing, reserve);
   if (amount <= 0) {
+    noteAntiCheatWeaponViolation(session, "reload", "full-or-empty", { weaponType: requestedType, slot: state.slot });
     console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=full-or-empty loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
     return null;
   }
@@ -7334,6 +7449,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   const now = Date.now();
   const weaponMode = refreshWeaponMode(state, now);
   if (weaponMode === WEAPON_MODE.RELOADING) {
+    noteAntiCheatWeaponViolation(session, "reload", "already-reloading", { weaponType: requestedType, slot: state.slot });
     console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=already-reloading loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
     return null;
   }
@@ -9246,6 +9362,12 @@ async function handleUdp(port, socket, msg, rinfo) {
   const sessionId = key(port, rinfo);
   let session = sessions.get(sessionId);
   if (!session) {
+    const reboundSession = findNatRebindSession(port, msg, rinfo);
+    if (reboundSession) {
+      session = rebindSessionEndpoint(reboundSession, sessionId, socket, rinfo);
+    }
+  }
+  if (!session) {
     if (sessions.size >= MAX_SESSIONS_TOTAL) return;
     if (sessionCountForIp(rinfo.address) >= MAX_SESSIONS_PER_IP) return;
     session = {
@@ -9360,6 +9482,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   session.sessionId = sessionId;
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
+  refreshSessionReliableEndpoint(session, socket, rinfo);
   const packetNow = Date.now();
   session.lastSeenAt = packetNow;
   maybePruneIdleRoomSessions(packetNow);
