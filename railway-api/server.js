@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-06-21-server-control-points-v3";
+const API_BUILD_ID = "railway-api-2026-06-23-workshop-contracts-v6";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -604,33 +604,113 @@ function scaledStat(value, multiplier, fallback = 0) {
   return Math.max(0, Math.round(numericField(value, fallback) * multiplier));
 }
 
+function stableWorkshopPrice(weaponId) {
+  const id = Math.max(0, Math.trunc(numericField(weaponId, 0)));
+  return 10 + ((id * 17 + 11) % 31);
+}
+
+const workshopUpgradeTextFallbacks = {
+  10: "Повышенный шанс крит. урона",
+  43: "Увеличенный общий боезапас",
+  44: "Увеличенный урон\nУвеличенная длительность замедления\nУвеличенный общий боезапас",
+  45: "Увеличенный общий боезапас\nУвеличенный урон",
+  53: "Увеличенный урон на средней и дальней дист.\nПовышает скорость передвижения\nУвеличенный общий боезапас\nУскоренная перезарядка",
+  59: "Увеличенный общий боезапас\nУвеличенный шанс крит. урона",
+  67: "Увеличенный урон на всех дист.\nУвеличенный шанс крит. урона",
+  68: "Повышает скорость передвижения\nУвеличенный общий боезапас\nНаносит периодический урон типа кровотечение",
+  69: "Увеличенный урон на средней и дальней дист.\nПовышает скорость передвижения\nУвеличенный общий боезапас",
+  71: "Повышенный шанс крит. урона\nУвеличенный радиус поражения",
+  72: "Повышенный шанс крит. урона\nУвеличенный урон",
+  73: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nПовышает скорость передвижения",
+  74: "Повышенный шанс крит. урона\nУвеличенный боезапас\nПовышает скорость передвижения",
+  75: "Повышенный шанс крит. урона\nУвеличенный боезапас\nПовышает скорость передвижения",
+  76: "Ускоренная перезарядка\nУвеличенные скорость передвижения и боезапас\nБолее продолжительный урон от яда",
+  79: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличивает скорость передвижения",
+  80: "Повышенный шанс крит. урона\nУвеличивает скорость передвижения\nУвеличенная обойма и боезапас\nУвеличенный урон от огня",
+  101: "Увеличенный урон на средней и дальней дистанции\nУвеличивает скорость передвижения\nУвеличенная обойма и боезапас\nУскоренная перезарядка",
+  103: "Повышенный шанс крит. урона\nУвеличенный боезапас\nУвеличенный урон на средней и дальней дистанции",
+  104: "Повышенный шанс крит. урона\nУвеличенная обойма\nВремя поражения огнем увеличено",
+  105: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения\nНаносит периодический урон типа яд",
+  106: "Повышенный шанс крит. урона\nУвеличенный урон на ближней и средней дистанции\nУвеличенный общий боезапас\nУвеличенный радиус поражения",
+  107: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения",
+  108: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличенная скорострельность\nУвеличенный урон на средней дистанции",
+  109: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличивает скорость передвижения\nУвеличенный урон на ближней дистанции\nУвеличенный урон типа кровотечение",
+  110: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения"
+};
+
+function workshopUpgradeContract(weaponId) {
+  const text = String(
+    wearTextTranslations.get(`w_${weaponId}_descupgrade`)
+    || workshopUpgradeTextFallbacks[weaponId]
+    || ""
+  ).toLowerCase();
+  const damageAll = /увеличен(?:ный|ная|ное|ные|нный)\s+урон(?:\s+на\s+всех\s+дист|\s+на\s+всех\s+дистанц)?(?:\.|$|\n)/m.test(text)
+    && !/урон\s+от|урон\s+типа/.test(text);
+  const damageShort = damageAll || /урон\s+на\s+ближн/.test(text);
+  const damageMedium = damageAll || /урон\s+на\s+(?:средн|ближней\s+и\s+средн)/.test(text);
+  const damageLong = damageAll || /урон\s+на\s+(?:дальн|средн.*и\s+дальн|ближн.*и\s+дальн)/.test(text);
+  const impactType = /тип[а]?\s*[\"«]?огонь|урон\s+от\s+огн|горени|поражения\s+огнем/.test(text) ? "fire"
+    : (/тип[а]?\s*[\"«]?кров|кровотеч/.test(text) ? "blood"
+      : (/тип[а]?\s*[\"«]?яд|урон\s+от\s+яда/.test(text) ? "poison"
+        : (/замороз|замедлен/.test(text) ? "frost" : "")));
+  return {
+    text,
+    damageShort,
+    damageMedium,
+    damageLong,
+    crit: /крит/.test(text),
+    magazine: /обойм/.test(text),
+    reserve: /боезапас/.test(text),
+    rapidity: /скорострель|скорость\s+атаки/.test(text),
+    accuracy: /кучност|разброс/.test(text),
+    reload: /перезаряд/.test(text),
+    radius: /радиус\s+поражения/.test(text),
+    speed: /скорост[ьи]\s+передвижения/.test(text),
+    impactType,
+    impactDamage: /урон\s+от\s+(?:огня|яда|замороз)|урон\s+типа|урон\s+от\s+горени|длительность\s+и\s+урон/.test(text),
+    impactDuration: /длительн|продолжительн|время\s+поражения/.test(text)
+  };
+}
+
 function upgradedWeaponItem(item) {
   const base = clone(item);
   const ammo = numericField(base.ammo, 0);
   const ammoTotal = numericField(base.ammo_tot, 0);
-  const upgradePrice = Math.max(25, Math.round(numericField(base.sc?.tPv, SHOP_PRICE) * 0.35));
-  return {
+  const weaponId = numericField(base.w_id ?? base.id, 0);
+  const contract = workshopUpgradeContract(weaponId);
+  const upgraded = {
     ...base,
-    u_id: 5000 + numericField(base.w_id ?? base.id, 0),
-    rap: Math.max(60, scaledStat(base.rap, 0.9, 100)),
-    dev: Math.max(0, scaledStat(base.dev, 0.9, 0)),
-    krit: numericField(base.krit, 0) + 2,
-    smindam: scaledStat(base.smindam, 1.1, 0),
-    smaxdam: Math.max(scaledStat(base.smaxdam, 1.1, 0), scaledStat(base.smindam, 1.1, 0)),
-    mmindam: scaledStat(base.mmindam, 1.1, 0),
-    mmaxdam: Math.max(scaledStat(base.mmaxdam, 1.1, 0), scaledStat(base.mmindam, 1.1, 0)),
-    lmindam: scaledStat(base.lmindam, 1.1, 0),
-    lmaxdam: Math.max(scaledStat(base.lmaxdam, 1.1, 0), scaledStat(base.lmindam, 1.1, 0)),
-    ammo_tot: ammoTotal > 0 ? Math.max(ammo, Math.round(ammoTotal * 1.1)) : ammoTotal,
+    u_id: 5000 + weaponId,
     stRa: Math.min(5, numericField(base.stRa, 1) + 1),
     stDi: Math.min(5, numericField(base.stDi, 1) + 1),
     stDa: Math.min(5, numericField(base.stDa, 1) + 1),
-    sc: timedPermanentCost(5000 + numericField(base.w_id ?? base.id, 0), upgradePrice)
+    sc: timedPermanentCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
+    workshopImpactType: contract.impactType,
+    workshopImpactDamagePercent: contract.impactDamage ? 25 : 0,
+    workshopImpactTicksBonus: contract.impactDuration ? 2 : 0
   };
+  if (contract.rapidity) upgraded.rap = Math.max(60, scaledStat(base.rap, 0.9, 100));
+  if (contract.accuracy) upgraded.dev = Math.max(0, scaledStat(base.dev, 0.9, 0));
+  if (contract.crit) upgraded.krit = numericField(base.krit, 0) + 2;
+  if (contract.reload) upgraded.rt = Math.max(0, scaledStat(base.rt, 0.9, 0));
+  if (contract.radius) upgraded.rad = Math.max(1, scaledStat(base.rad, 1.1, 1));
+  if (contract.speed) upgraded.wsp = numericField(base.wsp ?? base.speed, 0) + 5;
+  if (contract.magazine && ammo > 0) upgraded.ammo = Math.max(ammo + 1, Math.round(ammo * 1.1));
+  if (contract.reserve && ammoTotal > 0) upgraded.ammo_tot = Math.max(upgraded.ammo ?? ammo, Math.round(ammoTotal * 1.1));
+  for (const [enabled, minKey, maxKey] of [
+    [contract.damageShort, "smindam", "smaxdam"],
+    [contract.damageMedium, "mmindam", "mmaxdam"],
+    [contract.damageLong, "lmindam", "lmaxdam"]
+  ]) {
+    if (!enabled) continue;
+    upgraded[minKey] = scaledStat(base[minKey], 1.1, 0);
+    upgraded[maxKey] = Math.max(upgraded[minKey], scaledStat(base[maxKey], 1.1, 0));
+  }
+  return upgraded;
 }
 
-const shopWeaponUpgrades = shopWeapons.map((item) => upgradedWeaponItem(item));
-const shopWeaponUpgradesById = new Map(shopWeaponUpgrades.map((item) => [Number(item.u_id), item]));
+let shopWeaponUpgrades = [];
+let shopWeaponUpgradesById = new Map();
 
 const wearSlotIds = {
   Hats: 1,
@@ -697,6 +777,8 @@ function loadTextAssetTranslations() {
 }
 
 const wearTextTranslations = loadTextAssetTranslations();
+shopWeaponUpgrades = shopWeapons.map((item) => upgradedWeaponItem(item));
+shopWeaponUpgradesById = new Map(shopWeaponUpgrades.map((item) => [Number(item.u_id), item]));
 
 const wearTextOverrides = {
   "Hats:biker": wearText("Скулкеп", "Чтобы пугать снайпера, смотрящего в прицел.", "+5% защита от снайперок\n+5% защита от пистолетов\n+10% защита от огнеметов"),
@@ -906,7 +988,12 @@ const restoredAssemblageDefinitions = [
   { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] }
 ];
 
-const shopAssemblages = restoredAssemblageDefinitions.map((definition) => {
+// Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
+// Keep them out of the shop response instead of exposing sets the battle server cannot complete.
+const removedAssemblageIds = new Set([4, 5]);
+const shopAssemblages = restoredAssemblageDefinitions
+  .filter((definition) => !removedAssemblageIds.has(definition.id))
+  .map((definition) => {
   const text = assemblageTextFor(definition.id);
   return {
     id: definition.id,
@@ -915,7 +1002,7 @@ const shopAssemblages = restoredAssemblageDefinitions.map((definition) => {
     ndesca: text.ndesca,
     items: JSON.stringify(definition.items.map(([slot, sname]) => assemblageWear(slot, sname)))
   };
-});
+  });
 
 // Hidden from the live shop: 2 "Лимонадный глоток", 6 "Пальцестрел",
 // 10 "Секир-башка", 11 "Подозрительность".
@@ -1769,6 +1856,27 @@ function hasInventoryWeapon(inventory, weaponId) {
 
 function inventoryWearId(item) {
   return Number(item?.w_id ?? item?.id ?? 0);
+}
+
+const viewKeyByWearType = new Map([
+  [1, "hat"],
+  [2, "mask"],
+  [3, "gloves"],
+  [4, "shirt"],
+  [5, "pants"],
+  [6, "boots"],
+  [7, "backpack"],
+  [8, "other"],
+  [9, "head"]
+]);
+
+function viewAfterPurchasedWear(view, item) {
+  const current = { ...(view || {}) };
+  if (Number(item?.itype || 0) !== 3) return current;
+  const viewKey = viewKeyByWearType.get(Number(item?.wt || 0));
+  const wearId = inventoryWearId(item);
+  if (viewKey && wearId > 0) current[viewKey] = wearId;
+  return current;
 }
 
 function hasInventoryWear(inventory, wearId) {
@@ -4519,7 +4627,11 @@ async function buyItemPostgres(account, item, price) {
 
       const nextMoney = money - price;
       const itemData = clone(item);
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
+      const nextView = viewAfterPurchasedWear(jsonValue(row.view, {}), itemData);
+      await client.query(
+        "UPDATE players SET money = $2, view = $3::jsonb, updated_at = now() WHERE id = $1",
+        [Number(account.id), nextMoney, JSON.stringify(nextView)]
+      );
       await client.query(
         `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
          VALUES ($1, $2, $3, $4::jsonb, now())
@@ -4541,6 +4653,21 @@ async function buyItemPostgres(account, item, price) {
           JSON.stringify(itemData)
         ]
       );
+      if (Number(itemData?.itype || 0) === 3) {
+        await client.query(
+          `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
+           VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
+           ON CONFLICT (player_id) DO UPDATE SET
+             view = EXCLUDED.view,
+             updated_at = now()`,
+          [
+            Number(account.id),
+            JSON.stringify(nextView),
+            JSON.stringify(jsonValue(row.weap, {})),
+            JSON.stringify(jsonValue(row.taun, {}))
+          ]
+        );
+      }
 
       await client.query("COMMIT");
 
@@ -4549,7 +4676,7 @@ async function buyItemPostgres(account, item, price) {
         store.accounts[String(fresh.id)] = fresh;
       }
 
-      console.log(`[buy-item] pg player=${account.id} type=${Number(itemData?.itype || 0)} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
+      console.log(`[buy-item] pg player=${account.id} type=${Number(itemData?.itype || 0)} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney} view=${viewSelectionSummary(nextView)}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
       try {
@@ -4573,11 +4700,12 @@ async function buyItem(account, item) {
   if (!hasInventoryItem(account, item)) {
     account.inventory.push(clone(item));
   }
+  account.view = viewAfterPurchasedWear(account.view, item);
   const beforeMoney = Number(account.money || 0);
   account.money -= price;
   recordPurchase(account, item, price);
   persist(account);
-  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money}`);
+  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money} view=${viewSelectionSummary(account.view)}`);
   return ok({ req: "", vcur: account.money });
 }
 
