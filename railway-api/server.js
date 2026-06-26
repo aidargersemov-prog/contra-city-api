@@ -48,6 +48,12 @@ const rateLimitBuckets = new Map();
 const LAUNCHER_VERSION = process.env.LAUNCHER_VERSION || "1.2.0";
 const LAUNCHER_MANIFEST_URL = process.env.LAUNCHER_MANIFEST_URL || "";
 const LAUNCHER_UPDATE_KEY = process.env.LAUNCHER_UPDATE_KEY || "";
+const GAME_CLASSIC_MANIFEST_URL = process.env.GAME_CLASSIC_MANIFEST_URL ||
+  "https://pub-bfbc65832fdd4742ac9dc2f24168c93b.r2.dev/builds/classic/manifest.json";
+const GAME_NEW_TEXTURES_MANIFEST_URL = process.env.GAME_NEW_TEXTURES_MANIFEST_URL ||
+  "https://pub-bfbc65832fdd4742ac9dc2f24168c93b.r2.dev/builds/new_textures/manifest.json";
+const GAME_CLASSIC_UPDATE_KEY = process.env.GAME_CLASSIC_UPDATE_KEY || "";
+const GAME_NEW_TEXTURES_UPDATE_KEY = process.env.GAME_NEW_TEXTURES_UPDATE_KEY || "";
 const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESSION_TTL_MS || 6 * 60 * 60 * 1000));
 const launcherSessions = new Map();
 
@@ -2338,6 +2344,11 @@ function launcherStatePayload(account) {
   return {
     result: true,
     version: LAUNCHER_VERSION,
+    manifestUrl: GAME_CLASSIC_MANIFEST_URL,
+    textureManifestUrl: GAME_NEW_TEXTURES_MANIFEST_URL,
+    updateKey: GAME_CLASSIC_UPDATE_KEY,
+    textureUpdateKey: GAME_NEW_TEXTURES_UPDATE_KEY,
+    sessionAuth: account ? sessionAuth(account) : "",
     player: account ? launcherPlayerPayload(account) : null,
     news: launcherNewsPayload(),
     downloads: {
