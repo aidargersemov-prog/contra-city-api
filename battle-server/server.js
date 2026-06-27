@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-23-melee-segment-targeting-v224";
+const BUILD_ID = "battle-server-2026-06-27-skif-deviation-floor-v229";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -2255,6 +2255,13 @@ function weaponRapidity(item = {}, fallback = {}) {
   return Math.max(rawRapidity, floor ?? 100);
 }
 
+function clientSafeWeaponDeviation(deviation, weaponType) {
+  const value = Math.max(0, numberOr(deviation, 0));
+  // Active ShotController treats zero deviation on handguns, machine guns and gatlings as a cheat path
+  // and returns before SendShot(), so accuracy bonuses must not serialize these weapons as perfectly accurate.
+  return (weaponType === 3 || weaponType === 4 || weaponType === 6) ? Math.max(1, value) : value;
+}
+
 function weaponRapidityForProfile(item = {}, fallback = {}, profile = null) {
   const rapidity = weaponRapidity(item, fallback);
   return Math.max(70, shotIntervalMsForProfileRapidity(rapidity, profile) - 10);
@@ -2295,7 +2302,7 @@ const WEAPON_MODE = Object.freeze({
   LAUNCHING: "launching",
 });
 
-const WEAPON_CHANGE_DURATION_MS = 600;
+const WEAPON_CHANGE_DURATION_MS = 300;
 const DEFAULT_WEAPON_LAUNCH_DURATION_MS = 1500;
 const FAST_GATLING_LAUNCH_DURATION_MS = 400;
 const MELEE_DELAYED_SHOT_MS = 200;
@@ -2362,7 +2369,7 @@ function weaponBodyFromItem(item = {}, index = 0, profile = null, options = {}) 
     { key: rawByte(92), value: rawInt(maxLoadedAmmo) },
     { key: rawByte(91), value: rawInt(maxAmmoReserve) },
     { key: rawByte(90), value: rawInt(numberOr(merged.lt, fallback.lt)) },
-    { key: rawByte(87), value: rawInt(numberOr(merged.dev, fallback.dev)) },
+    { key: rawByte(87), value: rawInt(clientSafeWeaponDeviation(merged.dev ?? fallback.dev, numberOr(merged.wt, fallback.wt))) },
     { key: rawByte(80), value: rawInt(weaponId) },
   ];
 
@@ -3145,7 +3152,10 @@ function applyWeaponGameplayBonuses(item, profile = null) {
 
   const accuracyFlat = numberOr(modifiers.weaponAccuracyFlat, 0);
   if (accuracyFlat > 0) {
-    result.dev = Math.max(0, Math.round(numberOr(result.dev, 0) - accuracyFlat));
+    result.dev = clientSafeWeaponDeviation(
+      Math.round(numberOr(result.dev, 0) - accuracyFlat),
+      weaponType
+    );
   }
 
   const movementSpeedPercentBonus = numberOr(modifiers.speedPercent, 0);
@@ -3301,7 +3311,7 @@ function makeWeaponRuntimeState(profile = null) {
       impact,
       impactType: impact?.type ?? IMPACT_TYPE.NONE,
       crit: numberOr(merged.krit, fallback.krit),
-      deviation: numberOr(merged.dev, fallback.dev),
+      deviation: clientSafeWeaponDeviation(merged.dev ?? fallback.dev, numberOr(merged.wt, fallback.wt)),
       shortDamage: [numberOr(merged.smindam, fallback.smindam), numberOr(merged.smaxdam, fallback.smaxdam)],
       mediumDamage: [numberOr(merged.mmindam, fallback.mmindam), numberOr(merged.mmaxdam, fallback.mmaxdam)],
       longDamage: [numberOr(merged.lmindam, fallback.lmindam), numberOr(merged.lmaxdam, fallback.lmaxdam)],
@@ -3862,7 +3872,7 @@ function tryDeliverCtfFlag(session, channel, source = "move") {
   sendReliableToWholeRoom(room, makeFlagEvent(1, carried), channel, { requireGameState: false });
   sendReliableToWholeRoom(room, makeScoreUpdateEvent(session), channel, { requireGameState: false });
   console.log(`[flag] delivered actor=${session.actorId} flagTeam=${carried.team} score=${teamScorePoints(session, session.team)} source=${source} pos=${fmtPoint(session.lastTransform)}`);
-  maybeFinishStandardRound(room, "flag-deliver", channel);
+  maybeFinishStandardRound(room, "flag-deliver", channel, session);
   return true;
 }
 function updateCtfOnMove(session, channel) {
@@ -4661,7 +4671,7 @@ function teamScorePoints(session, team) {
     }
   }
   let total = 0;
-  const players = session.room?.players || new Map();
+  const players = session?.room?.players || new Map();
   for (const playerSession of players.values()) {
     if (!playerSession || Number(playerSession.team) !== team) continue;
     total += numberOr(playerSession.points, numberOr(playerSession.kills, 0));
@@ -4975,9 +4985,13 @@ function scheduleStandardRoundLimit(room, channel = 0) {
   if (!timeLimitMs) return;
   const roundSeq = Number(room.standardRoundSeq || 0);
   room.standardRoundTimer = setTimeout(() => {
-    if (!room || rooms.get(room.name) !== room) return;
-    if (!isStandardRoundRoom(room) || room.standardRoundState !== "active" || Number(room.standardRoundSeq || 0) !== roundSeq) return;
-    finishStandardRound(room, standardRoundWinner(room), "time-limit", channel);
+    try {
+      if (!room || rooms.get(room.name) !== room) return;
+      if (!isStandardRoundRoom(room) || room.standardRoundState !== "active" || Number(room.standardRoundSeq || 0) !== roundSeq) return;
+      finishStandardRound(room, standardRoundWinner(room), "time-limit", channel);
+    } catch (error) {
+      console.error(`[round] time-limit failed room=${room?.name || "unknown"} seq=${roundSeq}`, error);
+    }
   }, timeLimitMs);
   if (typeof room.standardRoundTimer.unref === "function") room.standardRoundTimer.unref();
 }
@@ -5008,18 +5022,19 @@ function beginNextStandardRound(room, roundSeq, channel = 0) {
   const ready = standardReadyPlayers(room);
   const newGameSent = sendStandardPayloadToReadyRoom(room, makeStandardNewGameEvent(room), channel);
   const started = startStandardRound(room, channel, "round-restart");
-  let spawnSent = 0;
-  for (const playerSession of ready) {
-    const spawnEvent = buildSpawnEvent(playerSession, playerSession.team, "standard-round-restart");
-    spawnSent += sendStandardPayloadToReadyRoom(room, spawnEvent, channel);
-  }
-  console.log(`[round] restart room=${room.name} map=${room.map} mode=${room.mode} ready=${ready.length} newGamePeers=${newGameSent} spawnPeers=${spawnSent} started=${started}`);
+  console.log(`[round] restart room=${room.name} map=${room.map} mode=${room.mode} ready=${ready.length} newGamePeers=${newGameSent} spawn=client-request started=${started}`);
 }
 
 function scheduleStandardRestart(room, channel = 0) {
   clearStandardRestartTimer(room);
   const roundSeq = Number(room.standardRoundSeq || 0);
-  room.standardRestartTimer = setTimeout(() => beginNextStandardRound(room, roundSeq, channel), STANDARD_ROUND_RESTART_MS);
+  room.standardRestartTimer = setTimeout(() => {
+    try {
+      beginNextStandardRound(room, roundSeq, channel);
+    } catch (error) {
+      console.error(`[round] restart failed room=${room?.name || "unknown"} seq=${roundSeq}`, error);
+    }
+  }, STANDARD_ROUND_RESTART_MS);
   if (typeof room.standardRestartTimer.unref === "function") room.standardRestartTimer.unref();
 }
 
@@ -5055,7 +5070,7 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
   let sent = 0;
   for (const payload of payloads) sent += sendStandardPayloadToReadyRoom(room, payload, channel, currentSession, currentResponses);
   scheduleStandardRestart(room, channel);
-  console.log(`[round] end room=${room.name} map=${room.map} mode=${room.mode} winner=${winner || "draw"} reason=${reason} players=${standardReadyPlayers(room).length} score=${Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH ? `${teamScorePoints(scoreSource, 1)}:${teamScorePoints(scoreSource, 2)}` : "ffa"} sent=${sent}`);
+  console.log(`[round] end room=${room.name} map=${room.map} mode=${room.mode} winner=${winner || "draw"} reason=${reason} players=${standardReadyPlayers(room).length} score=${hasTeamScoreMode(Number(room.mode)) ? `${teamScorePoints(scoreSource, 1)}:${teamScorePoints(scoreSource, 2)}` : "ffa"} sent=${sent}`);
   return sent;
 }
 
@@ -5886,6 +5901,13 @@ function reloadSingleDurationMs(state) {
   const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
   if (!isComplexReloadWeaponState(state)) return fullReloadMs;
   return Math.floor(fullReloadMs / Math.max(1, numberOr(state.maxLoadedAmmo, 1))) + 10;
+}
+
+function reloadDurationForAmountMs(state, amount) {
+  const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
+  if (!isComplexReloadWeaponState(state)) return fullReloadMs;
+  const shells = Math.max(1, numberOr(amount, 1));
+  return Math.min(fullReloadMs, reloadSingleDurationMs(state) * shells);
 }
 
 function isReloadWeaponMode(mode) {
@@ -7607,7 +7629,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   state.reloading = true;
   state.reloadStartedAt = now;
   state.reloadReadyAt = isComplexReloadWeaponState(state) ? now + reloadSingleDurationMs(state) : 0;
-  state.reloadFullUntil = now + numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
+  state.reloadFullUntil = now + reloadDurationForAmountMs(state, amount);
   setWeaponMode(state, WEAPON_MODE.RELOADING, now);
   const firstTickMs = isComplexReloadWeaponState(state)
     ? Math.min(reloadSingleDurationMs(state), numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs)))
@@ -9286,6 +9308,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM} roomAge=${roomAgeMs(session.room)}ms`);
     postBattleEvent(session, "gamestate");
     if (MAP_PICKUPS_IN_GAMESTATE) markActiveRoomItemsVisible(session);
+    if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
+      startStandardRound(session.room, channel, "pre-gamestate");
+    }
     const responses = [
       ...buildDeferredPeerActorJoinEvents(session, channel),
       rawEvent(84, [
@@ -9310,9 +9335,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       queueAutoSpawn(session, null, "post-gamestate");
     } else if (!session.spawned) {
       console.log(`[event] waiting client spawn request actor=${session.actorId} team=${normalizeTeamForRoom(session)} mode=${roomMode(session)}`);
-    }
-    if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
-      startStandardRound(session.room, channel, "post-gamestate");
     }
     queuePeerActorRepair(session, channel, "post-gamestate");
     return responses;
