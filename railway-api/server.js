@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-06-23-workshop-contracts-v6";
+const API_BUILD_ID = "railway-api-2026-06-27-buy-weapon-persist-v7";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1882,6 +1882,16 @@ function viewAfterPurchasedWear(view, item) {
   const viewKey = viewKeyByWearType.get(Number(item?.wt || 0));
   const wearId = inventoryWearId(item);
   if (viewKey && wearId > 0) current[viewKey] = wearId;
+  return current;
+}
+
+function weaponSelectionAfterPurchasedWeapon(selection, item) {
+  const current = { ...(selection || {}) };
+  if (Number(item?.itype || 0) !== 1) return current;
+  const slot = Number(item?.ws || 0);
+  const weaponId = inventoryWeaponId(item);
+  if (slot < 1 || slot > 7 || weaponId <= 0) return current;
+  current[`id${slot}`] = weaponId;
   return current;
 }
 
@@ -4638,10 +4648,14 @@ async function buyItemPostgres(account, item, price) {
 
       const nextMoney = money - price;
       const itemData = clone(item);
-      const nextView = viewAfterPurchasedWear(jsonValue(row.view, {}), itemData);
+      const itemType = Number(itemData?.itype || 0);
+      const currentView = jsonValue(row.view, {});
+      const currentWeapons = jsonValue(row.weap, {});
+      const nextView = viewAfterPurchasedWear(currentView, itemData);
+      const nextWeapons = weaponSelectionAfterPurchasedWeapon(currentWeapons, itemData);
       await client.query(
-        "UPDATE players SET money = $2, view = $3::jsonb, updated_at = now() WHERE id = $1",
-        [Number(account.id), nextMoney, JSON.stringify(nextView)]
+        "UPDATE players SET money = $2, view = $3::jsonb, weap = $4::jsonb, updated_at = now() WHERE id = $1",
+        [Number(account.id), nextMoney, JSON.stringify(nextView), JSON.stringify(nextWeapons)]
       );
       await client.query(
         `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
@@ -4650,7 +4664,7 @@ async function buyItemPostgres(account, item, price) {
            item_type = EXCLUDED.item_type,
            item_data = EXCLUDED.item_data,
            updated_at = now()`,
-        [Number(account.id), inventoryItemKey(itemData), Number(itemData?.itype || 0), JSON.stringify(itemData)]
+        [Number(account.id), inventoryItemKey(itemData), itemType, JSON.stringify(itemData)]
       );
       await client.query(
         `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
@@ -4658,23 +4672,24 @@ async function buyItemPostgres(account, item, price) {
         [
           Number(account.id),
           inventoryItemKey(itemData),
-          Number(itemData?.itype || 0),
+          itemType,
           inventoryItemId(itemData),
           Number(price || 0),
           JSON.stringify(itemData)
         ]
       );
-      if (Number(itemData?.itype || 0) === 3) {
+      if (itemType === 1 || itemType === 3) {
         await client.query(
           `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
            VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
            ON CONFLICT (player_id) DO UPDATE SET
              view = EXCLUDED.view,
+             weap = EXCLUDED.weap,
              updated_at = now()`,
           [
             Number(account.id),
             JSON.stringify(nextView),
-            JSON.stringify(jsonValue(row.weap, {})),
+            JSON.stringify(nextWeapons),
             JSON.stringify(jsonValue(row.taun, {}))
           ]
         );
@@ -4687,7 +4702,7 @@ async function buyItemPostgres(account, item, price) {
         store.accounts[String(fresh.id)] = fresh;
       }
 
-      console.log(`[buy-item] pg player=${account.id} type=${Number(itemData?.itype || 0)} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney} view=${viewSelectionSummary(nextView)}`);
+      console.log(`[buy-item] pg player=${account.id} type=${itemType} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney} view=${viewSelectionSummary(nextView)} weap=${weaponSelectionSummary(nextWeapons)}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
       try {
@@ -4712,11 +4727,12 @@ async function buyItem(account, item) {
     account.inventory.push(clone(item));
   }
   account.view = viewAfterPurchasedWear(account.view, item);
+  account.weap = weaponSelectionAfterPurchasedWeapon(account.weap, item);
   const beforeMoney = Number(account.money || 0);
   account.money -= price;
   recordPurchase(account, item, price);
   persist(account);
-  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money} view=${viewSelectionSummary(account.view)}`);
+  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money} view=${viewSelectionSummary(account.view)} weap=${weaponSelectionSummary(account.weap)}`);
   return ok({ req: "", vcur: account.money });
 }
 
