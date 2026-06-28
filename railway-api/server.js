@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-06-27-buy-weapon-persist-v7";
+const API_BUILD_ID = "railway-api-2026-06-28-enhancer-shop-split-v13";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -161,7 +161,9 @@ const CLAN_ARM_ID_SET = new Set(CLAN_ARM_IDS);
 const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
 const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
 const CLAN_ARM_ITEM_TYPE = 5;
-const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12]);
+const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 3, 4, 5, 30, 31, 32, 33, 34, 35, 36]);
+const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13]);
+const SHOP_ENHANCER_IDS = Object.freeze([...PLAYER_ENHANCER_IDS, ...CLAN_ENHANCER_IDS]);
 const CLAN_ENHANCER_ID_SET = new Set(CLAN_ENHANCER_IDS);
 
 const cost = (id, value = 100) => ({
@@ -1013,7 +1015,7 @@ const shopAssemblages = restoredAssemblageDefinitions
 // Hidden from the live shop: 2 "Лимонадный глоток", 6 "Пальцестрел",
 // 10 "Секир-башка", 11 "Подозрительность".
 const shopTaunts = [3, 4, 5, 7, 8, 9].map((id) => taunt(id, SHOP_PRICE));
-const shopEnhancers = [1, 2, 3, 4, 5, 10, 11, 12, 13, 30, 31, 32, 33, 34, 35, 36].map((id) =>
+const shopEnhancers = SHOP_ENHANCER_IDS.map((id) =>
   enhancer(id, SHOP_PRICE)
 );
 const canonicalWeaponsById = new Map([...defaultWeapons, ...shopWeapons].map((item) => [Number(item.w_id), item]));
@@ -1062,7 +1064,24 @@ const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
+const DOSSIER_GAME_MODE_STATS = [
+  MAP_MODE_DEATHMATCH,
+  MAP_MODE_TEAM_DEATHMATCH,
+  MAP_MODE_CAPTURE_THE_FLAG,
+  MAP_MODE_CONTROL_POINTS,
+  MAP_MODE_ZOMBIE
+];
 const mapEntry = (id, systemName, modes = 3) => ({ i: id, n: systemName, m: modes, p: mapPlayers, dp: 4 });
+
+function normalizeStatsMode(mode) {
+  const value = Number(mode || 0);
+  if (!Number.isFinite(value)) return 0;
+  if ((value & MAP_MODE_ZOMBIE) === MAP_MODE_ZOMBIE) return MAP_MODE_ZOMBIE;
+  if (value === MAP_MODE_DEATHMATCH || value === MAP_MODE_TEAM_DEATHMATCH || value === MAP_MODE_CAPTURE_THE_FLAG || value === MAP_MODE_CONTROL_POINTS) {
+    return value;
+  }
+  return value;
+}
 
 const maps = [
   mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
@@ -1163,11 +1182,12 @@ function loadStore() {
 function saveStore(store) {
   if (pgPool) {
     pgSaveChain = pgSaveChain.then(() => savePostgresStore(clone(store)));
-    return;
+    return pgSaveChain;
   }
 
   ensureStoreDir();
   fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
+  return Promise.resolve();
 }
 
 let pgPool = null;
@@ -1499,6 +1519,10 @@ async function savePostgresStore(nextStore) {
       const account = normalizeAccount(rawAccount);
       const createdAt = account.createdAt || new Date().toISOString();
       const updatedAt = account.updatedAt || new Date().toISOString();
+      const existingPlayer = await client.query("SELECT updated_at FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      if (existingPlayer.rows[0] && isOlderPostgresSnapshot(updatedAt, existingPlayer.rows[0].updated_at)) {
+        continue;
+      }
 
       await client.query(
         `INSERT INTO players (
@@ -2162,6 +2186,12 @@ async function accountFromRequest(url) {
 
 function postgresTimestamp(value) {
   return value?.toISOString?.() || value;
+}
+
+function isOlderPostgresSnapshot(snapshotUpdatedAt, databaseUpdatedAt) {
+  const snapshotMs = Date.parse(postgresTimestamp(snapshotUpdatedAt));
+  const databaseMs = Date.parse(postgresTimestamp(databaseUpdatedAt));
+  return Number.isFinite(snapshotMs) && Number.isFinite(databaseMs) && snapshotMs < databaseMs;
 }
 
 function accountFromPostgresRow(row, inventory = [], abilities = [], weaponStats = [], modeStats = [], mapStats = []) {
@@ -2969,8 +2999,17 @@ function weaponStatItems(account) {
 }
 
 function gameModeStatItems(account) {
-  const statByMode = new Map((account.modeStats || []).map((item) => [Number(item.m || item.mode || 0), item]));
-  return [1, 2, 3].map((mode) => {
+  const statByMode = new Map();
+  for (const item of account.modeStats || []) {
+    const mode = normalizeStatsMode(item.m || item.mode || 0);
+    if (!mode) continue;
+    const current = statByMode.get(mode) || { w: 0, l: 0, pt: 0 };
+    current.w += statNumber(item.w ?? item.wins, 0);
+    current.l += statNumber(item.l ?? item.losses, 0);
+    current.pt += statNumber(item.pt ?? item.play_time, 0);
+    statByMode.set(mode, current);
+  }
+  return DOSSIER_GAME_MODE_STATS.map((mode) => {
     const stats = statByMode.get(mode) || {};
     return {
       m: mode,
@@ -3216,6 +3255,14 @@ function findShopItem(collection, idField, id) {
 
 function itemPrice(item) {
   return Number(item?.sc?.tPv || 0);
+}
+
+function isWeaponItem(item) {
+  return Number(item?.itype || 0) === 1;
+}
+
+function isValidShopPrice(price) {
+  return Number.isFinite(price) && price > 0;
 }
 
 const SHOP_DURATION = Object.freeze({
@@ -3959,7 +4006,7 @@ function ensureClanAccount(account) {
 
 function saveClanState() {
   refreshAllAccountClanSummaries(store);
-  saveStore(store);
+  return saveStore(store);
 }
 
 function clanMemberRecordForAccount(account, memberLevel = 1) {
@@ -4161,7 +4208,7 @@ function clanExtraPayload(account, clanId) {
   });
 }
 
-function createClan(account, url) {
+async function createClan(account, url) {
   account = ensureClanAccount(account);
   const name = cleanClanName(clanFormValue(url, "data[name]", "name"));
   const tag = cleanClanTag(clanFormValue(url, "data[tag]", "tag"));
@@ -4175,7 +4222,9 @@ function createClan(account, url) {
   if (tagError) return clanError(tagError);
   if (Number(account.money || 0) < CLAN_COSTS.create) return clanError(CLAN_ERROR.MISSING_MONEY);
 
+  const createdAt = new Date().toISOString();
   account.money = Number(account.money || 0) - CLAN_COSTS.create;
+  account.updatedAt = createdAt;
   const id = nextClanIdValue();
   const clan = normalizeClanRecord({
     id,
@@ -4190,18 +4239,18 @@ function createClan(account, url) {
     members: {
       [String(account.id)]: clanMemberRecordForAccount(account, 2)
     },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt,
+    updatedAt: createdAt
   });
   store.clans.byId[String(id)] = clan;
-  saveClanState();
+  await saveClanState();
   return clanBaseResponse(account, {
     id,
     cinfo: clanPayload(clan, { full: true })
   });
 }
 
-function joinClan(account, url) {
+async function joinClan(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
@@ -4216,16 +4265,18 @@ function joinClan(account, url) {
     playerId: Number(account.id),
     createdAt: new Date().toISOString()
   };
-  saveClanState();
+  await saveClanState();
+  console.log(`[clan-invite] join player=${account.id} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
   return ok({ id: Number(clan.id) });
 }
 
-function buyClanRequests(account) {
+async function buyClanRequests(account) {
   account = ensureClanAccount(account);
   if (Number(account.money || 0) < CLAN_COSTS.requests) return clanError(CLAN_ERROR.MISSING_MONEY);
   account.money = Number(account.money || 0) - CLAN_COSTS.requests;
   account.clanMaxRequest = Number(account.clanMaxRequest || 10) + 5;
-  saveClanState();
+  account.updatedAt = new Date().toISOString();
+  await saveClanState();
   return ok();
 }
 
@@ -4233,7 +4284,7 @@ function isClanOwner(account, clan) {
   return Number(clan?.ownerPlayerId || 0) === Number(account?.id || 0);
 }
 
-function acceptClanInvite(account, url) {
+async function acceptClanInvite(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const userId = Number(url.searchParams.get("uid") || 0);
@@ -4247,21 +4298,23 @@ function acceptClanInvite(account, url) {
   delete clan.invites[String(userId)];
   clan.members[String(userId)] = clanMemberRecordForAccount(userAccount, 1);
   clan.updatedAt = new Date().toISOString();
-  saveClanState();
+  await saveClanState();
+  console.log(`[clan-invite] accept owner=${account.id} player=${userId} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
   return ok({
     id: userId,
     i: clanMemberAccountPayload(clan.members[String(userId)])
   });
 }
 
-function rejectClanInvite(account, url) {
+async function rejectClanInvite(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const userId = Number(url.searchParams.get("uid") || 0);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   delete clan.invites[String(userId)];
   clan.updatedAt = new Date().toISOString();
-  saveClanState();
+  await saveClanState();
+  console.log(`[clan-invite] reject owner=${account.id} player=${userId} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
   return ok({ id: userId });
 }
 
@@ -4469,7 +4522,7 @@ function deleteClanEvent(account, url) {
   return ok({ cid: Number(clan.id), eid: eventId });
 }
 
-function routeClan(account, url, act, requestOrigin = null) {
+async function routeClan(account, url, act, requestOrigin = null) {
   ensureClanStore();
   account = ensureClanAccount(account);
 
@@ -4498,17 +4551,17 @@ function routeClan(account, url, act, requestOrigin = null) {
     case "arms":
       return ok({ arms: clanArmsPayload(requestOrigin, playerClanRecord(account.id)) });
     case "create":
-      return createClan(account, url);
+      return await createClan(account, url);
     case "del":
       return deleteClan(account, url);
     case "join":
-      return joinClan(account, url);
+      return await joinClan(account, url);
     case "accept":
-      return acceptClanInvite(account, url);
+      return await acceptClanInvite(account, url);
     case "reject":
-      return rejectClanInvite(account, url);
+      return await rejectClanInvite(account, url);
     case "buyReq":
-      return buyClanRequests(account);
+      return await buyClanRequests(account);
     case "expand":
       return expandClan(account, url);
     case "remove":
@@ -4630,6 +4683,13 @@ async function buyItemPostgres(account, item, price) {
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
+      const itemData = clone(item);
+      const itemType = Number(itemData?.itype || 0);
+      if (isWeaponItem(itemData) && !isValidShopPrice(price)) {
+        console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price}`);
+        return { result: false, err: [1] };
+      }
+
       client = await pgPool.connect();
       await client.query("BEGIN");
 
@@ -4647,8 +4707,6 @@ async function buyItemPostgres(account, item, price) {
       }
 
       const nextMoney = money - price;
-      const itemData = clone(item);
-      const itemType = Number(itemData?.itype || 0);
       const currentView = jsonValue(row.view, {});
       const currentWeapons = jsonValue(row.weap, {});
       const nextView = viewAfterPurchasedWear(currentView, itemData);
@@ -4721,6 +4779,10 @@ async function buyItemPostgres(account, item, price) {
 async function buyItem(account, item) {
   if (!item) return { result: false, err: [1] };
   const price = itemPrice(item);
+  if (isWeaponItem(item) && !isValidShopPrice(price)) {
+    console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price}`);
+    return { result: false, err: [1] };
+  }
   if (pgPool) return buyItemPostgres(account, item, price);
   if (account.money < price) return { result: false, err: [2] };
   if (!hasInventoryItem(account, item)) {
@@ -4811,6 +4873,7 @@ async function buyEnhancerPostgres(account, item, duration, price) {
 
 async function buyEnhancer(account, item, duration) {
   if (!item) return { result: false, err: [1] };
+  if (Number(item.iC || 0) === 1) return { result: false, err: [1] };
   const selectedDuration = normalizeShopDuration(duration);
   const price = shopDurationPrice(item, selectedDuration);
   if (pgPool) return buyEnhancerPostgres(account, item, selectedDuration, price);
@@ -4848,6 +4911,11 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
+      if (!isValidShopPrice(price)) {
+        console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
+        return { result: false, err: [1] };
+      }
+
       client = await pgPool.connect();
       await client.query("BEGIN");
 
@@ -4908,6 +4976,7 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
         store.accounts[String(fresh.id)] = fresh;
       }
 
+      console.log(`[buy-weapon-upgrade] pg player=${account.id} key=${itemKey} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
       try {
@@ -4926,6 +4995,10 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
 async function buyWeaponUpgrade(account, upgrade) {
   if (!upgrade) return { result: false, err: [1] };
   const price = weaponUpgradePrice(upgrade);
+  if (!isValidShopPrice(price)) {
+    console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
+    return { result: false, err: [1] };
+  }
   if (pgPool) return buyWeaponUpgradePostgres(account, upgrade, price);
   if (account.money < price) return { result: false, err: [2] };
   if (!Array.isArray(account.inventory)) account.inventory = [];
@@ -4939,6 +5012,7 @@ async function buyWeaponUpgrade(account, upgrade) {
   account.money -= price;
   recordPurchase(account, itemData, price);
   persist(account);
+  console.log(`[buy-weapon-upgrade] json player=${account.id} key=${itemKey} item=${inventoryItemId(itemData)} price=${price} before=${account.money + price} after=${account.money}`);
   return ok({ req: "", vcur: account.money });
 }
 
@@ -5384,7 +5458,7 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   }
 
   if (page === "clan") {
-    return routeClan(account, url, act, requestOrigin);
+    return await routeClan(account, url, act, requestOrigin);
   }
 
   return ok();
@@ -5866,7 +5940,7 @@ async function recordBattleEvent(event) {
 
   const roomName = String(event.roomName || event.room || "restore-room").slice(0, 80);
   const mapName = String(event.mapName || event.map || "Arena_3lvl").slice(0, 80);
-  const mode = Number(event.mode || 2);
+  const mode = normalizeStatsMode(event.mode || 2);
   const maxPlayers = Number(event.maxPlayers || 8);
   const playerId = Number(event.playerId || account.id || 1);
   const actorId = Number(event.actorId || 1);
