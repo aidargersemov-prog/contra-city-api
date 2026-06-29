@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-06-28-enhancer-shop-split-v13";
+const API_BUILD_ID = "railway-api-2026-06-28-weapon-buy-request-v15";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -162,7 +162,7 @@ const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
 const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
 const CLAN_ARM_ITEM_TYPE = 5;
 const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 3, 4, 5, 30, 31, 32, 33, 34, 35, 36]);
-const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13]);
+const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13, 150, 151, 152, 153, 154, 155, 156, 159, 160, 205, 208, 209]);
 const SHOP_ENHANCER_IDS = Object.freeze([...PLAYER_ENHANCER_IDS, ...CLAN_ENHANCER_IDS]);
 const CLAN_ENHANCER_ID_SET = new Set(CLAN_ENHANCER_IDS);
 
@@ -859,9 +859,11 @@ const shopWearCatalog = {
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
 
-const shopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
+const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
   names.map((sname, index) => wear(10000 + wearSlotIds[slot] * 1000 + index + 1, wearSlotIds[slot], sname, SHOP_PRICE, slot))
 );
+
+const shopWears = legacyShopWears;
 
 function findWearCatalogItem(slot, sname) {
   const wt = wearSlotIds[slot];
@@ -4701,6 +4703,17 @@ async function buyItemPostgres(account, item, price) {
       }
 
       const money = Number(row.money || 0);
+      if (isWeaponItem(itemData)) {
+        const existing = await client.query(
+          "SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_key = $2 LIMIT 1",
+          [Number(account.id), inventoryItemKey(itemData)]
+        );
+        if (existing.rowCount > 0) {
+          await client.query("ROLLBACK");
+          return ok({ req: "", vcur: money });
+        }
+      }
+
       if (money < price) {
         await client.query("ROLLBACK");
         return { result: false, err: [2] };
@@ -4784,6 +4797,9 @@ async function buyItem(account, item) {
     return { result: false, err: [1] };
   }
   if (pgPool) return buyItemPostgres(account, item, price);
+  if (isWeaponItem(item) && hasInventoryItem(account, item)) {
+    return ok({ req: "", vcur: account.money });
+  }
   if (account.money < price) return { result: false, err: [2] };
   if (!hasInventoryItem(account, item)) {
     account.inventory.push(clone(item));
