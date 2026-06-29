@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-28-round-summary-stats-v233";
+const BUILD_ID = "battle-server-2026-06-29-shot-shooting-slack-v234";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -5926,6 +5926,10 @@ function shotReadyAt(state) {
   return numberOr(state?.shotStartedAt, 0) + numberOr(state?.shotIntervalMs, shotIntervalMsFromRapidity(state?.rapidity));
 }
 
+function isShotReadyWithinSlack(state, now = Date.now()) {
+  return Math.max(0, shotReadyAt(state) - now) <= SHOT_THROTTLE_SLACK_MS;
+}
+
 function launchReadyAt(state) {
   return numberOr(state?.launchStartedAt, 0) + numberOr(state?.launchDurationMs, DEFAULT_WEAPON_LAUNCH_DURATION_MS);
 }
@@ -6276,6 +6280,9 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
   }
 
   if (weaponMode === WEAPON_MODE.SHOOTING) {
+    if (isShotReadyWithinSlack(state, now)) {
+      return { ok: true, reason: "shot-slack", intervalMs };
+    }
     return { ok: false, reason: "shooting", waitMs: Math.max(0, shotReadyAt(state) - now), intervalMs };
   }
 
