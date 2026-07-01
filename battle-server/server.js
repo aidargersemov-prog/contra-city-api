@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-06-29-shot-shooting-slack-v234";
+const BUILD_ID = "battle-server-2026-06-29-score-hide-unspawned-v236";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -4696,6 +4696,13 @@ function makeScoreRaw(session) {
   const players = session.room?.players || new Map();
   for (const [actorId, playerSession] of players.entries()) {
     if (!playerSession?.actorRaw) continue;
+    const hasScoreState =
+      playerSession.spawned ||
+      playerSession.dead ||
+      numberOr(playerSession.kills, 0) > 0 ||
+      numberOr(playerSession.deaths, 0) > 0 ||
+      numberOr(playerSession.points, 0) > 0;
+    if (!hasScoreState) continue;
     const rawTeam = Number(playerSession.team);
     const team = mode === 1 ? 0 : (rawTeam === 1 || rawTeam === 2 ? rawTeam : -1);
     if (team < 0) continue;
@@ -5915,7 +5922,8 @@ function reloadSingleDurationMs(state) {
 function reloadDurationForAmountMs(state, amount) {
   const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
   if (!isComplexReloadWeaponState(state)) return fullReloadMs;
-  return Math.min(fullReloadMs, reloadSingleDurationMs(state));
+  const shellCount = Math.max(1, numberOr(amount, 1));
+  return Math.min(fullReloadMs, reloadSingleDurationMs(state) * shellCount);
 }
 
 function isReloadWeaponMode(mode) {
@@ -6164,7 +6172,7 @@ function applyReloadTick(session, state, channel, reloadSeq) {
   }
 
   if (missing > 0 && reserve > 0) {
-    const amount = Math.min(missing, reserve);
+    const amount = 1;
     state.loadedAmmo += amount;
     state.ammoReserve -= amount;
     const event = makeReloadUpdateEvent(session, state);
