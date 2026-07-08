@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-08-launcher-device-bind-v16";
+const API_BUILD_ID = "railway-api-2026-07-08-launcher-device-bind-v17";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1286,6 +1286,25 @@ async function runMigrations() {
   }
 }
 
+async function ensureLauncherDeviceSchema() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS launcher_devices (
+      player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+      device_key_id TEXT NOT NULL,
+      device_public_key TEXT NOT NULL,
+      hwid_hash TEXT NOT NULL DEFAULT '',
+      risk JSONB NOT NULL DEFAULT '{}'::jsonb,
+      bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      reset_at TIMESTAMPTZ
+    )
+  `);
+  await pgPool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS launcher_devices_device_key_id_idx
+      ON launcher_devices (device_key_id)
+  `);
+}
+
 async function syncPostgresCatalog(existingClient = null) {
   const client = existingClient || (await pgPool.connect());
   const ownsClient = !existingClient;
@@ -1494,6 +1513,7 @@ async function initStore() {
   });
 
   await runMigrations();
+  await ensureLauncherDeviceSchema();
   await syncPostgresCatalog();
 
   let loaded = await loadPostgresStore();
@@ -6396,7 +6416,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
+    let deviceAccess;
+    try {
+      deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
+    } catch (error) {
+      console.error("[launcher-device] access check failed", error);
+      sendJson(res, { result: false, error: "device_binding_failed", news: launcherNewsPayload() }, 500);
+      return;
+    }
     if (!deviceAccess.ok) {
       sendJson(res, { result: false, error: deviceAccess.error, news: launcherNewsPayload() }, deviceAccess.status || 403);
       return;
