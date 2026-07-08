@@ -8722,6 +8722,62 @@ function eventDataHash(parsed) {
   return evData && evData.type === 0x68 ? evData : null;
 }
 
+function chatRequestText(parsed) {
+  return String(parsed?.params?.get(77)?.value ?? "").trim();
+}
+
+function chatRequestType(parsed) {
+  const type = Number(parsed?.params?.get(80)?.value ?? 253);
+  return Number.isFinite(type) ? (type & 0xff) : 253;
+}
+
+function buildBattleChatEvent(session, message, type) {
+  const team = Number.isFinite(Number(session?.team)) ? Number(session.team) : 0;
+  return rawEvent(155, [
+    { key: 254, value: rawInt(session.actorId) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(77), value: rawString(message) },
+        { key: rawByte(85), value: rawString(stringOr(session.playerName, process.env.DEFAULT_PLAYER_NAME || "ContraCity")) },
+        { key: rawByte(80), value: rawByte(type) },
+        { key: rawByte(84), value: rawShort(team) },
+      ]),
+    },
+  ]);
+}
+
+function broadcastBattleChat(session, payload, type, channel = 0) {
+  const room = session?.room;
+  if (!room?.players?.size || !payload) return 0;
+  const teamOnly = Number(type) === 249;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === session) continue;
+    if (teamOnly && Number(playerSession.team) !== Number(session.team)) continue;
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function handleBattleChatRequest(session, parsed, channel = 0) {
+  if (!session?.room || !session.actorId) {
+    console.log(`[chat] ignored op=155 reason=no-room actor=${session?.actorId || 0}`);
+    return [];
+  }
+  const message = chatRequestText(parsed).slice(0, 160);
+  if (!message) return [];
+  const type = chatRequestType(parsed);
+  const event = buildBattleChatEvent(session, message, type);
+  const peers = broadcastBattleChat(session, event, type, channel);
+  postBattleEvent(session, "chat", {
+    message,
+    eventData: { type, team: session.team || 0, peers },
+  });
+  console.log(`[chat] room=${session.room.name} actor=${session.actorId} user=${session.playerId || 0} type=${type} team=${session.team || 0} chars=${message.length} peers=${peers}`);
+  return [event];
+}
+
 function getTeamFromEventData(parsed, fallback = 1) {
   const data = eventDataHash(parsed);
   const team = htGet(data, 239)?.value;
@@ -9330,6 +9386,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     resetReliableDedupe(session, "op-leave");
     detachSessionFromRoom(session, "op-leave");
     return [rawOperationResponse(254, [])];
+  }
+
+  if (parsed.opCode === 155) {
+    return handleBattleChatRequest(session, parsed, channel);
   }
 
   if (parsed.opCode !== 253) {
