@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-08-battle-chat-v238";
+const BUILD_ID = "battle-server-2026-07-08-battle-chat-event155-v239";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -8722,12 +8722,21 @@ function eventDataHash(parsed) {
   return evData && evData.type === 0x68 ? evData : null;
 }
 
+function chatRequestData(parsed) {
+  if (parsed?.opCode === 253) return eventDataHash(parsed);
+  return null;
+}
+
 function chatRequestText(parsed) {
-  return String(parsed?.params?.get(77)?.value ?? "").trim();
+  const data = chatRequestData(parsed);
+  const value = data ? htGet(data, 77)?.value : parsed?.params?.get(77)?.value;
+  return String(value ?? "").trim();
 }
 
 function chatRequestType(parsed) {
-  const type = Number(parsed?.params?.get(80)?.value ?? 253);
+  const data = chatRequestData(parsed);
+  const value = data ? htGet(data, 80)?.value : parsed?.params?.get(80)?.value;
+  const type = Number(value ?? 253);
   return Number.isFinite(type) ? (type & 0xff) : 253;
 }
 
@@ -9403,6 +9412,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (isMasterSocialPort(port)) {
     return handleMasterEvent(session, parsed);
+  }
+
+  if (eventCode === 155) {
+    return handleBattleChatRequest(session, parsed, channel);
   }
 
   if (eventCode === 86) {
