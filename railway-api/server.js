@@ -5,8 +5,8 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-08-launcher-device-bind-v17";
-const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
+const API_BUILD_ID = "railway-api-2026-07-08-launcher-auth-hardening-v20";
+const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
 const API_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -2114,6 +2114,7 @@ function accountCredentialsFrom(url) {
   const idNumber = Number(rawId);
 
   if (rawId && Number.isInteger(idNumber) && idNumber > 0 && key) {
+    if (key === "contra-revive-key") return null;
     return { id: String(idNumber), key };
   }
 
@@ -2646,10 +2647,10 @@ async function resetLauncherDeviceBinding(accountId) {
 }
 
 async function loginAccountFromUrl(url) {
-  if (accountCredentialsFrom(url)) {
-    return accountFromRequest(url);
+  if (!accountCredentialsFrom(url)) {
+    return null;
   }
-  return refreshAccountFromPostgres(ensureDesktopAccount());
+  return accountFromRequest(url);
 }
 
 function cookieHeaders(account) {
@@ -6565,6 +6566,7 @@ server.listen(PORT, () => {
   console.log(`Contra City legacy API listening on ${PORT} build=${API_BUILD_ID}`);
   if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
   if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
+  if (!CREATE_CODE) console.warn("[security] CREATE_CODE is not set; /create account creation is disabled.");
   if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
   if (DEFAULT_KEY === "contra-revive-key") console.warn("[security] DEFAULT_KEY still uses the public fallback; rotate it");
 });
