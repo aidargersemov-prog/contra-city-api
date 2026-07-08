@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-08-launcher-auth-hardening-v20";
+const API_BUILD_ID = "railway-api-2026-07-08-first-name-pending-v21";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1551,9 +1551,9 @@ async function savePostgresStore(nextStore) {
       await client.query(
         `INSERT INTO players (
           id, cckey, name, full_name, level, exp, exp_min, exp_max, money,
-          view, weap, taun, stats, created_at, updated_at
+          view, weap, taun, stats, name_pending, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
           cckey = EXCLUDED.cckey,
           name = EXCLUDED.name,
@@ -1567,6 +1567,7 @@ async function savePostgresStore(nextStore) {
           weap = EXCLUDED.weap,
           taun = EXCLUDED.taun,
           stats = EXCLUDED.stats,
+          name_pending = EXCLUDED.name_pending,
           updated_at = EXCLUDED.updated_at`,
         [
           account.id,
@@ -1582,6 +1583,7 @@ async function savePostgresStore(nextStore) {
           JSON.stringify(account.weap || {}),
           JSON.stringify(account.taun || {}),
           JSON.stringify(account.stats || {}),
+          Boolean(account.namePending),
           createdAt,
           updatedAt
         ]
@@ -2224,6 +2226,7 @@ function accountFromPostgresRow(row, inventory = [], abilities = [], weaponStats
     id: Number(row.id),
     key: row.cckey,
     name: row.name,
+    namePending: Boolean(row.name_pending),
     fullName: row.full_name,
     level: Number(row.level),
     exp: Number(row.exp),
@@ -5520,7 +5523,7 @@ function saveTaunts(account, url) {
 }
 
 async function changeName(account, url) {
-  const action = url.searchParams.get("action");
+  const { act: action } = normalizedAjaxRoute(url);
   const initialSetRequested = action === "cname" && url.searchParams.get("set") === "1";
   const paidSetRequested = action === "cpname";
   const setRequested = initialSetRequested || paidSetRequested;
@@ -6577,3 +6580,5 @@ server.maxHeadersCount = 64;
 server.on("clientError", (_error, socket) => {
   if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
 });
+
+
