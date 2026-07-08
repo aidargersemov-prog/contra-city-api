@@ -1,18 +1,29 @@
-import http from "node:http";
+﻿import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
+const API_BUILD_ID = "railway-api-2026-07-08-first-name-pending-v21";
+const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
 const API_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ASSET_BUNDLE_DIR = path.join(process.cwd(), "assetbundles");
+const ASSET_BUNDLE_DIR = path.join(API_DIR, "assetbundles");
+const ASSET_BUNDLE_NAMES = new Set([
+  "arena_3lvl.unity3d",
+  "zombi_2.unity3d",
+  "zombi.unity3d",
+  "arenaring.unity3d",
+  "bit_map.unity3d",
+  "legoturnament.unity3d",
+  "inferno.unity3d"
+]);
 const MIGRATIONS_DIR = path.join(process.cwd(), "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api.onrender.com").replace(/\/+$/, "");
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);
@@ -23,11 +34,85 @@ const SHOP_PRICE = 100;
 const BATTLE_HOST = process.env.BATTLE_HOST || "";
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
+const MAX_REQUEST_URL_BYTES = Math.max(1024, Number(process.env.MAX_REQUEST_URL_BYTES || 16384));
+const HTTP_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15000));
+const HTTP_HEADERS_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 10000));
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = Math.max(1000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 5000));
+const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
+const RATE_LIMIT_REQUESTS = Math.max(30, Number(process.env.RATE_LIMIT_REQUESTS || 600));
+const BATTLE_RATE_LIMIT_REQUESTS = Math.max(60000, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
+const TRUST_PROXY_HEADERS = Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_PROJECT_ID) ||
+  process.env.TRUST_PROXY_HEADERS === "1";
+const rateLimitBuckets = new Map();
 const LAUNCHER_VERSION = process.env.LAUNCHER_VERSION || "1.2.0";
 const LAUNCHER_MANIFEST_URL = process.env.LAUNCHER_MANIFEST_URL || "";
 const LAUNCHER_UPDATE_KEY = process.env.LAUNCHER_UPDATE_KEY || "";
+const GAME_CLASSIC_MANIFEST_URL = process.env.GAME_CLASSIC_MANIFEST_URL ||
+  "https://pub-bfbc65832fdd4742ac9dc2f24168c93b.r2.dev/builds/classic/manifest.json";
+const GAME_NEW_TEXTURES_MANIFEST_URL = process.env.GAME_NEW_TEXTURES_MANIFEST_URL ||
+  "https://pub-bfbc65832fdd4742ac9dc2f24168c93b.r2.dev/builds/new_textures/manifest.json";
+const GAME_CLASSIC_UPDATE_KEY = process.env.GAME_CLASSIC_UPDATE_KEY || "";
+const GAME_NEW_TEXTURES_UPDATE_KEY = process.env.GAME_NEW_TEXTURES_UPDATE_KEY || "";
 const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESSION_TTL_MS || 6 * 60 * 60 * 1000));
+const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
 const launcherSessions = new Map();
+const launcherDeviceChallenges = new Map();
+
+function safeTokenEquals(left, right) {
+  const a = Buffer.from(String(left || ""), "utf8");
+  const b = Buffer.from(String(right || ""), "utf8");
+  if (a.length === 0 || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function requestClientIp(req) {
+  const forwarded = TRUST_PROXY_HEADERS
+    ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
+    : "";
+  return forwarded || req.socket?.remoteAddress || "unknown";
+}
+
+function requestRatePolicy(pathname) {
+  if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
+  // Both endpoints are called by the single battle VPS for all online players.
+  // Keep the service token as the real authorization boundary and avoid throttling
+  // legitimate aggregate battle/social traffic.
+  if (pathname === "/battle/event" || pathname === "/battle/social") {
+    return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
+  }
+  if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
+    return { windowMs: 60000, limit: 120 };
+  }
+  return { windowMs: RATE_LIMIT_WINDOW_MS, limit: RATE_LIMIT_REQUESTS };
+}
+
+function allowHttpRequest(req, pathname) {
+  const now = Date.now();
+  const policy = requestRatePolicy(pathname);
+  const bucketKey = `${requestClientIp(req)}|${pathname}`;
+  let bucket = rateLimitBuckets.get(bucketKey);
+  if (!bucket || now - bucket.startedAt >= policy.windowMs) {
+    bucket = { startedAt: now, count: 0 };
+    rateLimitBuckets.set(bucketKey, bucket);
+  }
+  bucket.count++;
+  if (rateLimitBuckets.size > 10000) {
+    for (const [key, value] of rateLimitBuckets) {
+      if (now - value.startedAt > 10 * 60 * 1000) rateLimitBuckets.delete(key);
+    }
+  }
+  return bucket.count <= policy.limit;
+}
+
+function hasValidBattleServiceToken(req, body) {
+  const presented = req.headers["x-battle-token"] || body?.token || "";
+  return Boolean(BATTLE_EVENT_TOKEN) && safeTokenEquals(presented, BATTLE_EVENT_TOKEN);
+}
+
+function hasValidAdminToken(req) {
+  return Boolean(ADMIN_API_TOKEN) && safeTokenEquals(req.headers["x-admin-token"], ADMIN_API_TOKEN);
+}
 
 const CLAN_CREATE_LEVEL = 30;
 const CLAN_JOIN_LEVEL = 15;
@@ -78,7 +163,9 @@ const CLAN_ARM_ID_SET = new Set(CLAN_ARM_IDS);
 const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
 const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
 const CLAN_ARM_ITEM_TYPE = 5;
-const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12]);
+const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 3, 4, 5, 30, 31, 32, 33, 34, 35, 36]);
+const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13, 150, 151, 152, 153, 154, 155, 156, 159, 160, 205, 208, 209]);
+const SHOP_ENHANCER_IDS = Object.freeze([...PLAYER_ENHANCER_IDS, ...CLAN_ENHANCER_IDS]);
 const CLAN_ENHANCER_ID_SET = new Set(CLAN_ENHANCER_IDS);
 
 const cost = (id, value = 100) => ({
@@ -199,7 +286,7 @@ const weaponTitleById = {
   110: "Бастион"
 };
 
-const ARCING_LAUNCHER_VELOCITY = 15;
+const ARCING_LAUNCHER_VELOCITY = 10;
 const ARCING_LAUNCHER_LIFE = 7000;
 const ARCING_LAUNCHER_DISTANCE = 10;
 
@@ -310,22 +397,22 @@ const rebuiltShopWeaponCatalog = [
   { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0 },
   { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
 
-  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 42 },
-  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 12, ammo_tot: 72 },
+  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38 },
+  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45 },
   { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42 },
   { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42 },
   { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108 },
 
   { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175 },
-  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 30, ammo_tot: 120 },
-  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175 },
-  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 35, ammo_tot: 224 },
-  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 189 },
+  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210 },
+  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180 },
+  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132 },
+  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168 },
 
   { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270 },
   { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300 },
 
-  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 8, ammo_tot: 48 },
+  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11 },
   { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 36 },
 
   { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16 },
@@ -375,17 +462,17 @@ const canonicalShopWeaponStats = {
   ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
   ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
 
-  hg_taurus: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 42, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
-  hg_usp: { rap: 205, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 12, ammo_tot: 72, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
+  hg_taurus: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
+  hg_usp: { rap: 205, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
   hg_desertb01: { rap: 280, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
   hg_desert: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
   hg_glockb01_s: { rap: 150, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
 
   mg_assaultrifle02: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 120, smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26 },
-  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_aug5_o: { rap: 135, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 35, ammo_tot: 224, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
-  mg_aug4_o: { rap: 130, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 189, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
+  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26 },
+  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 30, ammo_tot: 180, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
+  mg_aug5_o: { rap: 135, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
+  mg_aug4_o: { rap: 130, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
 
   gg_fnmag: { rap: 125, rt: 4000, lt: 1100, vel: 100, rad: 14, ang: 0, dev: 14, krit: 6, ammo: 90, ammo_tot: 270, smindam: 17, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 19 },
   gg_m134b03: { rap: 115, rt: 800, lt: 1100, vel: 100, rad: 14, ang: 0, dev: 20, krit: 4, ammo: 100, ammo_tot: 300, smindam: 15, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 10, lmaxdam: 17 },
@@ -401,8 +488,8 @@ const canonicalShopWeaponStats = {
     ang: 0,
     dev: 26,
     krit: 11,
-    ammo: 8,
-    ammo_tot: 48,
+    ammo: 3,
+    ammo_tot: 11,
     smindam: 58,
     smaxdam: 86,
     mmindam: 34,
@@ -527,33 +614,113 @@ function scaledStat(value, multiplier, fallback = 0) {
   return Math.max(0, Math.round(numericField(value, fallback) * multiplier));
 }
 
+function stableWorkshopPrice(weaponId) {
+  const id = Math.max(0, Math.trunc(numericField(weaponId, 0)));
+  return 10 + ((id * 17 + 11) % 31);
+}
+
+const workshopUpgradeTextFallbacks = {
+  10: "Повышенный шанс крит. урона",
+  43: "Увеличенный общий боезапас",
+  44: "Увеличенный урон\nУвеличенная длительность замедления\nУвеличенный общий боезапас",
+  45: "Увеличенный общий боезапас\nУвеличенный урон",
+  53: "Увеличенный урон на средней и дальней дист.\nПовышает скорость передвижения\nУвеличенный общий боезапас\nУскоренная перезарядка",
+  59: "Увеличенный общий боезапас\nУвеличенный шанс крит. урона",
+  67: "Увеличенный урон на всех дист.\nУвеличенный шанс крит. урона",
+  68: "Повышает скорость передвижения\nУвеличенный общий боезапас\nНаносит периодический урон типа кровотечение",
+  69: "Увеличенный урон на средней и дальней дист.\nПовышает скорость передвижения\nУвеличенный общий боезапас",
+  71: "Повышенный шанс крит. урона\nУвеличенный радиус поражения",
+  72: "Повышенный шанс крит. урона\nУвеличенный урон",
+  73: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nПовышает скорость передвижения",
+  74: "Повышенный шанс крит. урона\nУвеличенный боезапас\nПовышает скорость передвижения",
+  75: "Повышенный шанс крит. урона\nУвеличенный боезапас\nПовышает скорость передвижения",
+  76: "Ускоренная перезарядка\nУвеличенные скорость передвижения и боезапас\nБолее продолжительный урон от яда",
+  79: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличивает скорость передвижения",
+  80: "Повышенный шанс крит. урона\nУвеличивает скорость передвижения\nУвеличенная обойма и боезапас\nУвеличенный урон от огня",
+  101: "Увеличенный урон на средней и дальней дистанции\nУвеличивает скорость передвижения\nУвеличенная обойма и боезапас\nУскоренная перезарядка",
+  103: "Повышенный шанс крит. урона\nУвеличенный боезапас\nУвеличенный урон на средней и дальней дистанции",
+  104: "Повышенный шанс крит. урона\nУвеличенная обойма\nВремя поражения огнем увеличено",
+  105: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения\nНаносит периодический урон типа яд",
+  106: "Повышенный шанс крит. урона\nУвеличенный урон на ближней и средней дистанции\nУвеличенный общий боезапас\nУвеличенный радиус поражения",
+  107: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения",
+  108: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличенная скорострельность\nУвеличенный урон на средней дистанции",
+  109: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличивает скорость передвижения\nУвеличенный урон на ближней дистанции\nУвеличенный урон типа кровотечение",
+  110: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения"
+};
+
+function workshopUpgradeContract(weaponId) {
+  const text = String(
+    wearTextTranslations.get(`w_${weaponId}_descupgrade`)
+    || workshopUpgradeTextFallbacks[weaponId]
+    || ""
+  ).toLowerCase();
+  const damageAll = /увеличен(?:ный|ная|ное|ные|нный)\s+урон(?:\s+на\s+всех\s+дист|\s+на\s+всех\s+дистанц)?(?:\.|$|\n)/m.test(text)
+    && !/урон\s+от|урон\s+типа/.test(text);
+  const damageShort = damageAll || /урон\s+на\s+ближн/.test(text);
+  const damageMedium = damageAll || /урон\s+на\s+(?:средн|ближней\s+и\s+средн)/.test(text);
+  const damageLong = damageAll || /урон\s+на\s+(?:дальн|средн.*и\s+дальн|ближн.*и\s+дальн)/.test(text);
+  const impactType = /тип[а]?\s*[\"«]?огонь|урон\s+от\s+огн|горени|поражения\s+огнем/.test(text) ? "fire"
+    : (/тип[а]?\s*[\"«]?кров|кровотеч/.test(text) ? "blood"
+      : (/тип[а]?\s*[\"«]?яд|урон\s+от\s+яда/.test(text) ? "poison"
+        : (/замороз|замедлен/.test(text) ? "frost" : "")));
+  return {
+    text,
+    damageShort,
+    damageMedium,
+    damageLong,
+    crit: /крит/.test(text),
+    magazine: /обойм/.test(text),
+    reserve: /боезапас/.test(text),
+    rapidity: /скорострель|скорость\s+атаки/.test(text),
+    accuracy: /кучност|разброс/.test(text),
+    reload: /перезаряд/.test(text),
+    radius: /радиус\s+поражения/.test(text),
+    speed: /скорост[ьи]\s+передвижения/.test(text),
+    impactType,
+    impactDamage: /урон\s+от\s+(?:огня|яда|замороз)|урон\s+типа|урон\s+от\s+горени|длительность\s+и\s+урон/.test(text),
+    impactDuration: /длительн|продолжительн|время\s+поражения/.test(text)
+  };
+}
+
 function upgradedWeaponItem(item) {
   const base = clone(item);
   const ammo = numericField(base.ammo, 0);
   const ammoTotal = numericField(base.ammo_tot, 0);
-  const upgradePrice = Math.max(25, Math.round(numericField(base.sc?.tPv, SHOP_PRICE) * 0.35));
-  return {
+  const weaponId = numericField(base.w_id ?? base.id, 0);
+  const contract = workshopUpgradeContract(weaponId);
+  const upgraded = {
     ...base,
-    u_id: 5000 + numericField(base.w_id ?? base.id, 0),
-    rap: Math.max(60, scaledStat(base.rap, 0.9, 100)),
-    dev: Math.max(0, scaledStat(base.dev, 0.9, 0)),
-    krit: numericField(base.krit, 0) + 2,
-    smindam: scaledStat(base.smindam, 1.1, 0),
-    smaxdam: Math.max(scaledStat(base.smaxdam, 1.1, 0), scaledStat(base.smindam, 1.1, 0)),
-    mmindam: scaledStat(base.mmindam, 1.1, 0),
-    mmaxdam: Math.max(scaledStat(base.mmaxdam, 1.1, 0), scaledStat(base.mmindam, 1.1, 0)),
-    lmindam: scaledStat(base.lmindam, 1.1, 0),
-    lmaxdam: Math.max(scaledStat(base.lmaxdam, 1.1, 0), scaledStat(base.lmindam, 1.1, 0)),
-    ammo_tot: ammoTotal > 0 ? Math.max(ammo, Math.round(ammoTotal * 1.1)) : ammoTotal,
+    u_id: 5000 + weaponId,
     stRa: Math.min(5, numericField(base.stRa, 1) + 1),
     stDi: Math.min(5, numericField(base.stDi, 1) + 1),
     stDa: Math.min(5, numericField(base.stDa, 1) + 1),
-    sc: timedPermanentCost(5000 + numericField(base.w_id ?? base.id, 0), upgradePrice)
+    sc: timedPermanentCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
+    workshopImpactType: contract.impactType,
+    workshopImpactDamagePercent: contract.impactDamage ? 25 : 0,
+    workshopImpactTicksBonus: contract.impactDuration ? 2 : 0
   };
+  if (contract.rapidity) upgraded.rap = Math.max(60, scaledStat(base.rap, 0.9, 100));
+  if (contract.accuracy) upgraded.dev = Math.max(0, scaledStat(base.dev, 0.9, 0));
+  if (contract.crit) upgraded.krit = numericField(base.krit, 0) + 2;
+  if (contract.reload) upgraded.rt = Math.max(0, scaledStat(base.rt, 0.9, 0));
+  if (contract.radius) upgraded.rad = Math.max(1, scaledStat(base.rad, 1.1, 1));
+  if (contract.speed) upgraded.wsp = numericField(base.wsp ?? base.speed, 0) + 5;
+  if (contract.magazine && ammo > 0) upgraded.ammo = Math.max(ammo + 1, Math.round(ammo * 1.1));
+  if (contract.reserve && ammoTotal > 0) upgraded.ammo_tot = Math.max(upgraded.ammo ?? ammo, Math.round(ammoTotal * 1.1));
+  for (const [enabled, minKey, maxKey] of [
+    [contract.damageShort, "smindam", "smaxdam"],
+    [contract.damageMedium, "mmindam", "mmaxdam"],
+    [contract.damageLong, "lmindam", "lmaxdam"]
+  ]) {
+    if (!enabled) continue;
+    upgraded[minKey] = scaledStat(base[minKey], 1.1, 0);
+    upgraded[maxKey] = Math.max(upgraded[minKey], scaledStat(base[maxKey], 1.1, 0));
+  }
+  return upgraded;
 }
 
-const shopWeaponUpgrades = shopWeapons.map((item) => upgradedWeaponItem(item));
-const shopWeaponUpgradesById = new Map(shopWeaponUpgrades.map((item) => [Number(item.u_id), item]));
+let shopWeaponUpgrades = [];
+let shopWeaponUpgradesById = new Map();
 
 const wearSlotIds = {
   Hats: 1,
@@ -620,6 +787,8 @@ function loadTextAssetTranslations() {
 }
 
 const wearTextTranslations = loadTextAssetTranslations();
+shopWeaponUpgrades = shopWeapons.map((item) => upgradedWeaponItem(item));
+shopWeaponUpgradesById = new Map(shopWeaponUpgrades.map((item) => [Number(item.u_id), item]));
 
 const wearTextOverrides = {
   "Hats:biker": wearText("Скулкеп", "Чтобы пугать снайпера, смотрящего в прицел.", "+5% защита от снайперок\n+5% защита от пистолетов\n+10% защита от огнеметов"),
@@ -692,9 +861,11 @@ const shopWearCatalog = {
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
 
-const shopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
+const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
   names.map((sname, index) => wear(10000 + wearSlotIds[slot] * 1000 + index + 1, wearSlotIds[slot], sname, SHOP_PRICE, slot))
 );
+
+const shopWears = legacyShopWears;
 
 function findWearCatalogItem(slot, sname) {
   const wt = wearSlotIds[slot];
@@ -829,7 +1000,12 @@ const restoredAssemblageDefinitions = [
   { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] }
 ];
 
-const shopAssemblages = restoredAssemblageDefinitions.map((definition) => {
+// Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
+// Keep them out of the shop response instead of exposing sets the battle server cannot complete.
+const removedAssemblageIds = new Set([4, 5]);
+const shopAssemblages = restoredAssemblageDefinitions
+  .filter((definition) => !removedAssemblageIds.has(definition.id))
+  .map((definition) => {
   const text = assemblageTextFor(definition.id);
   return {
     id: definition.id,
@@ -838,12 +1014,12 @@ const shopAssemblages = restoredAssemblageDefinitions.map((definition) => {
     ndesca: text.ndesca,
     items: JSON.stringify(definition.items.map(([slot, sname]) => assemblageWear(slot, sname)))
   };
-});
+  });
 
 // Hidden from the live shop: 2 "Лимонадный глоток", 6 "Пальцестрел",
 // 10 "Секир-башка", 11 "Подозрительность".
 const shopTaunts = [3, 4, 5, 7, 8, 9].map((id) => taunt(id, SHOP_PRICE));
-const shopEnhancers = [1, 2, 3, 4, 5, 10, 11, 12, 13, 30, 31, 32, 33, 34, 35, 36].map((id) =>
+const shopEnhancers = SHOP_ENHANCER_IDS.map((id) =>
   enhancer(id, SHOP_PRICE)
 );
 const canonicalWeaponsById = new Map([...defaultWeapons, ...shopWeapons].map((item) => [Number(item.w_id), item]));
@@ -887,18 +1063,38 @@ for (const [abilityIdText, definition] of Object.entries(abilityValueDefinitions
 
 const mapPlayers = "4,6,8,10,12,14,16";
 const MAP_MODE_DEATHMATCH = 1;
+const MAP_MODE_TEAM_DEATHMATCH = 2;
+const MAP_MODE_CAPTURE_THE_FLAG = 4;
+const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
+const DOSSIER_GAME_MODE_STATS = [
+  MAP_MODE_DEATHMATCH,
+  MAP_MODE_TEAM_DEATHMATCH,
+  MAP_MODE_CAPTURE_THE_FLAG,
+  MAP_MODE_CONTROL_POINTS,
+  MAP_MODE_ZOMBIE
+];
 const mapEntry = (id, systemName, modes = 3) => ({ i: id, n: systemName, m: modes, p: mapPlayers, dp: 4 });
 
+function normalizeStatsMode(mode) {
+  const value = Number(mode || 0);
+  if (!Number.isFinite(value)) return 0;
+  if ((value & MAP_MODE_ZOMBIE) === MAP_MODE_ZOMBIE) return MAP_MODE_ZOMBIE;
+  if (value === MAP_MODE_DEATHMATCH || value === MAP_MODE_TEAM_DEATHMATCH || value === MAP_MODE_CAPTURE_THE_FLAG || value === MAP_MODE_CONTROL_POINTS) {
+    return value;
+  }
+  return value;
+}
+
 const maps = [
-  mapEntry(1, "Arena_3lvl"),
+  mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(13, "Zombi_2", MAP_MODE_DM_ZOMBIE),
   mapEntry(14, "Zombi", MAP_MODE_DM_ZOMBIE),
-  mapEntry(15, "ArenaRing", 2),
-  mapEntry(16, "Bit_map"),
-  mapEntry(17, "LegoTurnament", 2),
-  mapEntry(18, "Inferno")
+  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
+  mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
+  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
+  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
@@ -965,6 +1161,7 @@ function newAccountKey(id) {
 function createNewAccount(name) {
   const id = nextAccountId();
   const account = starterAccount(name, id, newAccountKey(id));
+  account.namePending = true;
   store.accounts[String(id)] = account;
   saveStore(store);
   return account;
@@ -989,11 +1186,12 @@ function loadStore() {
 function saveStore(store) {
   if (pgPool) {
     pgSaveChain = pgSaveChain.then(() => savePostgresStore(clone(store)));
-    return;
+    return pgSaveChain;
   }
 
   ensureStoreDir();
   fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
+  return Promise.resolve();
 }
 
 let pgPool = null;
@@ -1086,6 +1284,25 @@ async function runMigrations() {
       client.release();
     }
   }
+}
+
+async function ensureLauncherDeviceSchema() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS launcher_devices (
+      player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+      device_key_id TEXT NOT NULL,
+      device_public_key TEXT NOT NULL,
+      hwid_hash TEXT NOT NULL DEFAULT '',
+      risk JSONB NOT NULL DEFAULT '{}'::jsonb,
+      bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      reset_at TIMESTAMPTZ
+    )
+  `);
+  await pgPool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS launcher_devices_device_key_id_idx
+      ON launcher_devices (device_key_id)
+  `);
 }
 
 async function syncPostgresCatalog(existingClient = null) {
@@ -1296,6 +1513,7 @@ async function initStore() {
   });
 
   await runMigrations();
+  await ensureLauncherDeviceSchema();
   await syncPostgresCatalog();
 
   let loaded = await loadPostgresStore();
@@ -1325,13 +1543,17 @@ async function savePostgresStore(nextStore) {
       const account = normalizeAccount(rawAccount);
       const createdAt = account.createdAt || new Date().toISOString();
       const updatedAt = account.updatedAt || new Date().toISOString();
+      const existingPlayer = await client.query("SELECT updated_at FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      if (existingPlayer.rows[0] && isOlderPostgresSnapshot(updatedAt, existingPlayer.rows[0].updated_at)) {
+        continue;
+      }
 
       await client.query(
         `INSERT INTO players (
           id, cckey, name, full_name, level, exp, exp_min, exp_max, money,
-          view, weap, taun, stats, created_at, updated_at
+          view, weap, taun, stats, name_pending, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
           cckey = EXCLUDED.cckey,
           name = EXCLUDED.name,
@@ -1345,6 +1567,7 @@ async function savePostgresStore(nextStore) {
           weap = EXCLUDED.weap,
           taun = EXCLUDED.taun,
           stats = EXCLUDED.stats,
+          name_pending = EXCLUDED.name_pending,
           updated_at = EXCLUDED.updated_at`,
         [
           account.id,
@@ -1360,6 +1583,7 @@ async function savePostgresStore(nextStore) {
           JSON.stringify(account.weap || {}),
           JSON.stringify(account.taun || {}),
           JSON.stringify(account.stats || {}),
+          Boolean(account.namePending),
           createdAt,
           updatedAt
         ]
@@ -1690,6 +1914,37 @@ function inventoryWearId(item) {
   return Number(item?.w_id ?? item?.id ?? 0);
 }
 
+const viewKeyByWearType = new Map([
+  [1, "hat"],
+  [2, "mask"],
+  [3, "gloves"],
+  [4, "shirt"],
+  [5, "pants"],
+  [6, "boots"],
+  [7, "backpack"],
+  [8, "other"],
+  [9, "head"]
+]);
+
+function viewAfterPurchasedWear(view, item) {
+  const current = { ...(view || {}) };
+  if (Number(item?.itype || 0) !== 3) return current;
+  const viewKey = viewKeyByWearType.get(Number(item?.wt || 0));
+  const wearId = inventoryWearId(item);
+  if (viewKey && wearId > 0) current[viewKey] = wearId;
+  return current;
+}
+
+function weaponSelectionAfterPurchasedWeapon(selection, item) {
+  const current = { ...(selection || {}) };
+  if (Number(item?.itype || 0) !== 1) return current;
+  const slot = Number(item?.ws || 0);
+  const weaponId = inventoryWeaponId(item);
+  if (slot < 1 || slot > 7 || weaponId <= 0) return current;
+  current[`id${slot}`] = weaponId;
+  return current;
+}
+
 function hasInventoryWear(inventory, wearId) {
   return inventory.some((item) => Number(item?.itype || 0) === 3 && inventoryWearId(item) === Number(wearId));
 }
@@ -1861,6 +2116,7 @@ function accountCredentialsFrom(url) {
   const idNumber = Number(rawId);
 
   if (rawId && Number.isInteger(idNumber) && idNumber > 0 && key) {
+    if (key === "contra-revive-key") return null;
     return { id: String(idNumber), key };
   }
 
@@ -1959,11 +2215,18 @@ function postgresTimestamp(value) {
   return value?.toISOString?.() || value;
 }
 
+function isOlderPostgresSnapshot(snapshotUpdatedAt, databaseUpdatedAt) {
+  const snapshotMs = Date.parse(postgresTimestamp(snapshotUpdatedAt));
+  const databaseMs = Date.parse(postgresTimestamp(databaseUpdatedAt));
+  return Number.isFinite(snapshotMs) && Number.isFinite(databaseMs) && snapshotMs < databaseMs;
+}
+
 function accountFromPostgresRow(row, inventory = [], abilities = [], weaponStats = [], modeStats = [], mapStats = []) {
   return normalizeAccount({
     id: Number(row.id),
     key: row.cckey,
     name: row.name,
+    namePending: Boolean(row.name_pending),
     fullName: row.full_name,
     level: Number(row.level),
     exp: Number(row.exp),
@@ -2101,7 +2364,7 @@ function sessionAuth(account) {
 }
 
 function publicBaseUrl(requestOrigin = null) {
-  return String(requestOrigin || PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+  return String((ALLOW_DYNAMIC_PUBLIC_ORIGIN ? requestOrigin : "") || PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 }
 
 function loginLink(account, requestOrigin = null) {
@@ -2149,6 +2412,11 @@ function launcherStatePayload(account) {
   return {
     result: true,
     version: LAUNCHER_VERSION,
+    manifestUrl: GAME_CLASSIC_MANIFEST_URL,
+    textureManifestUrl: GAME_NEW_TEXTURES_MANIFEST_URL,
+    updateKey: GAME_CLASSIC_UPDATE_KEY,
+    textureUpdateKey: GAME_NEW_TEXTURES_UPDATE_KEY,
+    sessionAuth: account ? sessionAuth(account) : "",
     player: account ? launcherPlayerPayload(account) : null,
     news: launcherNewsPayload(),
     downloads: {
@@ -2158,11 +2426,234 @@ function launcherStatePayload(account) {
   };
 }
 
-async function loginAccountFromUrl(url) {
-  if (accountCredentialsFrom(url)) {
-    return accountFromRequest(url);
+function normalizeLauncherDeviceKeyId(value) {
+  const keyId = String(value || "").trim();
+  if (!/^[A-Za-z0-9._:-]{8,160}$/.test(keyId)) return "";
+  return keyId;
+}
+
+function normalizeLauncherPublicKey(value) {
+  const publicKey = String(value || "").trim();
+  if (!publicKey || publicKey.length > 2048) return "";
+  if (!publicKey.includes("BEGIN PUBLIC KEY") || !publicKey.includes("END PUBLIC KEY")) return "";
+  return publicKey;
+}
+
+function normalizeHwidRiskHash(value) {
+  const hash = String(value || "").trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
+}
+
+function launcherDeviceCredentials(body, url = null) {
+  const rawId = body?.ccid ?? url?.searchParams?.get("ccid");
+  const key = String(body?.cckey ?? url?.searchParams?.get("cckey") ?? "");
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0 || !key) return null;
+  return { id: String(id), key };
+}
+
+async function accountFromLauncherDeviceBody(body, url = null) {
+  const credentials = launcherDeviceCredentials(body, url);
+  if (!credentials) return null;
+  const credentialUrl = new URL("https://launcher.local/launcher-state");
+  credentialUrl.searchParams.set("ccid", credentials.id);
+  credentialUrl.searchParams.set("cckey", credentials.key);
+  return accountFromRequest(credentialUrl);
+}
+
+async function loadLauncherDevice(accountId) {
+  if (!accountId) return null;
+  if (pgPool) {
+    const result = await pgPool.query("SELECT * FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      playerId: Number(row.player_id),
+      deviceKeyId: row.device_key_id,
+      publicKey: row.device_public_key,
+      hwidHash: row.hwid_hash || "",
+      risk: jsonValue(row.risk, {}),
+      boundAt: postgresTimestamp(row.bound_at),
+      lastSeenAt: postgresTimestamp(row.last_seen_at),
+      resetAt: postgresTimestamp(row.reset_at)
+    };
   }
-  return refreshAccountFromPostgres(ensureDesktopAccount());
+
+  const account = store.accounts[String(accountId)];
+  return account?.launcherDevice || null;
+}
+
+async function bindLauncherDevice(account, body, req) {
+  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+  const publicKey = normalizeLauncherPublicKey(body?.devicePublicKey);
+  const hwidHash = normalizeHwidRiskHash(body?.hwidRiskHash);
+  if (!deviceKeyId || !publicKey || !hwidHash) {
+    return { ok: false, error: "device_bind_required" };
+  }
+
+  const now = new Date().toISOString();
+  const risk = { hwidChanged: false, ip: requestClientIp(req), userAgent: String(req.headers["user-agent"] || "").slice(0, 160) };
+  if (pgPool) {
+    const existingDevice = await pgPool.query(
+      "SELECT player_id FROM launcher_devices WHERE device_key_id = $1 AND player_id <> $2",
+      [deviceKeyId, Number(account.id)]
+    );
+    if (existingDevice.rowCount) {
+      return { ok: false, error: "device_already_bound" };
+    }
+
+    try {
+      await pgPool.query(
+        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, hwid_hash, risk, bound_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
+         ON CONFLICT (player_id) DO NOTHING`,
+        [Number(account.id), deviceKeyId, publicKey, hwidHash, JSON.stringify(risk)]
+      );
+    } catch (error) {
+      if (error?.code === "23505") {
+        return { ok: false, error: "device_already_bound" };
+      }
+      throw error;
+    }
+  } else {
+    for (const existing of Object.values(store.accounts || {})) {
+      if (Number(existing?.id) !== Number(account.id) && existing?.launcherDevice?.deviceKeyId === deviceKeyId) {
+        return { ok: false, error: "device_already_bound" };
+      }
+    }
+    const normalized = normalizeAccount(account);
+    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, hwidHash, risk, boundAt: now, lastSeenAt: now };
+    store.accounts[String(account.id)] = normalized;
+    await saveStore(store);
+  }
+
+  console.log(`[launcher-device] bound player=${account.id} keyId=${deviceKeyId}`);
+  return { ok: true };
+}
+
+async function touchLauncherDevice(account, device, hwidHash, req) {
+  const normalizedHash = normalizeHwidRiskHash(hwidHash);
+  const risk = {
+    hwidChanged: Boolean(device?.hwidHash && normalizedHash && device.hwidHash !== normalizedHash),
+    ip: requestClientIp(req),
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 160)
+  };
+
+  if (pgPool) {
+    await pgPool.query(
+      `UPDATE launcher_devices
+       SET hwid_hash = COALESCE(NULLIF($2, ''), hwid_hash), risk = $3::jsonb, last_seen_at = now()
+       WHERE player_id = $1`,
+      [Number(account.id), normalizedHash, JSON.stringify(risk)]
+    );
+  } else if (store.accounts[String(account.id)]?.launcherDevice) {
+    const normalized = normalizeAccount(store.accounts[String(account.id)]);
+    normalized.launcherDevice = { ...normalized.launcherDevice, hwidHash: normalizedHash || normalized.launcherDevice.hwidHash, risk, lastSeenAt: new Date().toISOString() };
+    store.accounts[String(account.id)] = normalized;
+    await saveStore(store);
+  }
+
+  if (risk.hwidChanged) {
+    console.warn(`[launcher-device] hwid risk player=${account.id} keyId=${device.deviceKeyId}`);
+  }
+}
+
+function pruneLauncherDeviceChallenges() {
+  const now = Date.now();
+  for (const [nonce, challenge] of launcherDeviceChallenges) {
+    if (challenge.expiresAt <= now) launcherDeviceChallenges.delete(nonce);
+  }
+}
+
+function createLauncherDeviceChallenge(account, deviceKeyId) {
+  pruneLauncherDeviceChallenges();
+  const nonce = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + LAUNCHER_DEVICE_CHALLENGE_TTL_MS;
+  launcherDeviceChallenges.set(nonce, { playerId: Number(account.id), deviceKeyId, expiresAt });
+  return { nonce, expiresInSeconds: Math.max(1, Math.floor((expiresAt - Date.now()) / 1000)) };
+}
+
+function consumeLauncherDeviceChallenge(account, deviceKeyId, nonce) {
+  pruneLauncherDeviceChallenges();
+  const challenge = launcherDeviceChallenges.get(String(nonce || ""));
+  if (!challenge) return false;
+  launcherDeviceChallenges.delete(String(nonce));
+  return challenge.playerId === Number(account.id) && challenge.deviceKeyId === deviceKeyId && challenge.expiresAt > Date.now();
+}
+
+function decodeSignature(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    return Buffer.from(raw, "base64");
+  } catch {
+    try {
+      return Buffer.from(raw, "base64url");
+    } catch {
+      return null;
+    }
+  }
+}
+
+function verifyLauncherDeviceSignature(device, nonce, signature) {
+  const signatureBytes = decodeSignature(signature);
+  if (!signatureBytes || !nonce) return false;
+  try {
+    return crypto.verify("sha256", Buffer.from(String(nonce), "utf8"), device.publicKey, signatureBytes);
+  } catch (error) {
+    console.warn(`[launcher-device] signature verify failed keyId=${device.deviceKeyId}: ${error.message}`);
+    return false;
+  }
+}
+
+async function verifyLauncherDeviceAccess(account, body, req) {
+  const current = await loadLauncherDevice(account.id);
+  if (!current) {
+    const bound = await bindLauncherDevice(account, body, req);
+    if (!bound.ok) return { ok: false, status: 403, error: bound.error };
+    return { ok: true, bound: true };
+  }
+
+  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+  if (!deviceKeyId || deviceKeyId !== current.deviceKeyId) {
+    return { ok: false, status: 403, error: "device_signature_required" };
+  }
+
+  const nonce = String(body?.challengeNonce || "").trim();
+  if (!nonce || !body?.challengeSignature) {
+    return { ok: false, status: 403, error: "device_signature_required" };
+  }
+
+  if (!consumeLauncherDeviceChallenge(account, deviceKeyId, nonce)) {
+    return { ok: false, status: 403, error: "device_challenge_invalid" };
+  }
+
+  if (!verifyLauncherDeviceSignature(current, nonce, body.challengeSignature)) {
+    return { ok: false, status: 403, error: "device_signature_invalid" };
+  }
+
+  await touchLauncherDevice(account, current, body?.hwidRiskHash, req);
+  return { ok: true, bound: true };
+}
+
+async function resetLauncherDeviceBinding(accountId) {
+  if (pgPool) {
+    const result = await pgPool.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
+    return result.rowCount > 0;
+  }
+  const account = store.accounts[String(accountId)];
+  if (!account?.launcherDevice) return false;
+  delete account.launcherDevice;
+  store.accounts[String(accountId)] = account;
+  await saveStore(store);
+  return true;
+}
+
+async function loginAccountFromUrl(url) {
+  if (!accountCredentialsFrom(url)) {
+    return null;
+  }
+  return accountFromRequest(url);
 }
 
 function cookieHeaders(account) {
@@ -2280,11 +2771,12 @@ async function awardClanExperience(client, playerId, amount) {
 }
 
 function profilePayload(account, full = false) {
+  const publicName = account.namePending ? "" : account.name;
   const payload = {
     result: true,
     info: {
       u_id: account.id,
-      un: account.name,
+      un: publicName,
       fname: account.fullName,
       lvl: account.level,
       vcur: account.money,
@@ -2298,7 +2790,8 @@ function profilePayload(account, full = false) {
       cst: {
         cn: 30
       }
-    }
+    },
+    name_pending: Boolean(account.namePending)
   };
 
   if (full) {
@@ -2757,8 +3250,17 @@ function weaponStatItems(account) {
 }
 
 function gameModeStatItems(account) {
-  const statByMode = new Map((account.modeStats || []).map((item) => [Number(item.m || item.mode || 0), item]));
-  return [1, 2, 3].map((mode) => {
+  const statByMode = new Map();
+  for (const item of account.modeStats || []) {
+    const mode = normalizeStatsMode(item.m || item.mode || 0);
+    if (!mode) continue;
+    const current = statByMode.get(mode) || { w: 0, l: 0, pt: 0 };
+    current.w += statNumber(item.w ?? item.wins, 0);
+    current.l += statNumber(item.l ?? item.losses, 0);
+    current.pt += statNumber(item.pt ?? item.play_time, 0);
+    statByMode.set(mode, current);
+  }
+  return DOSSIER_GAME_MODE_STATS.map((mode) => {
     const stats = statByMode.get(mode) || {};
     return {
       m: mode,
@@ -3004,6 +3506,14 @@ function findShopItem(collection, idField, id) {
 
 function itemPrice(item) {
   return Number(item?.sc?.tPv || 0);
+}
+
+function isWeaponItem(item) {
+  return Number(item?.itype || 0) === 1;
+}
+
+function isValidShopPrice(price) {
+  return Number.isFinite(price) && price > 0;
 }
 
 const SHOP_DURATION = Object.freeze({
@@ -3391,10 +3901,6 @@ async function mutateBattleSocial(action, userId, targetId) {
 }
 
 async function battleSocialRequest(body) {
-  if (BATTLE_EVENT_TOKEN && body.token !== BATTLE_EVENT_TOKEN) {
-    return { ok: false, error: "invalid_token", status: 403 };
-  }
-
   const action = String(body.action || "list");
   const userId = Number(body.userId || body.playerId || 0);
   if (action === "list") return battleSocialList(userId);
@@ -3751,7 +4257,7 @@ function ensureClanAccount(account) {
 
 function saveClanState() {
   refreshAllAccountClanSummaries(store);
-  saveStore(store);
+  return saveStore(store);
 }
 
 function clanMemberRecordForAccount(account, memberLevel = 1) {
@@ -3953,7 +4459,7 @@ function clanExtraPayload(account, clanId) {
   });
 }
 
-function createClan(account, url) {
+async function createClan(account, url) {
   account = ensureClanAccount(account);
   const name = cleanClanName(clanFormValue(url, "data[name]", "name"));
   const tag = cleanClanTag(clanFormValue(url, "data[tag]", "tag"));
@@ -3967,7 +4473,9 @@ function createClan(account, url) {
   if (tagError) return clanError(tagError);
   if (Number(account.money || 0) < CLAN_COSTS.create) return clanError(CLAN_ERROR.MISSING_MONEY);
 
+  const createdAt = new Date().toISOString();
   account.money = Number(account.money || 0) - CLAN_COSTS.create;
+  account.updatedAt = createdAt;
   const id = nextClanIdValue();
   const clan = normalizeClanRecord({
     id,
@@ -3982,18 +4490,18 @@ function createClan(account, url) {
     members: {
       [String(account.id)]: clanMemberRecordForAccount(account, 2)
     },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt,
+    updatedAt: createdAt
   });
   store.clans.byId[String(id)] = clan;
-  saveClanState();
+  await saveClanState();
   return clanBaseResponse(account, {
     id,
     cinfo: clanPayload(clan, { full: true })
   });
 }
 
-function joinClan(account, url) {
+async function joinClan(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
@@ -4008,16 +4516,18 @@ function joinClan(account, url) {
     playerId: Number(account.id),
     createdAt: new Date().toISOString()
   };
-  saveClanState();
+  await saveClanState();
+  console.log(`[clan-invite] join player=${account.id} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
   return ok({ id: Number(clan.id) });
 }
 
-function buyClanRequests(account) {
+async function buyClanRequests(account) {
   account = ensureClanAccount(account);
   if (Number(account.money || 0) < CLAN_COSTS.requests) return clanError(CLAN_ERROR.MISSING_MONEY);
   account.money = Number(account.money || 0) - CLAN_COSTS.requests;
   account.clanMaxRequest = Number(account.clanMaxRequest || 10) + 5;
-  saveClanState();
+  account.updatedAt = new Date().toISOString();
+  await saveClanState();
   return ok();
 }
 
@@ -4025,7 +4535,7 @@ function isClanOwner(account, clan) {
   return Number(clan?.ownerPlayerId || 0) === Number(account?.id || 0);
 }
 
-function acceptClanInvite(account, url) {
+async function acceptClanInvite(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const userId = Number(url.searchParams.get("uid") || 0);
@@ -4039,21 +4549,23 @@ function acceptClanInvite(account, url) {
   delete clan.invites[String(userId)];
   clan.members[String(userId)] = clanMemberRecordForAccount(userAccount, 1);
   clan.updatedAt = new Date().toISOString();
-  saveClanState();
+  await saveClanState();
+  console.log(`[clan-invite] accept owner=${account.id} player=${userId} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
   return ok({
     id: userId,
     i: clanMemberAccountPayload(clan.members[String(userId)])
   });
 }
 
-function rejectClanInvite(account, url) {
+async function rejectClanInvite(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const userId = Number(url.searchParams.get("uid") || 0);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   delete clan.invites[String(userId)];
   clan.updatedAt = new Date().toISOString();
-  saveClanState();
+  await saveClanState();
+  console.log(`[clan-invite] reject owner=${account.id} player=${userId} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
   return ok({ id: userId });
 }
 
@@ -4261,7 +4773,7 @@ function deleteClanEvent(account, url) {
   return ok({ cid: Number(clan.id), eid: eventId });
 }
 
-function routeClan(account, url, act, requestOrigin = null) {
+async function routeClan(account, url, act, requestOrigin = null) {
   ensureClanStore();
   account = ensureClanAccount(account);
 
@@ -4290,17 +4802,17 @@ function routeClan(account, url, act, requestOrigin = null) {
     case "arms":
       return ok({ arms: clanArmsPayload(requestOrigin, playerClanRecord(account.id)) });
     case "create":
-      return createClan(account, url);
+      return await createClan(account, url);
     case "del":
       return deleteClan(account, url);
     case "join":
-      return joinClan(account, url);
+      return await joinClan(account, url);
     case "accept":
-      return acceptClanInvite(account, url);
+      return await acceptClanInvite(account, url);
     case "reject":
-      return rejectClanInvite(account, url);
+      return await rejectClanInvite(account, url);
     case "buyReq":
-      return buyClanRequests(account);
+      return await buyClanRequests(account);
     case "expand":
       return expandClan(account, url);
     case "remove":
@@ -4422,6 +4934,13 @@ async function buyItemPostgres(account, item, price) {
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
+      const itemData = clone(item);
+      const itemType = Number(itemData?.itype || 0);
+      if (isWeaponItem(itemData) && !isValidShopPrice(price)) {
+        console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price}`);
+        return { result: false, err: [1] };
+      }
+
       client = await pgPool.connect();
       await client.query("BEGIN");
 
@@ -4433,14 +4952,31 @@ async function buyItemPostgres(account, item, price) {
       }
 
       const money = Number(row.money || 0);
+      if (isWeaponItem(itemData)) {
+        const existing = await client.query(
+          "SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_key = $2 LIMIT 1",
+          [Number(account.id), inventoryItemKey(itemData)]
+        );
+        if (existing.rowCount > 0) {
+          await client.query("ROLLBACK");
+          return ok({ req: "", vcur: money });
+        }
+      }
+
       if (money < price) {
         await client.query("ROLLBACK");
         return { result: false, err: [2] };
       }
 
       const nextMoney = money - price;
-      const itemData = clone(item);
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
+      const currentView = jsonValue(row.view, {});
+      const currentWeapons = jsonValue(row.weap, {});
+      const nextView = viewAfterPurchasedWear(currentView, itemData);
+      const nextWeapons = weaponSelectionAfterPurchasedWeapon(currentWeapons, itemData);
+      await client.query(
+        "UPDATE players SET money = $2, view = $3::jsonb, weap = $4::jsonb, updated_at = now() WHERE id = $1",
+        [Number(account.id), nextMoney, JSON.stringify(nextView), JSON.stringify(nextWeapons)]
+      );
       await client.query(
         `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
          VALUES ($1, $2, $3, $4::jsonb, now())
@@ -4448,7 +4984,7 @@ async function buyItemPostgres(account, item, price) {
            item_type = EXCLUDED.item_type,
            item_data = EXCLUDED.item_data,
            updated_at = now()`,
-        [Number(account.id), inventoryItemKey(itemData), Number(itemData?.itype || 0), JSON.stringify(itemData)]
+        [Number(account.id), inventoryItemKey(itemData), itemType, JSON.stringify(itemData)]
       );
       await client.query(
         `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
@@ -4456,12 +4992,28 @@ async function buyItemPostgres(account, item, price) {
         [
           Number(account.id),
           inventoryItemKey(itemData),
-          Number(itemData?.itype || 0),
+          itemType,
           inventoryItemId(itemData),
           Number(price || 0),
           JSON.stringify(itemData)
         ]
       );
+      if (itemType === 1 || itemType === 3) {
+        await client.query(
+          `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
+           VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
+           ON CONFLICT (player_id) DO UPDATE SET
+             view = EXCLUDED.view,
+             weap = EXCLUDED.weap,
+             updated_at = now()`,
+          [
+            Number(account.id),
+            JSON.stringify(nextView),
+            JSON.stringify(nextWeapons),
+            JSON.stringify(jsonValue(row.taun, {}))
+          ]
+        );
+      }
 
       await client.query("COMMIT");
 
@@ -4470,7 +5022,7 @@ async function buyItemPostgres(account, item, price) {
         store.accounts[String(fresh.id)] = fresh;
       }
 
-      console.log(`[buy-item] pg player=${account.id} type=${Number(itemData?.itype || 0)} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
+      console.log(`[buy-item] pg player=${account.id} type=${itemType} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney} view=${viewSelectionSummary(nextView)} weap=${weaponSelectionSummary(nextWeapons)}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
       try {
@@ -4489,16 +5041,25 @@ async function buyItemPostgres(account, item, price) {
 async function buyItem(account, item) {
   if (!item) return { result: false, err: [1] };
   const price = itemPrice(item);
+  if (isWeaponItem(item) && !isValidShopPrice(price)) {
+    console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price}`);
+    return { result: false, err: [1] };
+  }
   if (pgPool) return buyItemPostgres(account, item, price);
+  if (isWeaponItem(item) && hasInventoryItem(account, item)) {
+    return ok({ req: "", vcur: account.money });
+  }
   if (account.money < price) return { result: false, err: [2] };
   if (!hasInventoryItem(account, item)) {
     account.inventory.push(clone(item));
   }
+  account.view = viewAfterPurchasedWear(account.view, item);
+  account.weap = weaponSelectionAfterPurchasedWeapon(account.weap, item);
   const beforeMoney = Number(account.money || 0);
   account.money -= price;
   recordPurchase(account, item, price);
   persist(account);
-  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money}`);
+  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money} view=${viewSelectionSummary(account.view)} weap=${weaponSelectionSummary(account.weap)}`);
   return ok({ req: "", vcur: account.money });
 }
 
@@ -4577,6 +5138,7 @@ async function buyEnhancerPostgres(account, item, duration, price) {
 
 async function buyEnhancer(account, item, duration) {
   if (!item) return { result: false, err: [1] };
+  if (Number(item.iC || 0) === 1) return { result: false, err: [1] };
   const selectedDuration = normalizeShopDuration(duration);
   const price = shopDurationPrice(item, selectedDuration);
   if (pgPool) return buyEnhancerPostgres(account, item, selectedDuration, price);
@@ -4614,6 +5176,11 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
+      if (!isValidShopPrice(price)) {
+        console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
+        return { result: false, err: [1] };
+      }
+
       client = await pgPool.connect();
       await client.query("BEGIN");
 
@@ -4674,6 +5241,7 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
         store.accounts[String(fresh.id)] = fresh;
       }
 
+      console.log(`[buy-weapon-upgrade] pg player=${account.id} key=${itemKey} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
       try {
@@ -4692,6 +5260,10 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
 async function buyWeaponUpgrade(account, upgrade) {
   if (!upgrade) return { result: false, err: [1] };
   const price = weaponUpgradePrice(upgrade);
+  if (!isValidShopPrice(price)) {
+    console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
+    return { result: false, err: [1] };
+  }
   if (pgPool) return buyWeaponUpgradePostgres(account, upgrade, price);
   if (account.money < price) return { result: false, err: [2] };
   if (!Array.isArray(account.inventory)) account.inventory = [];
@@ -4705,6 +5277,7 @@ async function buyWeaponUpgrade(account, upgrade) {
   account.money -= price;
   recordPurchase(account, itemData, price);
   persist(account);
+  console.log(`[buy-weapon-upgrade] json player=${account.id} key=${itemKey} item=${inventoryItemId(itemData)} price=${price} before=${account.money + price} after=${account.money}`);
   return ok({ req: "", vcur: account.money });
 }
 
@@ -4950,21 +5523,37 @@ function saveTaunts(account, url) {
 }
 
 async function changeName(account, url) {
-  const setRequested = url.searchParams.get("set") === "1" || url.searchParams.get("action") === "cpname";
-  const name = cleanName(
+  const { act: action } = normalizedAjaxRoute(url);
+  const initialSetRequested = action === "cname" && url.searchParams.get("set") === "1";
+  const paidSetRequested = action === "cpname";
+  const setRequested = initialSetRequested || paidSetRequested;
+  const requestedName = String(
     url.searchParams.get("ve") ||
     url.searchParams.get("v") ||
     url.searchParams.get("name") ||
     url.searchParams.get("un") ||
     account.name
-  );
-  if (url.searchParams.get("action") === "searcname") {
-    return searchPlayersByName(account, name);
+  ).trim();
+  const name = requestedName.slice(0, 16);
+  if (action === "searcname") {
+    return searchPlayersByName(account, requestedName);
   }
-  if (!setRequested && url.searchParams.get("action") === "cname") {
+  const invalidLength = requestedName.length < 3 || requestedName.length > 16;
+  const accounts = await allAccountsForStats();
+  const nameExists = accounts.some((candidate) =>
+    Number(candidate.id) !== Number(account.id) &&
+    String(candidate.name || "").trim().toLowerCase() === requestedName.toLowerCase()
+  );
+  if (!setRequested && action === "cname") {
+    if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
+    if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
     return ok({ names: [] });
   }
+  if (initialSetRequested && !account.namePending) return { result: false, names: [], err: [{ n: 1 }] };
+  if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
+  if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
   account.name = name;
+  if (initialSetRequested) account.namePending = false;
   persist(account);
   refreshAllAccountClanSummaries(store);
   saveStore(store);
@@ -5134,27 +5723,43 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   }
 
   if (page === "clan") {
-    return routeClan(account, url, act, requestOrigin);
+    return await routeClan(account, url, act, requestOrigin);
   }
 
   return ok();
 }
 
 function requestPublicOrigin(req, url) {
-  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const forwardedHost = TRUST_PROXY_HEADERS
+    ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()
+    : "";
   const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
   if (!host) return url.origin;
-  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const forwardedProto = TRUST_PROXY_HEADERS
+    ? String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
+    : "";
   const proto = forwardedProto || url.protocol.replace(/:$/, "") || "http";
   return `${proto}://${host}`;
+}
+
+function securityHeaders() {
+  return {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "cross-origin-resource-policy": "same-site"
+  };
 }
 
 function sendJson(res, payload, status = 200, headers = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
+    ...securityHeaders(),
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
+    "content-length": String(Buffer.byteLength(body)),
     ...headers
   });
   res.end(body);
@@ -5162,8 +5767,11 @@ function sendJson(res, payload, status = 200, headers = {}) {
 
 function sendHtml(res, html, status = 200, headers = {}) {
   res.writeHead(status, {
+    ...securityHeaders(),
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    "content-length": String(Buffer.byteLength(html)),
     ...headers
   });
   res.end(html);
@@ -5172,14 +5780,14 @@ function sendHtml(res, html, status = 200, headers = {}) {
 function createAccountPage(url, requestOrigin = null) {
   const code = url.searchParams.get("code") || "";
   const name = cleanName(url.searchParams.get("name") || "");
-  if (code && code !== CREATE_CODE) {
+  if (code && !safeTokenEquals(code, CREATE_CODE)) {
     return {
       status: 403,
       html: "<h1>\u041a\u043e\u0434 \u043d\u0435\u0432\u0435\u0440\u043d\u044b\u0439</h1><p>\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043a\u043e\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430.</p>"
     };
   }
 
-  if (code === CREATE_CODE && name) {
+  if (safeTokenEquals(code, CREATE_CODE) && name) {
     const account = createNewAccount(name);
     const session = sessionPayload(account, requestOrigin);
     console.log(`[game-link] create player=${account.id} name=${account.name} link=${session.loginLink}`);
@@ -5227,6 +5835,11 @@ function tryServeAssetBundle(req, res, url) {
     return true;
   }
 
+  if (!ASSET_BUNDLE_NAMES.has(fileName.toLowerCase())) {
+    sendJson(res, { ok: false, error: "asset_bundle_not_allowed", file: fileName }, 404);
+    return true;
+  }
+
   const filePath = path.join(ASSET_BUNDLE_DIR, fileName);
   if (!fs.existsSync(filePath)) {
     sendJson(res, { ok: false, error: "asset_bundle_not_found", file: fileName }, 404);
@@ -5237,7 +5850,9 @@ function tryServeAssetBundle(req, res, url) {
   res.writeHead(200, {
     "content-type": "application/octet-stream",
     "content-length": String(stat.size),
-    "cache-control": "public, max-age=31536000, immutable"
+    "cache-control": "no-store, no-cache, must-revalidate",
+    "pragma": "no-cache",
+    "expires": "0"
   });
   fs.createReadStream(filePath).pipe(res);
   return true;
@@ -5583,10 +6198,6 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
 }
 
 async function recordBattleEvent(event) {
-  if (BATTLE_EVENT_TOKEN && event.token !== BATTLE_EVENT_TOKEN) {
-    return { ok: false, error: "invalid_token", status: 403 };
-  }
-
   const account = ensureDesktopAccount();
   if (!pgPool) {
     return { ok: true, storage: "json-file", skipped: "postgres_disabled" };
@@ -5594,7 +6205,7 @@ async function recordBattleEvent(event) {
 
   const roomName = String(event.roomName || event.room || "restore-room").slice(0, 80);
   const mapName = String(event.mapName || event.map || "Arena_3lvl").slice(0, 80);
-  const mode = Number(event.mode || 2);
+  const mode = normalizeStatsMode(event.mode || 2);
   const maxPlayers = Number(event.maxPlayers || 8);
   const playerId = Number(event.playerId || account.id || 1);
   const actorId = Number(event.actorId || 1);
@@ -5700,8 +6311,21 @@ async function recordBattleEvent(event) {
 ensureDesktopAccount();
 
 const server = http.createServer(async (req, res) => {
+  if (Buffer.byteLength(req.url || "", "utf8") > MAX_REQUEST_URL_BYTES) {
+    sendJson(res, { ok: false, error: "uri_too_long" }, 414);
+    return;
+  }
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  if (!allowHttpRequest(req, url.pathname)) {
+    sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+    return;
+  }
   const requestOrigin = requestPublicOrigin(req, url);
+
+  if (url.pathname === "/" || url.pathname === "/auth") {
+    sendHtml(res, "<h1>Contra City legacy API</h1><p>API online.</p>");
+    return;
+  }
 
   if (tryServeAssetBundle(req, res, url)) {
     return;
@@ -5726,12 +6350,89 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === "/launcher-device/challenge") {
+    if (req.method !== "POST") {
+      sendJson(res, { result: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const account = await accountFromLauncherDeviceBody(body, url);
+      if (!account) {
+        sendJson(res, { result: false, error: "invalid_session" }, 403);
+        return;
+      }
+      const device = await loadLauncherDevice(account.id);
+      const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+      if (!device || !deviceKeyId || device.deviceKeyId !== deviceKeyId) {
+        sendJson(res, { result: false, error: "device_signature_required" }, 403);
+        return;
+      }
+      const challenge = createLauncherDeviceChallenge(account, deviceKeyId);
+      sendJson(res, { result: true, ...challenge });
+    } catch (error) {
+      sendJson(res, { result: false, error: error.message || "device_challenge_failed" }, 500);
+    }
+    return;
+  }
+
+  if (url.pathname === "/admin/device-reset") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    if (!hasValidAdminToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const ccid = Number(body?.ccid || body?.playerId || 0);
+      if (!Number.isInteger(ccid) || ccid <= 0) {
+        sendJson(res, { ok: false, error: "invalid_ccid" }, 400);
+        return;
+      }
+      const removed = await resetLauncherDeviceBinding(ccid);
+      console.log(`[launcher-device] admin reset player=${ccid} removed=${removed}`);
+      sendJson(res, { ok: true, ccid, removed });
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "device_reset_failed" }, 500);
+    }
+    return;
+  }
+
   if (url.pathname === "/launcher-state") {
-    const account = await accountFromRequest(url);
+    let body = {};
+    if (req.method === "POST") {
+      try {
+        body = await readJsonBody(req, 32 * 1024);
+      } catch (error) {
+        sendJson(res, { result: false, error: error.message || "invalid_json", news: launcherNewsPayload() }, 400);
+        return;
+      }
+    }
+
+    const account = req.method === "POST"
+      ? await accountFromLauncherDeviceBody(body, url)
+      : await accountFromRequest(url);
     if (!account) {
       sendJson(res, { result: false, error: "invalid_session", news: launcherNewsPayload() }, 403);
       return;
     }
+
+    let deviceAccess;
+    try {
+      deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
+    } catch (error) {
+      console.error("[launcher-device] access check failed", error);
+      sendJson(res, { result: false, error: "device_binding_failed", news: launcherNewsPayload() }, 500);
+      return;
+    }
+    if (!deviceAccess.ok) {
+      sendJson(res, { result: false, error: deviceAccess.error, news: launcherNewsPayload() }, deviceAccess.status || 403);
+      return;
+    }
+
     sendJson(res, launcherStatePayload(account), 200, { "Set-Cookie": cookieHeaders(account) });
     return;
   }
@@ -5801,7 +6502,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/health") {
-    sendJson(res, { ok: true, storage: pgPool ? "postgres" : "json-file" });
+    sendJson(res, { ok: true, build: API_BUILD_ID, storage: pgPool ? "postgres" : "json-file" });
     return;
   }
 
@@ -5811,7 +6512,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, 128 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
       const result = await battleSocialRequest(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
@@ -5826,7 +6531,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const body = await readJsonBody(req);
+      const body = await readJsonBody(req, 256 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
       const result = await recordBattleEvent(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
@@ -5836,6 +6545,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/db") {
+    if (!hasValidAdminToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
     sendJson(res, {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
@@ -5853,5 +6566,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Contra City legacy API listening on ${PORT}`);
+  console.log(`Contra City legacy API listening on ${PORT} build=${API_BUILD_ID}`);
+  if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
+  if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
+  if (!CREATE_CODE) console.warn("[security] CREATE_CODE is not set; /create account creation is disabled.");
+  if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
+  if (DEFAULT_KEY === "contra-revive-key") console.warn("[security] DEFAULT_KEY still uses the public fallback; rotate it");
 });
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
+server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+server.maxHeadersCount = 64;
+server.on("clientError", (_error, socket) => {
+  if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+});
+
+
