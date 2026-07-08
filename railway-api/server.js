@@ -1,11 +1,11 @@
-import http from "node:http";
+﻿import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-06-28-weapon-buy-request-v15";
+const API_BUILD_ID = "railway-api-2026-07-08-launcher-device-bind-v16";
 const CREATE_CODE = process.env.CREATE_CODE || "CONTRA-REVIVE-2026";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -55,7 +55,9 @@ const GAME_NEW_TEXTURES_MANIFEST_URL = process.env.GAME_NEW_TEXTURES_MANIFEST_UR
 const GAME_CLASSIC_UPDATE_KEY = process.env.GAME_CLASSIC_UPDATE_KEY || "";
 const GAME_NEW_TEXTURES_UPDATE_KEY = process.env.GAME_NEW_TEXTURES_UPDATE_KEY || "";
 const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESSION_TTL_MS || 6 * 60 * 60 * 1000));
+const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
 const launcherSessions = new Map();
+const launcherDeviceChallenges = new Map();
 
 function safeTokenEquals(left, right) {
   const a = Buffer.from(String(left || ""), "utf8");
@@ -79,7 +81,7 @@ function requestRatePolicy(pathname) {
   if (pathname === "/battle/event" || pathname === "/battle/social") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
-  if (pathname === "/launcher-session" || pathname === "/session" || pathname === "/vk-login") {
+  if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
     return { windowMs: 60000, limit: 120 };
   }
   return { windowMs: RATE_LIMIT_WINDOW_MS, limit: RATE_LIMIT_REQUESTS };
@@ -2398,6 +2400,229 @@ function launcherStatePayload(account) {
       k: LAUNCHER_UPDATE_KEY
     }
   };
+}
+
+function normalizeLauncherDeviceKeyId(value) {
+  const keyId = String(value || "").trim();
+  if (!/^[A-Za-z0-9._:-]{8,160}$/.test(keyId)) return "";
+  return keyId;
+}
+
+function normalizeLauncherPublicKey(value) {
+  const publicKey = String(value || "").trim();
+  if (!publicKey || publicKey.length > 2048) return "";
+  if (!publicKey.includes("BEGIN PUBLIC KEY") || !publicKey.includes("END PUBLIC KEY")) return "";
+  return publicKey;
+}
+
+function normalizeHwidRiskHash(value) {
+  const hash = String(value || "").trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
+}
+
+function launcherDeviceCredentials(body, url = null) {
+  const rawId = body?.ccid ?? url?.searchParams?.get("ccid");
+  const key = String(body?.cckey ?? url?.searchParams?.get("cckey") ?? "");
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0 || !key) return null;
+  return { id: String(id), key };
+}
+
+async function accountFromLauncherDeviceBody(body, url = null) {
+  const credentials = launcherDeviceCredentials(body, url);
+  if (!credentials) return null;
+  const credentialUrl = new URL("https://launcher.local/launcher-state");
+  credentialUrl.searchParams.set("ccid", credentials.id);
+  credentialUrl.searchParams.set("cckey", credentials.key);
+  return accountFromRequest(credentialUrl);
+}
+
+async function loadLauncherDevice(accountId) {
+  if (!accountId) return null;
+  if (pgPool) {
+    const result = await pgPool.query("SELECT * FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      playerId: Number(row.player_id),
+      deviceKeyId: row.device_key_id,
+      publicKey: row.device_public_key,
+      hwidHash: row.hwid_hash || "",
+      risk: jsonValue(row.risk, {}),
+      boundAt: postgresTimestamp(row.bound_at),
+      lastSeenAt: postgresTimestamp(row.last_seen_at),
+      resetAt: postgresTimestamp(row.reset_at)
+    };
+  }
+
+  const account = store.accounts[String(accountId)];
+  return account?.launcherDevice || null;
+}
+
+async function bindLauncherDevice(account, body, req) {
+  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+  const publicKey = normalizeLauncherPublicKey(body?.devicePublicKey);
+  const hwidHash = normalizeHwidRiskHash(body?.hwidRiskHash);
+  if (!deviceKeyId || !publicKey || !hwidHash) {
+    return { ok: false, error: "device_bind_required" };
+  }
+
+  const now = new Date().toISOString();
+  const risk = { hwidChanged: false, ip: requestClientIp(req), userAgent: String(req.headers["user-agent"] || "").slice(0, 160) };
+  if (pgPool) {
+    const existingDevice = await pgPool.query(
+      "SELECT player_id FROM launcher_devices WHERE device_key_id = $1 AND player_id <> $2",
+      [deviceKeyId, Number(account.id)]
+    );
+    if (existingDevice.rowCount) {
+      return { ok: false, error: "device_already_bound" };
+    }
+
+    try {
+      await pgPool.query(
+        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, hwid_hash, risk, bound_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
+         ON CONFLICT (player_id) DO NOTHING`,
+        [Number(account.id), deviceKeyId, publicKey, hwidHash, JSON.stringify(risk)]
+      );
+    } catch (error) {
+      if (error?.code === "23505") {
+        return { ok: false, error: "device_already_bound" };
+      }
+      throw error;
+    }
+  } else {
+    for (const existing of Object.values(store.accounts || {})) {
+      if (Number(existing?.id) !== Number(account.id) && existing?.launcherDevice?.deviceKeyId === deviceKeyId) {
+        return { ok: false, error: "device_already_bound" };
+      }
+    }
+    const normalized = normalizeAccount(account);
+    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, hwidHash, risk, boundAt: now, lastSeenAt: now };
+    store.accounts[String(account.id)] = normalized;
+    await saveStore(store);
+  }
+
+  console.log(`[launcher-device] bound player=${account.id} keyId=${deviceKeyId}`);
+  return { ok: true };
+}
+
+async function touchLauncherDevice(account, device, hwidHash, req) {
+  const normalizedHash = normalizeHwidRiskHash(hwidHash);
+  const risk = {
+    hwidChanged: Boolean(device?.hwidHash && normalizedHash && device.hwidHash !== normalizedHash),
+    ip: requestClientIp(req),
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 160)
+  };
+
+  if (pgPool) {
+    await pgPool.query(
+      `UPDATE launcher_devices
+       SET hwid_hash = COALESCE(NULLIF($2, ''), hwid_hash), risk = $3::jsonb, last_seen_at = now()
+       WHERE player_id = $1`,
+      [Number(account.id), normalizedHash, JSON.stringify(risk)]
+    );
+  } else if (store.accounts[String(account.id)]?.launcherDevice) {
+    const normalized = normalizeAccount(store.accounts[String(account.id)]);
+    normalized.launcherDevice = { ...normalized.launcherDevice, hwidHash: normalizedHash || normalized.launcherDevice.hwidHash, risk, lastSeenAt: new Date().toISOString() };
+    store.accounts[String(account.id)] = normalized;
+    await saveStore(store);
+  }
+
+  if (risk.hwidChanged) {
+    console.warn(`[launcher-device] hwid risk player=${account.id} keyId=${device.deviceKeyId}`);
+  }
+}
+
+function pruneLauncherDeviceChallenges() {
+  const now = Date.now();
+  for (const [nonce, challenge] of launcherDeviceChallenges) {
+    if (challenge.expiresAt <= now) launcherDeviceChallenges.delete(nonce);
+  }
+}
+
+function createLauncherDeviceChallenge(account, deviceKeyId) {
+  pruneLauncherDeviceChallenges();
+  const nonce = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = Date.now() + LAUNCHER_DEVICE_CHALLENGE_TTL_MS;
+  launcherDeviceChallenges.set(nonce, { playerId: Number(account.id), deviceKeyId, expiresAt });
+  return { nonce, expiresInSeconds: Math.max(1, Math.floor((expiresAt - Date.now()) / 1000)) };
+}
+
+function consumeLauncherDeviceChallenge(account, deviceKeyId, nonce) {
+  pruneLauncherDeviceChallenges();
+  const challenge = launcherDeviceChallenges.get(String(nonce || ""));
+  if (!challenge) return false;
+  launcherDeviceChallenges.delete(String(nonce));
+  return challenge.playerId === Number(account.id) && challenge.deviceKeyId === deviceKeyId && challenge.expiresAt > Date.now();
+}
+
+function decodeSignature(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    return Buffer.from(raw, "base64");
+  } catch {
+    try {
+      return Buffer.from(raw, "base64url");
+    } catch {
+      return null;
+    }
+  }
+}
+
+function verifyLauncherDeviceSignature(device, nonce, signature) {
+  const signatureBytes = decodeSignature(signature);
+  if (!signatureBytes || !nonce) return false;
+  try {
+    return crypto.verify("sha256", Buffer.from(String(nonce), "utf8"), device.publicKey, signatureBytes);
+  } catch (error) {
+    console.warn(`[launcher-device] signature verify failed keyId=${device.deviceKeyId}: ${error.message}`);
+    return false;
+  }
+}
+
+async function verifyLauncherDeviceAccess(account, body, req) {
+  const current = await loadLauncherDevice(account.id);
+  if (!current) {
+    const bound = await bindLauncherDevice(account, body, req);
+    if (!bound.ok) return { ok: false, status: 403, error: bound.error };
+    return { ok: true, bound: true };
+  }
+
+  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+  if (!deviceKeyId || deviceKeyId !== current.deviceKeyId) {
+    return { ok: false, status: 403, error: "device_signature_required" };
+  }
+
+  const nonce = String(body?.challengeNonce || "").trim();
+  if (!nonce || !body?.challengeSignature) {
+    return { ok: false, status: 403, error: "device_signature_required" };
+  }
+
+  if (!consumeLauncherDeviceChallenge(account, deviceKeyId, nonce)) {
+    return { ok: false, status: 403, error: "device_challenge_invalid" };
+  }
+
+  if (!verifyLauncherDeviceSignature(current, nonce, body.challengeSignature)) {
+    return { ok: false, status: 403, error: "device_signature_invalid" };
+  }
+
+  await touchLauncherDevice(account, current, body?.hwidRiskHash, req);
+  return { ok: true, bound: true };
+}
+
+async function resetLauncherDeviceBinding(accountId) {
+  if (pgPool) {
+    const result = await pgPool.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
+    return result.rowCount > 0;
+  }
+  const account = store.accounts[String(accountId)];
+  if (!account?.launcherDevice) return false;
+  delete account.launcherDevice;
+  store.accounts[String(accountId)] = account;
+  await saveStore(store);
+  return true;
 }
 
 async function loginAccountFromUrl(url) {
@@ -6101,12 +6326,82 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === "/launcher-device/challenge") {
+    if (req.method !== "POST") {
+      sendJson(res, { result: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const account = await accountFromLauncherDeviceBody(body, url);
+      if (!account) {
+        sendJson(res, { result: false, error: "invalid_session" }, 403);
+        return;
+      }
+      const device = await loadLauncherDevice(account.id);
+      const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+      if (!device || !deviceKeyId || device.deviceKeyId !== deviceKeyId) {
+        sendJson(res, { result: false, error: "device_signature_required" }, 403);
+        return;
+      }
+      const challenge = createLauncherDeviceChallenge(account, deviceKeyId);
+      sendJson(res, { result: true, ...challenge });
+    } catch (error) {
+      sendJson(res, { result: false, error: error.message || "device_challenge_failed" }, 500);
+    }
+    return;
+  }
+
+  if (url.pathname === "/admin/device-reset") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    if (!hasValidAdminToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const ccid = Number(body?.ccid || body?.playerId || 0);
+      if (!Number.isInteger(ccid) || ccid <= 0) {
+        sendJson(res, { ok: false, error: "invalid_ccid" }, 400);
+        return;
+      }
+      const removed = await resetLauncherDeviceBinding(ccid);
+      console.log(`[launcher-device] admin reset player=${ccid} removed=${removed}`);
+      sendJson(res, { ok: true, ccid, removed });
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "device_reset_failed" }, 500);
+    }
+    return;
+  }
+
   if (url.pathname === "/launcher-state") {
-    const account = await accountFromRequest(url);
+    let body = {};
+    if (req.method === "POST") {
+      try {
+        body = await readJsonBody(req, 32 * 1024);
+      } catch (error) {
+        sendJson(res, { result: false, error: error.message || "invalid_json", news: launcherNewsPayload() }, 400);
+        return;
+      }
+    }
+
+    const account = req.method === "POST"
+      ? await accountFromLauncherDeviceBody(body, url)
+      : await accountFromRequest(url);
     if (!account) {
       sendJson(res, { result: false, error: "invalid_session", news: launcherNewsPayload() }, 403);
       return;
     }
+
+    const deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
+    if (!deviceAccess.ok) {
+      sendJson(res, { result: false, error: deviceAccess.error, news: launcherNewsPayload() }, deviceAccess.status || 403);
+      return;
+    }
+
     sendJson(res, launcherStatePayload(account), 200, { "Set-Cookie": cookieHeaders(account) });
     return;
   }
