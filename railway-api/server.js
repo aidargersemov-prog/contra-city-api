@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-09-create-awaits-postgres-v22";
+const API_BUILD_ID = "railway-api-2026-07-09-create-postgres-schema-v23";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -20,7 +20,7 @@ const ASSET_BUNDLE_NAMES = new Set([
   "legoturnament.unity3d",
   "inferno.unity3d"
 ]);
-const MIGRATIONS_DIR = path.join(process.cwd(), "migrations");
+const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
 const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
@@ -1293,6 +1293,10 @@ async function runMigrations() {
   }
 }
 
+async function ensurePlayerNamePendingSchema() {
+  await pgPool.query("ALTER TABLE players ADD COLUMN IF NOT EXISTS name_pending BOOLEAN NOT NULL DEFAULT false");
+}
+
 async function ensureLauncherDeviceSchema() {
   await pgPool.query(`
     CREATE TABLE IF NOT EXISTS launcher_devices (
@@ -1520,6 +1524,7 @@ async function initStore() {
   });
 
   await runMigrations();
+  await ensurePlayerNamePendingSchema();
   await ensureLauncherDeviceSchema();
   await syncPostgresCatalog();
 
@@ -5802,7 +5807,7 @@ async function createAccountPage(url, requestOrigin = null) {
       console.error("[game-link] create failed", error);
       return {
         status: 500,
-        html: "<h1>Аккаунт не создан</h1><p>Запись в базу не прошла. Проверьте лог API.</p>"
+        html: "<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d</h1><p>\u0417\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u0430\u0437\u0443 \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043b\u043e\u0433 API.</p>"
       };
     }
     const session = sessionPayload(account, requestOrigin);
