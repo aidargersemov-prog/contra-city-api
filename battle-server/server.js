@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-09-chat-pickup-speed-v240";
+const BUILD_ID = "battle-server-2026-07-09-chat-pickup-speed-rollback-v241";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -211,7 +211,6 @@ const ITEM_TYPES = {
   ARMOR: 100,
   AMMO: 99,
 };
-const DEFAULT_MAP_PICKUP_SUBTYPE = 1;
 const ARMOR_PICKUP_CAP = 100;
 const SMALL_PICKUP_PERCENT = 50;
 const FULL_PICKUP_PERCENT = 100;
@@ -3194,7 +3193,7 @@ function playerRuntimeStats(profile = null) {
   const modifiers = gameplayModifiersForProfile(profile);
   const baseHealth = Number(process.env.DEFAULT_PLAYER_HEALTH || 100);
   const baseEnergy = Math.max(0, numberOr(process.env.DEFAULT_PLAYER_ENERGY, 0));
-  const baseSpeed10 = Number(process.env.DEFAULT_PLAYER_SPEED10 || 105);
+  const baseSpeed10 = Number(process.env.DEFAULT_PLAYER_SPEED10 || 100);
   const baseJump = Number(process.env.DEFAULT_PLAYER_JUMP || 15);
   const calculatedHealth = Math.round((baseHealth + modifiers.healthFlat) * (1 + modifiers.healthPercent / 100));
   const maxHealth = Math.max(1, calculatedHealth, numberOr(modifiers.healthFloor, 0));
@@ -4102,7 +4101,7 @@ function makeRoomItemState(mapName) {
   for (const item of mapPickupDefinitions(mapName)) {
     items.set(Number(item.id), {
       ...item,
-      subType: DEFAULT_MAP_PICKUP_SUBTYPE,
+      subType: template.subType,
       picked: false,
       nextRespawnAt: 0,
     });
