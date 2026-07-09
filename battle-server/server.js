@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-09-chat-pickup-speed-rollback-v241";
+const BUILD_ID = "battle-server-2026-07-09-pickup-rollback-hotfix-v242";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -4101,7 +4101,7 @@ function makeRoomItemState(mapName) {
   for (const item of mapPickupDefinitions(mapName)) {
     items.set(Number(item.id), {
       ...item,
-      subType: template.subType,
+      subType: item.subType,
       picked: false,
       nextRespawnAt: 0,
     });
