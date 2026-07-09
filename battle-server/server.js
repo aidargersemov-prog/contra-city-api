@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-10-photon-string-mojibake-repair-v246";
+const BUILD_ID = "battle-server-2026-07-10-master-clan-event-echo-v247";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -1611,7 +1611,7 @@ for (let byte = 0; byte <= 0xff; byte += 1) {
 
 function repairWindows1251Mojibake(value) {
   const source = String(value ?? "");
-  if (!/[ÐÑ][\u0080-\u00bf]/.test(source)) return source;
+  if (!/[ï¿½ï¿½][\u0080-\u00bf]/.test(source)) return source;
   const bytes = [];
   for (const character of source) {
     const byte = WINDOWS_1251_ENCODER.get(character);
@@ -1620,7 +1620,7 @@ function repairWindows1251Mojibake(value) {
   }
   const decoded = Buffer.from(bytes).toString("utf8");
   if (!decoded || decoded.includes("\ufffd")) return source;
-  if (!/[À-ßà-ÿ¨¸]/.test(decoded)) return source;
+  if (!/[ï¿½-ï¿½ï¿½-ï¿½ï¿½ï¿½]/.test(decoded)) return source;
   return decoded;
 }
 function decodeLegacyBonusText(value) {
@@ -9223,12 +9223,20 @@ async function handleMasterEvent(session, parsed) {
     console.log(`[master-social] chat user=${userId} target=${targetId || "all"} type=${type} chars=${message.length}`);
     return [event];
   }
+  if (eventCode === 209) {
+    if (!data?.raw) return [];
+    const clanEventCode = Number(htGet(data, 0)?.value || 0);
+    const clanId = Number(htGet(data, 1)?.value || 0);
+    const event = rawMasterEvent(209, userId, data.raw);
+    const sent = broadcastMasterLobbyEvent(209, userId, data.raw, userId);
+    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} peers=${sent}`);
+    return [event];
+  }
 
   if (eventCode === 210) {
     console.log(`[master-social] server-list user=${userId} host=${PUBLIC_HOST}`);
     return [rawMasterEvent(223, userId, masterServerListReportRaw())];
   }
-
   console.log(`[master-social] ack only code=${eventCode} user=${userId}`);
   return [];
 }
