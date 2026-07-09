@@ -1,11 +1,11 @@
-﻿import http from "node:http";
+import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-08-first-name-pending-v21";
+const API_BUILD_ID = "railway-api-2026-07-09-create-awaits-postgres-v22";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1158,12 +1158,19 @@ function newAccountKey(id) {
   return `${DEFAULT_KEY}-${id}-${crypto.randomUUID()}`.slice(0, 128);
 }
 
-function createNewAccount(name) {
+async function createNewAccount(name) {
   const id = nextAccountId();
   const account = starterAccount(name, id, newAccountKey(id));
   account.namePending = true;
   store.accounts[String(id)] = account;
-  saveStore(store);
+  await saveStore(store);
+  if (pgPool) {
+    const saved = await loadPostgresAccount(id);
+    if (!saved || saved.key !== account.key) {
+      throw new Error(`created account ${id} was not saved to postgres`);
+    }
+    store.accounts[String(id)] = saved;
+  }
   return account;
 }
 
@@ -5777,7 +5784,7 @@ function sendHtml(res, html, status = 200, headers = {}) {
   res.end(html);
 }
 
-function createAccountPage(url, requestOrigin = null) {
+async function createAccountPage(url, requestOrigin = null) {
   const code = url.searchParams.get("code") || "";
   const name = cleanName(url.searchParams.get("name") || "");
   if (code && !safeTokenEquals(code, CREATE_CODE)) {
@@ -5788,7 +5795,16 @@ function createAccountPage(url, requestOrigin = null) {
   }
 
   if (safeTokenEquals(code, CREATE_CODE) && name) {
-    const account = createNewAccount(name);
+    let account;
+    try {
+      account = await createNewAccount(name);
+    } catch (error) {
+      console.error("[game-link] create failed", error);
+      return {
+        status: 500,
+        html: "<h1>Аккаунт не создан</h1><p>Запись в базу не прошла. Проверьте лог API.</p>"
+      };
+    }
     const session = sessionPayload(account, requestOrigin);
     console.log(`[game-link] create player=${account.id} name=${account.name} link=${session.loginLink}`);
     return {
@@ -6485,7 +6501,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/create") {
-    const result = createAccountPage(url, requestOrigin);
+    const result = await createAccountPage(url, requestOrigin);
     sendHtml(res, result.html, result.status);
     return;
   }
