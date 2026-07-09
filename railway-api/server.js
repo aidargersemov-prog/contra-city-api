@@ -1,6744 +1,10042 @@
-import http from "node:http";
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { URL, fileURLToPath } from "node:url";
+const dgram = require("dgram");
+const net = require("net");
+const { TextDecoder } = require("util");
 
-const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-10-launcher-json-encoding-v31";
-const CREATE_CODE = process.env.CREATE_CODE || "";
-const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
-const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
-const API_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ASSET_BUNDLE_DIR = path.join(API_DIR, "assetbundles");
-const ASSET_BUNDLE_NAMES = new Set([
-  "arena_3lvl.unity3d",
-  "zombi_2.unity3d",
-  "zombi.unity3d",
-  "arenaring.unity3d",
-  "bit_map.unity3d",
-  "legoturnament.unity3d",
-  "inferno.unity3d"
-]);
-const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
-const DATABASE_URL = process.env.DATABASE_URL || "";
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
-const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
+const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
+  .split(",")
+  .map((value) => Number(value.trim()))
+  .filter(Boolean);
+const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
+const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
+const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
+const BUILD_ID = "battle-server-2026-07-10-master-clan-event-echo-v247";
+const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
+const SOCIAL_MASTER_PORTS = new Set(
+  String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter(Boolean)
+);
+const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
+const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
+const ZOMBIE_MIN_PLAYERS = 2;
+const ZOMBIE_BOSS_INFECTION_MS = 10000;
+const ZOMBIE_ROUND_RESTART_MS = 10500;
+// The active client keeps its result screen for this interval before Event91.
+// It is intentionally shared with zombie rounds so all modes have one round cadence.
+const STANDARD_ROUND_RESTART_MS = Math.max(1000, Number(process.env.STANDARD_ROUND_RESTART_MS || ZOMBIE_ROUND_RESTART_MS));
+const ZOMBIE_REGULAR_INFECTION_HITS = Math.max(2, Math.min(3, Number(process.env.ZOMBIE_REGULAR_INFECTION_HITS || 3) || 3));
+const ZOMBIE_REGULAR_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_REGULAR_MAX_HEALTH || 1000) || 1000);
+const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 3000) || 3000);
+const ZOMBIE_REGEN_TICK_MS = Math.max(250, Number(process.env.ZOMBIE_REGEN_TICK_MS || 3000) || 3000);
+const ZOMBIE_REGULAR_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_REGULAR_REGEN_MIN || 20) || 20);
+const ZOMBIE_REGULAR_REGEN_MAX = Math.max(ZOMBIE_REGULAR_REGEN_MIN, Number(process.env.ZOMBIE_REGULAR_REGEN_MAX || 35) || 35);
+const ZOMBIE_BOSS_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_BOSS_REGEN_MIN || 50) || 50);
+const ZOMBIE_BOSS_REGEN_MAX = Math.max(ZOMBIE_BOSS_REGEN_MIN, Number(process.env.ZOMBIE_BOSS_REGEN_MAX || 60) || 60);
+const ZOMBIE_UPDATE_REPAIR_DELAYS_MS = parseDelayList(process.env.ZOMBIE_UPDATE_REPAIR_DELAYS_MS || "350,1200,2500");
+const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
+const AUTO_SPAWN_RETRY_MS = Number(process.env.AUTO_SPAWN_RETRY_MS || 250);
+const SPAWN_NO_MOVE_WARN_MS = Math.max(0, Number(process.env.SPAWN_NO_MOVE_WARN_MS || 2500));
+const SPAWN_SELF_RETRY_DELAYS_MS = parseDelayList(process.env.SPAWN_SELF_RETRY_DELAYS_MS || "650,1400");
+const SPECTATOR_LIVE_UNRELIABLE = process.env.SPECTATOR_LIVE_UNRELIABLE !== "0";
+const SPECTATOR_MOVE_UNRELIABLE = process.env.SPECTATOR_MOVE_UNRELIABLE !== "0";
+const SPECTATOR_LIVE_CHANNEL = normalizeChannelId(process.env.SPECTATOR_LIVE_CHANNEL ?? 1, 1);
+const MOVE_BROADCAST_UNRELIABLE = process.env.MOVE_BROADCAST_UNRELIABLE !== "0";
+const DEBUG_PACKETS = process.env.DEBUG_PACKETS === "1";
+const DEBUG_MOVE_PACKETS = process.env.DEBUG_MOVE_PACKETS === "1";
+const LOG_SEND_PACKETS = DEBUG_PACKETS || process.env.LOG_SEND_PACKETS === "1";
+const ENABLE_BATTLE_EXP = process.env.ENABLE_BATTLE_EXP !== "0";
+const BATTLE_EXP_PER_KILL = Math.max(0, Number(process.env.BATTLE_EXP_PER_KILL || 25));
+const DOMINATION_STREAK_KILLS = Math.max(0, Number(process.env.DOMINATION_STREAK_KILLS || 4));
+const ACTOR_JOIN_ASYNC_DELAY_MS = Math.max(0, Number(process.env.ACTOR_JOIN_ASYNC_DELAY_MS || 1500));
+const PEER_ACTOR_REPAIR_DELAYS_MS = parseDelayList(process.env.PEER_ACTOR_REPAIR_DELAYS_MS || "");
+const MOVE_LOG_EVERY = Math.max(1, Number(process.env.MOVE_LOG_EVERY || 100));
+const SPAWN_INDEX = Number(process.env.SPAWN_INDEX || 0);
+const SPAWN_Y_OFFSET = Number(process.env.SPAWN_Y_OFFSET || 0);
+const DEFAULT_TEAM = Number(process.env.DEFAULT_TEAM || 1);
+const DEFAULT_ROOM = process.env.DEFAULT_ROOM || "restore-room";
+const DEFAULT_MAP = process.env.DEFAULT_MAP || "Arena_3lvl";
+const ROOM_SESSION_IDLE_MS = Math.max(0, Number(process.env.ROOM_SESSION_IDLE_MS || 90000));
+const ROOM_SESSION_PRUNE_INTERVAL_MS = Math.max(1000, Number(process.env.ROOM_SESSION_PRUNE_INTERVAL_MS || 5000));
+const INIT_REPLY = ["callback", "legacy", "both"].includes((process.env.INIT_REPLY || "").toLowerCase())
+  ? process.env.INIT_REPLY.toLowerCase()
+  : "callback";
+const PUSH_ROOM_LIST_AFTER_INIT = process.env.PUSH_ROOM_LIST_AFTER_INIT === "1";
+const REPLAY_PEER_SPAWNS_AFTER_SELF = process.env.REPLAY_PEER_SPAWNS_AFTER_SELF !== "0";
+const CONFIRM_PEER_SPAWN_AFTER_ISENEMY = process.env.CONFIRM_PEER_SPAWN_AFTER_ISENEMY !== "0";
+const PROFILE_CACHE_TTL_MS = Number(process.env.PROFILE_CACHE_TTL_MS || 30000);
+const CATALOG_CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS || 300000);
+const PROFILE_JOIN_WAIT_MS = Math.max(0, Number(process.env.PROFILE_JOIN_WAIT_MS || 2500));
+const JOIN_LOADOUT_SLOT_LIMIT = Math.max(1, Math.min(7, Number(process.env.JOIN_LOADOUT_SLOT_LIMIT || 7)));
+const FULL_LOADOUT_SLOT_LIMIT = 7;
+const INCLUDE_WEAPON_LEGACY_FIELDS = process.env.INCLUDE_WEAPON_LEGACY_FIELDS === "1";
+const INCLUDE_JOIN_WEARS = process.env.INCLUDE_JOIN_WEARS !== "0";
+const INCLUDE_BATTLE_ENHANCERS = process.env.INCLUDE_BATTLE_ENHANCERS !== "0";
+const INCLUDE_JOIN_ACTOR_ECHO_FIELDS = process.env.INCLUDE_JOIN_ACTOR_ECHO_FIELDS === "1";
+const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1";
+const INCLUDE_PEERS_IN_GAMESTATE = process.env.INCLUDE_PEERS_IN_GAMESTATE === "1";
+const GAMESTATE_REPEAT_MIN_MS = Math.max(0, Number(process.env.GAMESTATE_REPEAT_MIN_MS || 750));
+const MAX_UDP_PACKET_BYTES = Math.max(0, Number(process.env.MAX_UDP_PACKET_BYTES || 1200));
+const OUTBOUND_RELIABLE_INITIAL_RTO_MS = Math.max(50, Number(process.env.OUTBOUND_RELIABLE_INITIAL_RTO_MS || 300));
+const OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE || 5));
+const OUTBOUND_RELIABLE_DISCONNECT_MS = Math.max(1000, Number(process.env.OUTBOUND_RELIABLE_DISCONNECT_MS || 10000));
+const OUTBOUND_RELIABLE_SWEEP_MS = Math.max(25, Number(process.env.OUTBOUND_RELIABLE_SWEEP_MS || 50));
+const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 15000));
+const ENET_FRAGMENT_TRACE = process.env.ENET_FRAGMENT_TRACE !== "0";
+const ENET_MAX_FRAGMENT_COUNT = Math.max(1, Number(process.env.ENET_MAX_FRAGMENT_COUNT || 128));
+const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX_FRAGMENT_TOTAL_BYTES || 65536));
+const SHOT_LOCAL_RESPONSE_TRACE = process.env.SHOT_LOCAL_RESPONSE_TRACE !== "0";
+const ACTOR_JOIN_MAX_PACKET_BYTES = Math.max(0, Number(process.env.ACTOR_JOIN_MAX_PACKET_BYTES || 1160));
+const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 0));
+const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
+const JOIN_PROFILE_RETRY_MS = Math.max(250, Number(process.env.JOIN_PROFILE_RETRY_MS || 1000));
+const JOIN_PROFILE_MAX_WAIT_MS = Math.max(JOIN_SELF_PROFILE_WAIT_MS, Number(process.env.JOIN_PROFILE_MAX_WAIT_MS || 70000));
+const ALLOW_FALLBACK_JOIN_PROFILE = process.env.ALLOW_FALLBACK_JOIN_PROFILE === "1";
+const JOIN_SETTINGS_PUSH_DELAYS_MS = parseDelayList(process.env.JOIN_SETTINGS_PUSH_DELAYS_MS || "");
+const JOIN_START_EVENT_FALLBACK_DELAY_MS = Math.max(0, Number(process.env.JOIN_START_EVENT_FALLBACK_DELAY_MS || 0));
+const JOIN_LATE_START_DELAYS_MS = parseDelayList(process.env.JOIN_LATE_START_DELAYS_MS || "");
+const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
+const NORMALIZE_WEAPON_RAPIDITY = process.env.NORMALIZE_WEAPON_RAPIDITY === "1";
+const SHOT_THROTTLE_SLACK_MS = Math.max(0, Number(process.env.SHOT_THROTTLE_SLACK_MS || 20));
+const COMPLEX_RELOAD_AMMO_CLIP_MS = Math.max(1, Number(process.env.COMPLEX_RELOAD_AMMO_CLIP_MS || 1000));
+const ENABLE_MAP_PICKUPS = process.env.ENABLE_MAP_PICKUPS !== "0";
+const MAP_PICKUPS_IN_GAMESTATE = process.env.MAP_PICKUPS_IN_GAMESTATE === "1";
+const ITEM_RESPAWN_MS = Math.max(0, Number(process.env.ITEM_RESPAWN_MS || 15000));
+const ITEM_PICKUP_RADIUS = Math.max(1, Number(process.env.ITEM_PICKUP_RADIUS || 8));
+const PICKUP_SPAWN_REPAIR_DELAYS_MS = parseDelayList(process.env.PICKUP_SPAWN_REPAIR_DELAYS_MS || "");
+const REQUIRE_PICKUP_BENEFIT = true;
+const ENABLE_BATTLE_DAMAGE = process.env.ENABLE_BATTLE_DAMAGE !== "0";
+const DAMAGE_SHORT_RANGE = Math.max(1, Number(process.env.DAMAGE_SHORT_RANGE || 30));
+const DAMAGE_MEDIUM_RANGE = Math.max(DAMAGE_SHORT_RANGE, Number(process.env.DAMAGE_MEDIUM_RANGE || 85));
+const DAMAGE_HEAD_MULTIPLIER = Math.max(0, Number(process.env.DAMAGE_HEAD_MULTIPLIER || 1.35));
+const DAMAGE_ENGINE_MULTIPLIER = Math.max(0, Number(process.env.DAMAGE_ENGINE_MULTIPLIER || 1.1));
+const DAMAGE_CRIT_MULTIPLIER = Math.max(1, Number(process.env.DAMAGE_CRIT_MULTIPLIER || 1.25));
+const DAMAGE_MAX_CRIT_CHANCE = Math.max(0, Math.min(100, Number(process.env.DAMAGE_MAX_CRIT_CHANCE || 35)));
+const DAMAGE_SORT_RANGES_BY_POWER = process.env.DAMAGE_SORT_RANGES_BY_POWER !== "0";
+const DAMAGE_EXPLOSION_FULL_RADIUS = Math.max(0, Number(process.env.DAMAGE_EXPLOSION_FULL_RADIUS || 6.5));
+const DAMAGE_EXPLOSION_ZERO_RADIUS = Math.max(DAMAGE_EXPLOSION_FULL_RADIUS + 0.1, Number(process.env.DAMAGE_EXPLOSION_ZERO_RADIUS || 20));
+const DAMAGE_MAX_PROTECTION_PERCENT = Math.max(0, Math.min(100, Number(process.env.DAMAGE_MAX_PROTECTION_PERCENT || 95)));
+const DAMAGE_MAX_HEAD_BONUS_PERCENT = Math.max(0, Number(process.env.DAMAGE_MAX_HEAD_BONUS_PERCENT || 50));
+const DAMAGE_MELEE_MAX_DISTANCE = Math.max(1, Number(process.env.DAMAGE_MELEE_MAX_DISTANCE || 12));
+const IMPACT_DOT_TICK_MS = Math.max(250, Number(process.env.IMPACT_DOT_TICK_MS || 1000));
+const IMPACT_DOT_DEFAULT_TICKS = Math.max(1, Number(process.env.IMPACT_DOT_DEFAULT_TICKS || 5));
+const IMPACT_REFERENCE_DAMAGE_REDUCTION = Math.max(0, Math.min(95, Number(process.env.IMPACT_REFERENCE_DAMAGE_REDUCTION || 10)));
+const BIKER_SET_HEALTH_FLOOR = Number(process.env.BIKER_SET_HEALTH_FLOOR || 170);
+const BIKER_SET_SPEED_FLOOR = Number(process.env.BIKER_SET_SPEED_FLOOR || 0);
+const BIKER_SET_WEAPON_SPEED_BONUS = Number(process.env.BIKER_SET_WEAPON_SPEED_BONUS || 0);
+const BIKER_SET_SHOTGUN_JUMP_BONUS = Number(process.env.BIKER_SET_SHOTGUN_JUMP_BONUS || 0);
+const APPLY_TRAINING_ABILITY_BONUSES = process.env.APPLY_TRAINING_ABILITY_BONUSES === "1";
+// ShotController uses ActorInfo[92] directly for shotgun air recoil; no per-weapon hidden recoil stat exists in the client.
+const SHOTGUN_RECOIL_SMALL_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_SMALL_JUMP_BONUS || 2);
+const SHOTGUN_RECOIL_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_JUMP_BONUS || 4);
+const SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS || 6);
+const BIG_SHOTGUN_RECOIL_JUMP_BONUS = Number(process.env.BIG_SHOTGUN_RECOIL_JUMP_BONUS || 8);
+const SHOTGUN_RECOIL_HUGE_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_HUGE_JUMP_BONUS || 12);
+const MAX_PLAYER_ENERGY = Math.max(0, Number(process.env.MAX_PLAYER_ENERGY || 100));
+const MAX_PLAYER_JUMP = Math.max(1, Number(process.env.MAX_PLAYER_JUMP || 32));
+// Original client default is SMOOTH_LINEAR_IN_EX=3; it consumes live Move99 key4/key5 as pitch/yaw.
+const ROOM_INTERPOLATION_MODE_RAW = Number(process.env.ROOM_INTERPOLATION_MODE ?? 3);
+const ROOM_INTERPOLATION_MODE = Math.max(0, Math.min(255, Number.isFinite(ROOM_INTERPOLATION_MODE_RAW) ? ROOM_INTERPOLATION_MODE_RAW : 0));
+const ADD_MOVE_ROTATION_KEY = process.env.ADD_MOVE_ROTATION_KEY !== "0";
+const MAX_UDP_DATAGRAM_BYTES = Math.max(512, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
+const MAX_ENET_COMMANDS_PER_PACKET = Math.max(1, Number(process.env.MAX_ENET_COMMANDS_PER_PACKET || 64));
+// Compatibility-first defaults: one public/NAT address may represent many real players,
+// and every client maintains several Photon endpoints at the same time.
+const MAX_SESSIONS_TOTAL = Math.max(50000, Number(process.env.MAX_SESSIONS_TOTAL || 50000));
+const MAX_SESSIONS_PER_IP = Math.max(512, Number(process.env.MAX_SESSIONS_PER_IP || 512));
+const UDP_RATE_WINDOW_MS = Math.max(1000, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
+const UDP_RATE_PACKETS_PER_IP = Math.max(100000, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
+const UDP_RATE_BYTES_PER_IP = Math.max(512 * 1024 * 1024, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
+const TCP_MAX_CONNECTIONS_PER_IP = Math.max(128, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
+const TCP_IDLE_TIMEOUT_MS = Math.max(120000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
+const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
 
-const START_MONEY = Number(process.env.START_MONEY || 1000);
-const START_LEVEL = Number(process.env.START_LEVEL || 1);
-const START_EXP = Number(process.env.START_EXP || 0);
-const START_EXP_MAX = Number(process.env.START_EXP_MAX || 1000);
-const LEVEL_EXP_STEP = Math.max(1, Number(process.env.LEVEL_EXP_STEP || START_EXP_MAX || 1000));
-const SHOP_PRICE = 100;
-const BATTLE_HOST = process.env.BATTLE_HOST || "";
-const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
-const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
-const MAX_REQUEST_URL_BYTES = Math.max(1024, Number(process.env.MAX_REQUEST_URL_BYTES || 16384));
-const HTTP_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15000));
-const HTTP_HEADERS_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 10000));
-const HTTP_KEEP_ALIVE_TIMEOUT_MS = Math.max(1000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 5000));
-const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
-const RATE_LIMIT_REQUESTS = Math.max(30, Number(process.env.RATE_LIMIT_REQUESTS || 600));
-const BATTLE_RATE_LIMIT_REQUESTS = Math.max(60000, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
-const TRUST_PROXY_HEADERS = Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_PROJECT_ID) ||
-  process.env.TRUST_PROXY_HEADERS === "1";
-const rateLimitBuckets = new Map();
-const LAUNCHER_VERSION = process.env.LAUNCHER_VERSION || "1.2.0";
-const LAUNCHER_MANIFEST_URL = process.env.LAUNCHER_MANIFEST_URL || "";
-const LAUNCHER_UPDATE_KEY = process.env.LAUNCHER_UPDATE_KEY || "";
-const GAME_CLASSIC_MANIFEST_URL = process.env.GAME_CLASSIC_MANIFEST_URL ||
-  "https://pub-bfbc65832fdd4742ac9dc2f24168c93b.r2.dev/builds/classic/manifest.json";
-const GAME_NEW_TEXTURES_MANIFEST_URL = process.env.GAME_NEW_TEXTURES_MANIFEST_URL ||
-  "https://pub-bfbc65832fdd4742ac9dc2f24168c93b.r2.dev/builds/new_textures/manifest.json";
-const GAME_CLASSIC_UPDATE_KEY = process.env.GAME_CLASSIC_UPDATE_KEY || "";
-const GAME_NEW_TEXTURES_UPDATE_KEY = process.env.GAME_NEW_TEXTURES_UPDATE_KEY || "";
-const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESSION_TTL_MS || 6 * 60 * 60 * 1000));
-const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
-const launcherSessions = new Map();
-const launcherDeviceChallenges = new Map();
+const sessions = new Map();
+const rooms = new Map();
+const masterSessionsByPlayerId = new Map();
+const profileCache = new Map();
+const profileLoads = new Map();
+const udpRateByIp = new Map();
+const tcpConnectionsByIp = new Map();
 
-function safeTokenEquals(left, right) {
-  const a = Buffer.from(String(left || ""), "utf8");
-  const b = Buffer.from(String(right || ""), "utf8");
-  if (a.length === 0 || a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-function requestClientIp(req) {
-  const forwarded = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
-    : "";
-  return forwarded || req.socket?.remoteAddress || "unknown";
-}
-
-function requestRatePolicy(pathname) {
-  if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
-  // Both endpoints are called by the single battle VPS for all online players.
-  // Keep the service token as the real authorization boundary and avoid throttling
-  // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/social") {
-    return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
-  }
-  if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
-    return { windowMs: 60000, limit: 120 };
-  }
-  return { windowMs: RATE_LIMIT_WINDOW_MS, limit: RATE_LIMIT_REQUESTS };
-}
-
-function allowHttpRequest(req, pathname) {
+function allowUdpPacket(rinfo, byteLength) {
+  const address = String(rinfo?.address || "unknown");
   const now = Date.now();
-  const policy = requestRatePolicy(pathname);
-  const bucketKey = `${requestClientIp(req)}|${pathname}`;
-  let bucket = rateLimitBuckets.get(bucketKey);
-  if (!bucket || now - bucket.startedAt >= policy.windowMs) {
-    bucket = { startedAt: now, count: 0 };
-    rateLimitBuckets.set(bucketKey, bucket);
+  let bucket = udpRateByIp.get(address);
+  if (!bucket || now - bucket.startedAt >= UDP_RATE_WINDOW_MS) {
+    bucket = { startedAt: now, packets: 0, bytes: 0, dropped: 0 };
+    udpRateByIp.set(address, bucket);
   }
-  bucket.count++;
-  if (rateLimitBuckets.size > 10000) {
-    for (const [key, value] of rateLimitBuckets) {
-      if (now - value.startedAt > 10 * 60 * 1000) rateLimitBuckets.delete(key);
+  bucket.packets++;
+  bucket.bytes += Math.max(0, Number(byteLength || 0));
+  const allowed = bucket.packets <= UDP_RATE_PACKETS_PER_IP && bucket.bytes <= UDP_RATE_BYTES_PER_IP;
+  if (!allowed) bucket.dropped++;
+  if (udpRateByIp.size > 10000) {
+    for (const [ip, value] of udpRateByIp) {
+      if (now - value.startedAt > UDP_RATE_WINDOW_MS * 2) udpRateByIp.delete(ip);
     }
   }
-  return bucket.count <= policy.limit;
+  return allowed;
 }
 
-function hasValidBattleServiceToken(req, body) {
-  const presented = req.headers["x-battle-token"] || body?.token || "";
-  return Boolean(BATTLE_EVENT_TOKEN) && safeTokenEquals(presented, BATTLE_EVENT_TOKEN);
+function sessionCountForIp(address) {
+  let count = 0;
+  for (const session of sessions.values()) {
+    if (session?.rinfo?.address === address || String(session?.remoteKey || "").startsWith(`${address}:`)) count++;
+  }
+  return count;
+}
+let shopCatalogCache = { loadedAt: 0, weapons: [], wears: [] };
+const PROCESS_START_MS = Date.now();
+let lastRoomSessionPruneAt = 0;
+function parseDelayList(value) {
+  return String(value || "")
+    .split(",")
+    .map((part) => Number(part.trim()))
+    .filter((delayMs) => Number.isFinite(delayMs) && delayMs > 0);
 }
 
-function hasValidAdminToken(req) {
-  return Boolean(ADMIN_API_TOKEN) && safeTokenEquals(req.headers["x-admin-token"], ADMIN_API_TOKEN);
+function formatDelayList(delays) {
+  return delays.length ? `${delays.join(",")}ms` : "off";
 }
 
-const CLAN_CREATE_LEVEL = 30;
-const CLAN_JOIN_LEVEL = 15;
-const CLAN_DEFAULT_MAX_MEMBERS = 5;
-const CLAN_MAX_MEMBERS = 50;
-const CLAN_COSTS = Object.freeze({
-  create: 1500,
-  requests: 500,
-  changeName: 1500,
-  changeTag: 1500,
-  changeArm: 1500,
-  expandMember: 1000,
-  expandMembers: [1, 2, 3, 4, 5, 6, 7, 8, 9]
-});
-const CLAN_ERROR = Object.freeze({
-  MISSING_MONEY: 101,
-  MISSING_MONEY_TREASURY: 102,
-  CLAN_NAME: 350,
-  CLAN_NAME_LEN: 351,
-  CLAN_NAME_EXIST: 352,
-  CLAN_TAG: 353,
-  CLAN_TAG_LEN: 354,
-  CLAN_TAG_EXIST: 355,
-  CLAN_USER_LVL_LESS: 356,
-  CLAN_CREATE_YOU_ARE_IN_CLAN: 357,
-  CLAN_MEMBER_MAX_COUNT: 358,
-  CLAN_URL: 359,
-  CLAN_DESC: 360,
-  CLAN_ACCESS_DISABLE: 361
-});
-const CLAN_EVENT_TYPE = Object.freeze({
-  DELETE: 1,
-  CHANGE_OWNER: 2,
-  DELETE_MEMBER: 3,
-  LEAVE_MEMBER: 4
-});
-const CLAN_TREASURY_EVENT_TYPE = Object.freeze({
-  ADD: 1,
-  EXPAND_MEMBER: 10,
-  CHANGE_NAME: 11,
-  CHANGE_TAG: 12,
-  CHANGE_ARM: 13,
-  BUY_ENHANCER: 14
-});
-const CLAN_ARM_IDS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-const CLAN_DEFAULT_ARM_IDS = Object.freeze([1, 6, 7, 9, 10]);
-const CLAN_ARM_ID_SET = new Set(CLAN_ARM_IDS);
-const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
-const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
-const CLAN_ARM_ITEM_TYPE = 5;
-const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 3, 4, 5, 30, 31, 32, 33, 34, 35, 36]);
-const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13, 150, 151, 152, 153, 154, 155, 156, 159, 160, 205, 208, 209]);
-const SHOP_ENHANCER_IDS = Object.freeze([...PLAYER_ENHANCER_IDS, ...CLAN_ENHANCER_IDS]);
-const CLAN_ENHANCER_ID_SET = new Set(CLAN_ENHANCER_IDS);
+function normalizeChannelId(value, fallback = 0) {
+  const channel = Number(value);
+  if (Number.isInteger(channel) && channel >= 0 && channel <= 255) return channel;
+  return fallback;
+}
 
-const cost = (id, value = 100) => ({
-  sc_id: String(id),
-  tPv: value,
-  tPr: 0,
-  tPp: 0
-});
-
-const permanentCost = (id, value = 100) => ({
-  sc_id: String(id),
-  tPv: value,
-  tPr: 0,
-  tPp: 0
-});
-
-const timedPermanentCost = (id, value = 100) => ({
-  sc_id: String(id),
-  t1v: value,
-  t1r: 0,
-  t1p: 0,
-  t7v: value,
-  t7r: 0,
-  t7p: 0,
-  t30v: value,
-  t30r: 0,
-  t30p: 0,
-  tPv: value,
-  tPr: 0,
-  tPp: 0
-});
-
-const weaponTitleById = {
-  1: "Бита",
-  2: "Партизан",
-  3: "Комрад-47",
-  4: "Стаханов",
-  5: "ВыньЧестер",
-  6: "Аврора",
-  7: "Компостер",
-  10: "ГОСТ Бита",
-  11: "ГОСТ Партизан",
-  12: "ГОСТ Комрад-47",
-  13: "ГОСТ Стаханов",
-  14: "ГОСТ ВыньЧестер ",
-  15: "ГОСТ Аврора ",
-  16: "ГОСТ Компостер",
-  17: "Лом",
-  18: "Комиссар",
-  19: "МММ-16",
-  20: "Берия",
-  21: "Егерь",
-  22: "Мини Катюша",
-  23: "Серп",
-  24: "СверхДембель",
-  25: "Примус",
-  26: "Начальник",
-  27: "Дружинник",
-  28: "Политрук",
-  29: "Кладенец",
-  30: "Полкан",
-  31: "Побарабанщик",
-  32: "Рык",
-  33: "Бюрократ",
-  34: "Наводка",
-  35: "Дальнобойщик",
-  36: "Клык",
-  37: "Дон",
-  38: "Сибиряк",
-  39: "ГОСТ Примус",
-  40: "Светоч",
-  41: "Самурай",
-  42: "Косарь",
-  43: "МЭЛС",
-  44: "Гранатин",
-  45: "Гадюка",
-  46: "Павлик М.",
-  47: "Вьюга",
-  48: "Ледовик",
-  50: "Писец",
-  53: "Сокол",
-  55: "Убойник",
-  57: "Сторож",
-  58: "Провокатор",
-  59: "Троллебузина",
-  60: "Засад",
-  61: "Звездочет",
-  62: "Смертобой",
-  63: "Йож",
-  64: "Репей",
-  65: "Максимыч выкл.",
-  66: "Максимыч",
-  67: "Рой",
-  68: "Спекулянт",
-  69: "Пустынный Орел",
-  70: "Крик",
-  71: "Новогодняя Карамель",
-  72: "Огненная Карамель",
-  73: "Вождь",
-  74: "Росомаха",
-  75: "Шершень",
-  76: "Большевик",
-  77: "Вектор",
-  78: "Буран",
-  79: "Кобра",
-  80: "Повстанец",
-  92: "Ликвидатор",
-  100: "Страж",
-  101: "Адвокат",
-  102: "Барс",
-  103: "Анаконда",
-  104: "Ворчун",
-  105: "Скиф",
-  106: "Кабан",
-  107: "Вымпел",
-  108: "Палач",
-  109: "Советник",
-  110: "Бастион"
+const ITEM_TYPES = {
+  HEALTH: 101,
+  ARMOR: 100,
+  AMMO: 99,
 };
+const ARMOR_PICKUP_CAP = 100;
+const SMALL_PICKUP_PERCENT = 50;
+const FULL_PICKUP_PERCENT = 100;
 
-const ARCING_LAUNCHER_VELOCITY = 10;
-const ARCING_LAUNCHER_LIFE = 7000;
-const ARCING_LAUNCHER_DISTANCE = 10;
+const RAPIDITY_FLOORS_BY_TYPE = new Map([
+  [1, 340],
+  [2, 420],
+  [3, 240],
+  [4, 150],
+  [5, 115],
+  [6, 125],
+  [7, 620],
+  [8, 900],
+  [9, 900],
+  [10, 850],
+  [11, 115],
+  [12, 115],
+  [13, 115],
+  [14, 115],
+  [15, 900],
+]);
 
-function weaponBalance(slot, wt, id) {
-  const bySlot = {
-    1: { ammo: 1, ammo_tot: 1, rap: 340, rt: 0, lt: 250, dev: 2, rad: 8, krit: 8, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 },
-    2: { ammo: 12, ammo_tot: 60, rap: 240, rt: 2967, lt: 520, dev: 8, rad: 10, krit: 7, smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 },
-    3: { ammo: 30, ammo_tot: 90, rap: 150, rt: 2967, lt: 650, dev: 12, rad: 12, krit: 5, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 },
-    4: { ammo: 90, ammo_tot: 180, rap: 125, rt: 800, lt: 1100, dev: 18, rad: 14, krit: 4, smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 },
-    5: { ammo: 6, ammo_tot: 36, rap: 620, rt: 4500, lt: 900, dev: 24, rad: 18, krit: 6, smindam: 42, smaxdam: 62, mmindam: 22, mmaxdam: 35, lmindam: 8, lmaxdam: 14 },
-    6: { ammo: 1, ammo_tot: 8, rap: 900, rt: 2300, lt: 1150, dev: 6, rad: 28, krit: 3, smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 },
-    7: { ammo: 10, ammo_tot: 40, rap: 850, rt: 2967, lt: 1000, dev: 3, rad: 10, krit: 12, smindam: 65, smaxdam: 95, mmindam: 72, mmaxdam: 110, lmindam: 82, lmaxdam: 135 }
-  };
-  const base = bySlot[slot] || bySlot[3];
-  const variant = Number(id % 5);
-  const isArcingLauncher = wt === 9 || wt === 15;
-  return {
-    ...base,
-    lt: isArcingLauncher ? ARCING_LAUNCHER_LIFE : base.lt,
-    rad: isArcingLauncher ? ARCING_LAUNCHER_DISTANCE : base.rad,
-    smindam: base.smindam + variant,
-    smaxdam: base.smaxdam + variant,
-    mmindam: base.mmindam + variant,
-    mmaxdam: base.mmaxdam + variant,
-    lmindam: base.lmindam + variant,
-    lmaxdam: base.lmaxdam + variant,
-    vel: wt === 8 ? 65 : (isArcingLauncher ? ARCING_LAUNCHER_VELOCITY : 100),
-    ang: 0
-  };
-}
-
-function weapon(id, wt, slot, sname, price, extra = {}) {
-  const balance = weaponBalance(slot, wt, id);
-  return {
-    itype: 1,
-    id,
-    w_id: id,
-    wt,
-    ws: slot,
-    ...balance,
-    sname,
-    sn: sname,
-    name: weaponTitleById[id] || `Оружие ${id}`,
-    nlvl: 1,
-    iS: 1,
-    sc: cost(1000 + id, price),
-    ...extra
-  };
-}
-
-function wear(id, wt, sname, price = 50, slot = null) {
-  const text = wearTextFor(slot, sname);
-  return {
-    itype: 3,
-    id,
-    w_id: id,
-    wt,
-    sname,
-    sn: sname,
-    nlvl: 1,
-    iS: 1,
-    sc: cost(2000 + id, price),
-    ...text
-  };
-}
-
-function taunt(id, price = 100) {
-  return {
-    itype: 4,
-    t_id: id,
-    sname: `taunt_${id}`,
-    sn: `taunt_${id}`,
-    nlvl: 1,
-    iS: 1,
-    sc: timedPermanentCost(3000 + id, price)
-  };
-}
-
-function isClanEnhancerId(id) {
-  return CLAN_ENHANCER_ID_SET.has(Number(id));
-}
-
-function enhancer(id, price = 120) {
-  return {
-    itype: 2,
-    e_id: id,
-    sname: `enhancer_${id}`,
-    sn: `enhancer_${id}`,
-    nlvl: 1,
-    iS: 1,
-    iC: isClanEnhancerId(id) ? 1 : 0,
-    sc: timedPermanentCost(4000 + id, price)
-  };
-}
-
-const defaultWeapons = [
-  weapon(1, 1, 1, "ohca_basebalbat", 0, { ammo: 0, ammo_tot: 0, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 }),
-  weapon(2, 3, 2, "hg_makarov", 0, { smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 }),
-  weapon(3, 4, 3, "mg_ak47", 0, { smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 }),
-  weapon(4, 6, 4, "gg_m134", 0, { smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 }),
-  weapon(5, 7, 5, "sg_winchester1887", 0),
-  weapon(6, 8, 6, "rl_rpg26", 0, { smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 }),
-  weapon(7, 10, 7, "sr_svd", 0, { krit: 8, smindam: 34, smaxdam: 48, mmindam: 38, mmaxdam: 54, lmindam: 42, lmaxdam: 60 })
-];
-
-const rebuiltShopWeaponCatalog = [
-  { id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0 },
-  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0 },
-  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
-
-  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38 },
-  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45 },
-  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42 },
-  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42 },
-  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108 },
-
-  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175 },
-  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210 },
-  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180 },
-  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132 },
-  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168 },
-
-  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270 },
-  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300 },
-
-  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11 },
-  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 36 },
-
-  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16 },
-  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30 },
-  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18 },
-  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9 },
-  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36 },
-
-  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100 },
-  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35 },
-  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 }
-];
-
-const originalReloadTimeMs = {
-  ohca_basebalbat: 0,
-  ohca_candy: 0,
-  ohca_candy2: 0,
-  hg_taurus: 2533,
-  hg_usp: 2667,
-  hg_desertb01: 2533,
-  hg_desert: 2533,
-  hg_glockb01_s: 2667,
-  mg_assaultrifle02: 3000,
-  mg_ump45vkks_o: 3000,
-  mg_aug1_o: 3000,
-  mg_aug5_o: 3000,
-  mg_aug4_o: 3000,
-  gg_fnmag: 4000,
-  gg_m134b03: 800,
-  sg_remington: 3864,
-  sg_spas: 3500,
-  rl_m202a1: 5067,
-  rl_rpg7b02: 2967,
-  gl_milkor: 6667,
-  gl_milkor_a: 6667,
-  gl_grenadelauncher03: 4000,
-  sr_vintorez: 3167,
-  sr_sniperrifle03: 3667,
-  sr_wildcat1: 2333,
-  sr_wildcat2: 2333
+const MAP_PICKUP_POINTS = {
+  arena_3lvl: [
+    // Extracted from mapsnew/Arena_3lvl_unity3d/Assets/Arena_3lvl.unity.
+    { id: 31001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 118.98, y: -62.738, z: 305.555, rotY: 0 },
+    { id: 31002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -63.127, y: -62.913, z: 271.435, rotY: 0 },
+    { id: 31003, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 47.443, y: 7.054, z: 329.094, rotY: 0 },
+    { id: 31004, type: ITEM_TYPES.ARMOR, subType: 2, value: 0, x: 28.608, y: -17.373, z: 243.007, rotY: 0 },
+    { id: 31005, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: -62.958, y: -62.866, z: 295.271, rotY: 0 },
+    { id: 31006, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 118.812, y: -63.121, z: 282.525, rotY: 0 },
+    { id: 31007, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 45.275, y: 7.14, z: 249.416, rotY: 0 },
+  ],
+  zombi: [
+    // Zombi.unity is binary; local pickup points are under POINTS_RESCALE offset -62.951/119.348/-15.745.
+    { id: 32001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 66.648, y: 5.781, z: 266.642, rotY: 270 },
+    { id: 32002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 147.027, y: -16.897, z: 187.417, rotY: 270 },
+    { id: 32003, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -28.712, y: -16.897, z: 287.682, rotY: 270 },
+    { id: 32004, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 60.257, y: -16.897, z: 266.146, rotY: 270 },
+    { id: 32005, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 66.648, y: -16.897, z: 135.84, rotY: 270 },
+    { id: 32006, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 68.092, y: -16.897, z: 411.423, rotY: 270 },
+    { id: 32007, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 115.696, y: -17.238, z: 264.746, rotY: 90 },
+  ],
+  zombi_2: [
+    // Extracted from mapsnew/Zombi_2_unity3d/Assets/Zombi_2.unity.
+    { id: 33001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 33.446, y: -15.755, z: 202.595, rotY: 0 },
+    { id: 33002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -63.127, y: -62.913, z: 285.293, rotY: 180 },
+    { id: 33003, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 47.443, y: -15.804, z: 329.094, rotY: 0 },
+    { id: 33004, type: ITEM_TYPES.ARMOR, subType: 2, value: 0, x: 1.823, y: -14.834, z: 343.083, rotY: 0 },
+    { id: 33005, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: -62.958, y: -62.866, z: 295.271, rotY: 180 },
+    { id: 33006, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 23.053, y: -16.17, z: 202.715, rotY: 0 },
+    { id: 33007, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 88.024, y: -64.147, z: 216.508, rotY: 0 },
+    { id: 33008, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 65.427, y: -14.893, z: 253.181, rotY: 90 },
+    { id: 33009, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 55.449, y: -14.846, z: 253.35, rotY: 90 },
+    { id: 33010, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 53.452, y: -15.804, z: 245.798, rotY: 0 },
+  ],
+  arenaring: [
+    // Extracted from mapsnew/ArenaRing_unity3d/Assets/ArenaRing.unity.
+    { id: 34001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 28.645, y: -62.718, z: 296.427, rotY: 0 },
+    { id: 34002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -123.594, y: -44.142, z: 289.183, rotY: 0 },
+    { id: 34003, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 171.784, y: -43.864, z: 303.327, rotY: 180 },
+    { id: 34004, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 31.43, y: 2.999, z: 302.329, rotY: 0 },
+    { id: 34005, type: ITEM_TYPES.ARMOR, subType: 2, value: 0, x: 28.786, y: -62.142, z: 300.642, rotY: 0 },
+    { id: 34006, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: -123.522, y: -43.838, z: 296.811, rotY: 180 },
+    { id: 34007, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 171.712, y: -43.86, z: 295.462, rotY: 0 },
+    { id: 34008, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 31.603, y: 2.766, z: 289.057, rotY: 0 },
+  ],
+  bit_map: [
+    // World positions from mapsnew/Bit_map_unity3d/Assets/Bit_map.unity.bak-large-fileids.
+    { id: 35001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 190.864, y: -14.332, z: 309.846, rotY: 0 },
+    { id: 35002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -89.571, y: -14.26, z: 308.956, rotY: 180 },
+    { id: 35003, type: ITEM_TYPES.ARMOR, subType: 1, value: 0, x: 55.921, y: 0.834, z: 222.08, rotY: 90 },
+    { id: 35004, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: -98.531, y: -14.472, z: 308.47, rotY: 180 },
+    { id: 35005, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 199.764, y: -14.76, z: 309.077, rotY: 0 },
+    { id: 35006, type: ITEM_TYPES.ARMOR, subType: 2, value: 0, x: 45.025, y: -0.265, z: 330.98, rotY: 0 },
+    { id: 35007, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 62.553, y: 0.035, z: 222.734, rotY: 90 },
+    { id: 35008, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 48.951, y: 0.175, z: 221.892, rotY: 90 },
+  ],
+  legoturnament: [
+    // World positions from mapsnew/LegoTurnament_unity3d/Assets/LegoTurnament.unity.bak-large-fileids.
+    { id: 36001, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 6.126, y: 36.396, z: 159.793, rotY: 90 },
+    { id: 36002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 2.755, y: 22.209, z: 161.192, rotY: 270 },
+  ],
+  inferno: [
+    // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids.
+    { id: 37001, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 303.875, y: -52.652, z: 215.451, rotY: 270 },
+    { id: 37002, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: -92.621, y: -38.102, z: 44.399, rotY: 90 },
+    { id: 37003, type: ITEM_TYPES.ARMOR, subType: 2, value: 0, x: -124.063, y: -18.953, z: 302.018, rotY: 0 },
+    { id: 37004, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 149.435, y: -37.244, z: 141.801, rotY: 180 },
+    { id: 37005, type: ITEM_TYPES.ARMOR, subType: 1, value: 0, x: 149.623, y: -36.25, z: 134.831, rotY: 180 },
+    { id: 37006, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 303.106, y: -52.318, z: 206.551, rotY: 270 },
+    { id: 37007, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -93.107, y: -37.914, z: 53.359, rotY: 90 },
+    { id: 37008, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 150.277, y: -36.871, z: 128.199, rotY: 180 },
+  ],
 };
-
-// Manual restore balance: no original damage table is available, so these
-// values follow the recovered client formulas plus the gameplay hierarchy.
-const canonicalShopWeaponStats = {
-  ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
-  ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
-
-  hg_taurus: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
-  hg_usp: { rap: 205, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
-  hg_desertb01: { rap: 280, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
-  hg_desert: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
-  hg_glockb01_s: { rap: 150, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
-
-  mg_assaultrifle02: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26 },
-  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 30, ammo_tot: 180, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_aug5_o: { rap: 135, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
-  mg_aug4_o: { rap: 130, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
-
-  gg_fnmag: { rap: 125, rt: 4000, lt: 1100, vel: 100, rad: 14, ang: 0, dev: 14, krit: 6, ammo: 90, ammo_tot: 270, smindam: 17, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 19 },
-  gg_m134b03: { rap: 115, rt: 800, lt: 1100, vel: 100, rad: 14, ang: 0, dev: 20, krit: 4, ammo: 100, ammo_tot: 300, smindam: 15, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 10, lmaxdam: 17 },
-
-  sg_remington: {
-    desc: "Хороший или плохой советчик - решать вам.",
-    desca: "- Наносит периодический урон типа \"кровотечение\"",
-    rap: 660,
-    rt: 3864,
-    lt: 900,
-    vel: 100,
-    rad: 18,
-    ang: 0,
-    dev: 26,
-    krit: 11,
-    ammo: 3,
-    ammo_tot: 11,
-    smindam: 58,
-    smaxdam: 86,
-    mmindam: 34,
-    mmaxdam: 52,
-    lmindam: 10,
-    lmaxdam: 18,
-    wsp: 15,
-    shake: 1
+const MAP_SPAWN_POINTS = {
+  arena_3lvl: {
+    // Extracted from Arena_3lvl.unity3d -> POINTS_RESCALE -> Respawn_T0/T1/T2.
+    dm: [
+      { x: -71.27, y: 5.0, z: 277.35, rotY: 90 },
+      { x: 106.68, y: -13.63, z: 282.31, rotY: 270 },
+      { x: 111.88, y: 5.25, z: 295.54, rotY: 270 },
+      { x: -45.8, y: -13.89, z: 274.64, rotY: 90 },
+      { x: 125.09, y: -40.91, z: 305.86, rotY: 270 },
+      { x: -66.15, y: -41.17, z: 271.57, rotY: 90 },
+      { x: 125.6, y: -64.1, z: 294.95, rotY: 270 },
+      { x: -70.1, y: -64.1, z: 283.02, rotY: 90 },
+    ],
+    team1: [
+      { x: -74.19, y: -64.1, z: 285.35, rotY: 90 },
+      { x: -74.19, y: -64.1, z: 278.72, rotY: 90 },
+      { x: -70.84, y: -64.1, z: 290.2, rotY: 90 },
+      { x: -74.19, y: -64.1, z: 298.13, rotY: 90 },
+      { x: -70.84, y: -64.1, z: 277.28, rotY: 90 },
+      { x: -74.19, y: -64.1, z: 271.47, rotY: 90 },
+      { x: -74.19, y: -64.1, z: 292.17, rotY: 90 },
+    ],
+    team2: [
+      { x: 127.92, y: -64.1, z: 280.28, rotY: 270 },
+      { x: 127.92, y: -64.1, z: 285.87, rotY: 270 },
+      { x: 127.92, y: -64.1, z: 291.36, rotY: 270 },
+      { x: 127.92, y: -64.1, z: 304.04, rotY: 270 },
+      { x: 122.84, y: -64.1, z: 299.84, rotY: 270 },
+      { x: 127.92, y: -64.1, z: 297.92, rotY: 270 },
+      { x: 122.84, y: -64.1, z: 282.49, rotY: 270 },
+      { x: 122.84, y: -64.1, z: 292.28, rotY: 270 },
+    ],
   },
-  sg_spas: { rap: 650, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
-
-  rl_m202a1: {
-    desc: "Карающая длань Четырех Вождей Красного Фронта.",
-    desca: "Четырехзарядная ракетница",
-    rap: 920,
-    rt: 5067,
-    lt: 1200,
-    vel: 60,
-    rad: 30,
-    ang: 0,
-    dev: 7,
-    krit: 3,
-    ammo: 4,
-    ammo_tot: 16,
-    smindam: 45,
-    smaxdam: 70,
-    mmindam: 34,
-    mmaxdam: 54,
-    lmindam: 22,
-    lmaxdam: 38,
-    wsp: -15,
-    launch: 1,
-    shake: 1
+  zombi_2: {
+    // Extracted from mapsnew/Zombi_2_unity3d/MapData/Zombi_2.points.json.
+    // The active export only has a recovered playable Respawn_T0 layer.
+    dm: [
+      { x: -70.033, y: -15.715, z: 277.352, rotY: 0 },
+      { x: 65.904, y: -15.945, z: 214.208, rotY: 0 },
+      { x: 52.837, y: -64.671, z: 323.296, rotY: 270 },
+      { x: -59.761, y: -64.608, z: 338.49, rotY: 105 },
+      { x: 34.605, y: -13.893, z: 337.558, rotY: 30 },
+      { x: 29.135, y: -64.391, z: 219.293, rotY: 270 },
+      { x: -51.11, y: -64.992, z: 216.989, rotY: 0 },
+      { x: -69.938, y: -64.096, z: 244.364, rotY: 90 },
+    ],
   },
-  gl_milkor: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 30, smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48 },
-  gl_grenadelauncher03: { rap: 880, rt: 4000, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 5, krit: 4, ammo: 3, ammo_tot: 18, smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62 },
-  rl_rpg7b02: { rap: 900, rt: 2967, lt: 1150, vel: 65, rad: 28, ang: 0, dev: 6, krit: 4, ammo: 1, ammo_tot: 9, smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78 },
-  gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50 },
-
-  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 42, smaxdam: 58, mmindam: 48, mmaxdam: 66, lmindam: 54, lmaxdam: 74 },
-  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 54, smaxdam: 72, mmindam: 62, mmaxdam: 82, lmindam: 70, lmaxdam: 88 },
-  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 50, smaxdam: 68, mmindam: 58, mmaxdam: 78, lmindam: 66, lmaxdam: 84 },
-  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 46, smaxdam: 62, mmindam: 54, mmaxdam: 72, lmindam: 62, lmaxdam: 82 }
-};
-
-function withCanonicalShopWeaponStats(item) {
-  const key = String(item?.sname || item?.sn || "").toLowerCase();
-  const stats = canonicalShopWeaponStats[key] || {};
-  const reloadTime = originalReloadTimeMs[key];
-  return reloadTime === undefined ? { ...item, ...stats } : { ...item, ...stats, rt: reloadTime };
-}
-
-// The live weapon shop is the vetted resources.assets subset only.
-const shopWeaponCatalog = rebuiltShopWeaponCatalog.map(withCanonicalShopWeaponStats);
-
-function weaponTypeForSname(sname) {
-  const prefix = String(sname || "").toLowerCase().split("_")[0];
-  const types = {
-    ohca: 1,
-    thca: 2,
-    hg: 3,
-    mg: 4,
-    fl: 5,
-    gg: 6,
-    sg: 7,
-    rl: 8,
-    gl: 9,
-    sr: 10,
-    sng: 11,
-    bl: 15
-  };
-  return types[prefix] || 0;
-}
-
-function shopWeaponExtra(item) {
-  const extra = {};
-  for (const key of [
-    "name",
-    "desc",
-    "desca",
-    "ndesca",
-    "stRa",
-    "stDi",
-    "stDa",
-    "ammo",
-    "ammo_tot",
-    "rap",
-    "rt",
-    "lt",
-    "vel",
-    "rad",
-    "ang",
-    "dev",
-    "krit",
-    "smindam",
-    "smaxdam",
-    "mmindam",
-    "mmaxdam",
-    "lmindam",
-    "lmaxdam",
-    "wsp",
-    "sp",
-    "speed",
-    "launch",
-    "shake"
-  ]) {
-    if (item[key] !== undefined) extra[key] = item[key];
-  }
-  return extra;
-}
-
-const shopWeapons = shopWeaponCatalog.map((item) =>
-  weapon(item.id, weaponTypeForSname(item.sname), item.slot, item.sname, item.price ?? SHOP_PRICE, shopWeaponExtra(item))
-);
-
-function numericField(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function scaledStat(value, multiplier, fallback = 0) {
-  return Math.max(0, Math.round(numericField(value, fallback) * multiplier));
-}
-
-function stableWorkshopPrice(weaponId) {
-  const id = Math.max(0, Math.trunc(numericField(weaponId, 0)));
-  return 10 + ((id * 17 + 11) % 31);
-}
-
-const workshopUpgradeTextFallbacks = {
-  10: "Повышенный шанс крит. урона",
-  43: "Увеличенный общий боезапас",
-  44: "Увеличенный урон\nУвеличенная длительность замедления\nУвеличенный общий боезапас",
-  45: "Увеличенный общий боезапас\nУвеличенный урон",
-  53: "Увеличенный урон на средней и дальней дист.\nПовышает скорость передвижения\nУвеличенный общий боезапас\nУскоренная перезарядка",
-  59: "Увеличенный общий боезапас\nУвеличенный шанс крит. урона",
-  67: "Увеличенный урон на всех дист.\nУвеличенный шанс крит. урона",
-  68: "Повышает скорость передвижения\nУвеличенный общий боезапас\nНаносит периодический урон типа кровотечение",
-  69: "Увеличенный урон на средней и дальней дист.\nПовышает скорость передвижения\nУвеличенный общий боезапас",
-  71: "Повышенный шанс крит. урона\nУвеличенный радиус поражения",
-  72: "Повышенный шанс крит. урона\nУвеличенный урон",
-  73: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nПовышает скорость передвижения",
-  74: "Повышенный шанс крит. урона\nУвеличенный боезапас\nПовышает скорость передвижения",
-  75: "Повышенный шанс крит. урона\nУвеличенный боезапас\nПовышает скорость передвижения",
-  76: "Ускоренная перезарядка\nУвеличенные скорость передвижения и боезапас\nБолее продолжительный урон от яда",
-  79: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличивает скорость передвижения",
-  80: "Повышенный шанс крит. урона\nУвеличивает скорость передвижения\nУвеличенная обойма и боезапас\nУвеличенный урон от огня",
-  101: "Увеличенный урон на средней и дальней дистанции\nУвеличивает скорость передвижения\nУвеличенная обойма и боезапас\nУскоренная перезарядка",
-  103: "Повышенный шанс крит. урона\nУвеличенный боезапас\nУвеличенный урон на средней и дальней дистанции",
-  104: "Повышенный шанс крит. урона\nУвеличенная обойма\nВремя поражения огнем увеличено",
-  105: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения\nНаносит периодический урон типа яд",
-  106: "Повышенный шанс крит. урона\nУвеличенный урон на ближней и средней дистанции\nУвеличенный общий боезапас\nУвеличенный радиус поражения",
-  107: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения",
-  108: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличенная скорострельность\nУвеличенный урон на средней дистанции",
-  109: "Повышенный шанс крит. урона\nУвеличенный общий боезапас\nУвеличивает скорость передвижения\nУвеличенный урон на ближней дистанции\nУвеличенный урон типа кровотечение",
-  110: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения"
-};
-
-function workshopUpgradeContract(weaponId) {
-  const text = String(
-    wearTextTranslations.get(`w_${weaponId}_descupgrade`)
-    || workshopUpgradeTextFallbacks[weaponId]
-    || ""
-  ).toLowerCase();
-  const damageAll = /увеличен(?:ный|ная|ное|ные|нный)\s+урон(?:\s+на\s+всех\s+дист|\s+на\s+всех\s+дистанц)?(?:\.|$|\n)/m.test(text)
-    && !/урон\s+от|урон\s+типа/.test(text);
-  const damageShort = damageAll || /урон\s+на\s+ближн/.test(text);
-  const damageMedium = damageAll || /урон\s+на\s+(?:средн|ближней\s+и\s+средн)/.test(text);
-  const damageLong = damageAll || /урон\s+на\s+(?:дальн|средн.*и\s+дальн|ближн.*и\s+дальн)/.test(text);
-  const impactType = /тип[а]?\s*[\"«]?огонь|урон\s+от\s+огн|горени|поражения\s+огнем/.test(text) ? "fire"
-    : (/тип[а]?\s*[\"«]?кров|кровотеч/.test(text) ? "blood"
-      : (/тип[а]?\s*[\"«]?яд|урон\s+от\s+яда/.test(text) ? "poison"
-        : (/замороз|замедлен/.test(text) ? "frost" : "")));
-  return {
-    text,
-    damageShort,
-    damageMedium,
-    damageLong,
-    crit: /крит/.test(text),
-    magazine: /обойм/.test(text),
-    reserve: /боезапас/.test(text),
-    rapidity: /скорострель|скорость\s+атаки/.test(text),
-    accuracy: /кучност|разброс/.test(text),
-    reload: /перезаряд/.test(text),
-    radius: /радиус\s+поражения/.test(text),
-    speed: /скорост[ьи]\s+передвижения/.test(text),
-    impactType,
-    impactDamage: /урон\s+от\s+(?:огня|яда|замороз)|урон\s+типа|урон\s+от\s+горени|длительность\s+и\s+урон/.test(text),
-    impactDuration: /длительн|продолжительн|время\s+поражения/.test(text)
-  };
-}
-
-function upgradedWeaponItem(item) {
-  const base = clone(item);
-  const ammo = numericField(base.ammo, 0);
-  const ammoTotal = numericField(base.ammo_tot, 0);
-  const weaponId = numericField(base.w_id ?? base.id, 0);
-  const contract = workshopUpgradeContract(weaponId);
-  const upgraded = {
-    ...base,
-    u_id: 5000 + weaponId,
-    stRa: Math.min(5, numericField(base.stRa, 1) + 1),
-    stDi: Math.min(5, numericField(base.stDi, 1) + 1),
-    stDa: Math.min(5, numericField(base.stDa, 1) + 1),
-    sc: timedPermanentCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
-    workshopImpactType: contract.impactType,
-    workshopImpactDamagePercent: contract.impactDamage ? 25 : 0,
-    workshopImpactTicksBonus: contract.impactDuration ? 2 : 0
-  };
-  if (contract.rapidity) upgraded.rap = Math.max(60, scaledStat(base.rap, 0.9, 100));
-  if (contract.accuracy) upgraded.dev = Math.max(0, scaledStat(base.dev, 0.9, 0));
-  if (contract.crit) upgraded.krit = numericField(base.krit, 0) + 2;
-  if (contract.reload) upgraded.rt = Math.max(0, scaledStat(base.rt, 0.9, 0));
-  if (contract.radius) upgraded.rad = Math.max(1, scaledStat(base.rad, 1.1, 1));
-  if (contract.speed) upgraded.wsp = numericField(base.wsp ?? base.speed, 0) + 5;
-  if (contract.magazine && ammo > 0) upgraded.ammo = Math.max(ammo + 1, Math.round(ammo * 1.1));
-  if (contract.reserve && ammoTotal > 0) upgraded.ammo_tot = Math.max(upgraded.ammo ?? ammo, Math.round(ammoTotal * 1.1));
-  for (const [enabled, minKey, maxKey] of [
-    [contract.damageShort, "smindam", "smaxdam"],
-    [contract.damageMedium, "mmindam", "mmaxdam"],
-    [contract.damageLong, "lmindam", "lmaxdam"]
-  ]) {
-    if (!enabled) continue;
-    upgraded[minKey] = scaledStat(base[minKey], 1.1, 0);
-    upgraded[maxKey] = Math.max(upgraded[minKey], scaledStat(base[maxKey], 1.1, 0));
-  }
-  return upgraded;
-}
-
-let shopWeaponUpgrades = [];
-let shopWeaponUpgradesById = new Map();
-
-const wearSlotIds = {
-  Hats: 1,
-  Masks: 2,
-  Gloves: 3,
-  Shirts: 4,
-  Pants: 5,
-  Boots: 6,
-  Backpacks: 7,
-  Others: 8,
-  Heads: 9
-};
-
-function wearText(name, desc, desca) {
-  return { name, desc, desca };
-}
-
-function decodeTextAssetLine(line) {
-  const firstQuote = String(line || "").indexOf("\"");
-  const lastQuote = String(line || "").lastIndexOf("\"");
-  if (firstQuote < 0 || lastQuote <= firstQuote) return "";
-  return line
-    .slice(firstQuote + 1, lastQuote)
-    .replace(/\\n/g, "\n")
-    .replace(/\\"/g, "\"")
-    .replace(/\\\\/g, "\\");
-}
-
-function loadTextAssetTranslations() {
-  const candidates = [
-    process.env.WEAR_TEXT_ASSET_PATH,
-    path.join(process.cwd(), "resources_textures_export", "TextAsset", "default.txt"),
-    path.join(process.cwd(), "..", "resources_textures_export", "TextAsset", "default.txt"),
-    path.join(API_DIR, "..", "resources_textures_export", "TextAsset", "default.txt"),
-    path.join(API_DIR, "data", "default.txt")
-  ].filter(Boolean);
-
-  const seen = new Set();
-  for (const candidate of candidates) {
-    const filePath = path.resolve(candidate);
-    if (seen.has(filePath)) continue;
-    seen.add(filePath);
-    if (!fs.existsSync(filePath)) continue;
-
-    const translations = new Map();
-    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
-    for (let index = 0; index < lines.length - 1; index += 1) {
-      if (!lines[index].startsWith("msgid ")) continue;
-      const id = decodeTextAssetLine(lines[index]);
-      let valueIndex = index + 1;
-      while (valueIndex < lines.length && !lines[valueIndex].startsWith("msgstr ")) {
-        valueIndex += 1;
-      }
-      if (valueIndex < lines.length) {
-        translations.set(id, decodeTextAssetLine(lines[valueIndex]));
-      }
-    }
-    console.log(`[wear-text] loaded path=${filePath} keys=${translations.size}`);
-    return translations;
-  }
-
-  console.log("[wear-text] default.txt not found; using built-in wear text fallbacks only");
-  return new Map();
-}
-
-const wearTextTranslations = loadTextAssetTranslations();
-shopWeaponUpgrades = shopWeapons.map((item) => upgradedWeaponItem(item));
-shopWeaponUpgradesById = new Map(shopWeaponUpgrades.map((item) => [Number(item.u_id), item]));
-
-const wearTextOverrides = {
-  "Hats:biker": wearText("Скулкеп", "Чтобы пугать снайпера, смотрящего в прицел.", "+5% защита от снайперок\n+5% защита от пистолетов\n+10% защита от огнеметов"),
-  "Shirts:biker": wearText("Байкер", "Для летящих вдаль странников.", "+10% защита от оружия ближнего боя\n+5% защита от снайперок\n+20% защита от дробовиков\n+5% защита от пистолетов\n+20 к броне"),
-  "Pants:jeansB02": wearText("Келвины", "Стильно смотрятся на железном коне.", "+5% защита от пистолетов\n+10% защита от дробовиков\n+25% защита от огнеметов\n+5% защита от оружия ближнего боя"),
-  "Gloves:biker": wearText("Железохук", "Реально свалить даже бизона.", "+5% защита от пулеметов\n+2% защита от автоматов\n+5% защита от пистолетов\n+5% защита от оружия ближнего боя"),
-  "Boots:sneakV201": wearText("Чопкроссы", "С ними можно затормозить байк одной лишь ногой.", "+5% защита от оружия ближнего боя\n+10% защита от пистолетов\n+8% к скорости\nБольшой бонус к прыжку после выстрела из дробовика"),
-
-  "Hats:business": wearText("Шляпа Дона Корлеоне", "Ты просишь контрабаксы, но делаешь это без уважения.", "+3% защита от автоматов\n+5% защита от пистолетов\n+1% к здоровью"),
-  "Masks:businessgoogles": wearText("Скайфолы", "Те самые очки Джеймса Бонда.", "+5% защита от пулеметов\n+5% защита от пистолетов\n+6% защита от дробовиков"),
-  "Shirts:business": wearText("Смокинговский", "Смокинг для агентов Контра Сити.", "+7% защита от пистолетов\n+15% защита от автоматов\n+20 к броне\n+3% к здоровью"),
-  "Pants:business": wearText("Бондобрюки", "Слишком деловой скилл.", "+10% защита от автоматов\n+5% защита от пулеметов\n+5% защита от ракетниц"),
-  "Gloves:business": wearText("Перчатки Гудини", "Много секретов и отмычек хранят эти перчатки.", "+2% защита от дробовиков\n+5% защита от пистолетов\n+5% защита от оружия ближнего боя"),
-  "Boots:business": wearText("Подпольники", "", "+5% защита от снайперок\n+3% защита от пистолетов\n+2% защита от дробовиков\nБольшой бонус к прыжку после выстрела из дробовика"),
-  "Boots:boot02": wearText("Танжеры", "Идеальны для жарких спецопераций.", "+3% защита от пистолетов\n+3% к скорости\nБольшой бонус к прыжку после выстрела из дробовика"),
-  "Boots:sneakV2B03": wearText("Крикеты", "Специально для элитной игры на траве.", "+2% защита от автоматов\n+1% к скорости передвижения"),
-  "Boots:sneakV2B04": wearText("Дуплекскроссы", "Для безопасного преодоления программных ловушек.", "+3% защита от автоматов\n+1% к скорости"),
-  "Boots:anarch": wearText("Кедоны", "Для свежего контраста с пыльной дорогой.", "Большой бонус к прыжку после выстрела из дробовика\n+5% к скорости"),
-  "Boots:zadira": wearText("Кростильники", "Можно даже наподдать, пока не видит директор.", "+4% защита от автоматов\n+2% защита от оружия ближнего боя\n+1% к скорости\nБольшой бонус к прыжку после выстрела из дробовика"),
-  "Boots:prizrak": wearText("Бесшуберцы", "Очень тихая поступь обеспечена.", "+1% защита от снайперок\n+3% к скорости\nБольшой бонус к прыжку после выстрела из дробовика"),
-
-  "Hats:stalker": wearText("Капюшонка", "Укрывает от дождя вражеских пуль.", "+5% защита от снайперок\n+5% защита от дробовиков\n+2% к здоровью"),
-  "Masks:stalkergasmask": wearText("Антирад", "Секретная разработка федерации.", "+5% защита от снайперок\n+5% защита от ракетниц\n+1% к здоровью"),
-  "Shirts:stalker": wearText("Разрушитель", "Артефакт прямиком из Чернобыля.", "+15% защита от снайперок\n+4% защита от автоматов\n+5% защита от огнеметов\n+20 к броне"),
-  "Pants:stalker": wearText("Милитарники", "Кевларовые штаны. Не только греют, но и защищают.", "+15% защита от снайперок\n+10% защита от дробовиков\n+5% защита от огнеметов"),
-  "Gloves:stalker": wearText("Нитриловые перчи", "Защита от любого вида лезвия.", "+4% защита от автоматов\n+5% защита от пистолетов\n+5% защита от дробовиков"),
-  "Boots:stalker": wearText("Странники", "", "+10% защита от ракетниц\n+10% защита от огнеметов\n+2% к скорости\nБольшой бонус к прыжку после выстрела из дробовика"),
-
-  "Heads:thanos": wearText("Камень Старцева", "Данный камень испытывает голод, который можно уталить только душами поверженных врагов.", "+9% защита от автоматов\n+5% защита от пистолетов\n+8% защита от ракетниц\n+3% к здоровью"),
-  "Masks:thanos": wearText("Камень Кудряшова", "Полная власть над временем - можно увидеть все возможные исходы битвы.", "+5% защита от оружия ближнего боя\n+7% защита от ракетниц\n+5% защита от дробовиков\n+20% защита от снайперки Анаконда"),
-  "Shirts:thanos": wearText("Камень Легендарного", "Камень, который позволяет читать мысли и овладевать разумом соперников.", "+10% защита от автоматов\n+10% защита от ракетниц\n+10% защита от гранатометов\n+4% к здоровью"),
-  "Pants:thanos": wearText("Камень Комиссара", "Оглянись вокруг - ты и вправду думаешь, что все это реально?", "+9% защита от автоматов\n+15% защита от оружия ближнего боя\n+5% защита от пистолетов\n+10% защита от ракетницы Троллебузина"),
-  "Gloves:thanos": wearText("Перчатка Зонга", "Одним щелчком ты можешь превратить половину своих врагов в прах.", "+10% защита от оружия ближнего боя\n+15% защита от снайперок\n+10% защита от ракетниц\n+20 к броне"),
-  "Boots:thanos": wearText("Камень Андроита", "Придает силы любому оружию, взятому в руки.", "+5% защита от пулеметов\n+5% защита от пистолетов\n+10% защита от гранатометов\nБольшой бонус к прыжку после выстрела из дробовика"),
-  "Backpacks:thanos": wearText("Камень Зната", "Враг даже не подозревает, что ты уже стоишь у него за спиной.", "+10% защита от пулеметов\n+15% защита от оружия ближнего боя\n+10% защита от снайперок\n+15% защита от гранатомета Гранатин")
-};
-
-const BLUE_SOLDIER_SLIP99_SHOTGUN_JUMP_BONUS = "+40% к прыжку после выстрела из дробовика";
-
-function appendWearBonusText(text, bonus) {
-  const current = String(text || "").trim();
-  if (!bonus || current.includes(bonus)) return current;
-  return current ? `${current}\n${bonus}` : bonus;
-}
-
-function wearTextFor(slot, sname) {
-  const key = `${slot || ""}:${String(sname || "")}`;
-  const prefix = `wear_${slot}_${sname}`;
-  const localized = {};
-  for (const field of ["name", "desc", "desca"]) {
-    const value = wearTextTranslations.get(`${prefix}_${field}`);
-    if (typeof value === "string") localized[field] = value;
-  }
-  const result = { ...(wearTextOverrides[key] || {}), ...localized };
-  if (key === "Boots:slip99") {
-    result.desca = appendWearBonusText(result.desca, BLUE_SOLDIER_SLIP99_SHOTGUN_JUMP_BONUS);
-  }
-  return result;
-}
-
-const shopWearCatalog = {
-  Hats: ["hat01", "hat02", "hat03", "helm02", "cap01", "cap02", "helm01", "vietnam", "pilothelm", "budenka", "ushmil", "ushanka", "party02", "party01", "english", "indiana02", "indiana01", "indiana03", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2"],
-  Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos"],
-  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022"],
-  Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl02", "singl03", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2"],
-  Pants: ["jeans01", "jeans02", "pant01", "pant02", "pant03", "sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032"],
-  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99"],
-  Backpacks: ["parr01", "back01", "back02", "guit01", "guit02", "turt01", "octopus", "arrows", "darts", "rocket01", "rocket02", "rec", "shield", "extinguisher", "sarcophagus", "tomb", "Morte", "Raven", "Scarecrow", "santa", "santa2", "Snowboard", "VampireBat", "infernalRaven", "frankyOctopus", "snake01", "thanos", "rec2"],
-  Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka"],
-  Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
-};
-
-const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
-  names.map((sname, index) => wear(10000 + wearSlotIds[slot] * 1000 + index + 1, wearSlotIds[slot], sname, SHOP_PRICE, slot))
-);
-
-const shopWears = legacyShopWears;
-
-function findWearCatalogItem(slot, sname) {
-  const wt = wearSlotIds[slot];
-  const item = shopWears.find((wearItem) => Number(wearItem.wt) === Number(wt) && String(wearItem.sname) === String(sname));
-  if (!item) {
-    throw new Error(`Wear catalog item not found: ${slot}:${sname}`);
-  }
-  return item;
-}
-
-function assemblageWear(slot, sname) {
-  const item = findWearCatalogItem(slot, sname);
-  return {
-    it: 3,
-    id: item.id,
-    w_id: item.w_id,
-    wt: item.wt,
-    sname: item.sname,
-    sn: item.sn,
-    name: item.name,
-    desc: item.desc,
-    desca: item.desca,
-    nlvl: item.nlvl,
-    iS: item.iS,
-    sc: item.sc
-  };
-}
-
-const assemblageDefinitions = [
-  {
-    id: 32,
-    name: "Байкер",
-    desca: "+10% защиты от дробовиков\n+5% защиты от снайперок\n+5% защиты от ракетниц\n+10% защиты от огнеметов\n+5% защиты от гранатометов\n+20% защиты от оружия ближнего боя\n+15% к здоровью\n+2% к скорости\nурон снайперок на средней дистанции +2\nурон автоматов на дальней дистанции +4",
-    ndesca: "",
-    items: [
-      ["Hats", "biker"],
-      ["Shirts", "biker"],
-      ["Pants", "jeansB02"],
-      ["Gloves", "biker"],
-      ["Boots", "sneakV201"]
-    ]
+  zombi: {
+    // Extracted from mapsnew/Zombi_unity3d/MapData/Zombi.points.json.
+    // Raw Respawn_T0 markers sit at y ~= -24 and were live-rejected as under-texture spawns.
+    // Use the exported playable layer until a better original infection split is recovered.
+    dm: [
+      { x: 80.077, y: 10.966, z: 193.052, rotY: 60 },
+      { x: 65.359, y: -18.278, z: 131.071, rotY: 180 },
+      { x: 49.396, y: -18.36, z: 122.169, rotY: 270 },
+      { x: 78.51, y: -18.322, z: 130.862, rotY: 180 },
+      { x: 102.706, y: -18.439, z: 121.382, rotY: 0 },
+      { x: 112.801, y: -18.501, z: 121.92, rotY: 0 },
+      { x: 64.701, y: -17.621, z: 104.472, rotY: 0 },
+      { x: 50.443, y: -18.509, z: 104.635, rotY: 0 },
+      { x: 62.765, y: -18.43, z: 417.897, rotY: 180 },
+      { x: -35.083, y: -18.451, z: 314.706, rotY: 90 },
+      { x: 169.289, y: -18.284, z: 186.146, rotY: 270 },
+      { x: 82.401, y: -18.284, z: 119.729, rotY: 270 },
+      { x: -49.385, y: 17.041, z: 265.592, rotY: 90 },
+      { x: 37.764, y: 3.852, z: 261.716, rotY: 90 },
+      { x: 182.13, y: -18.398, z: 244.876, rotY: 270 },
+      { x: 107.399, y: -18.43, z: 124.384, rotY: 0 },
+      { x: 88.996, y: 10.842, z: 340.641, rotY: 180 },
+      { x: 3.285, y: -18.284, z: 225.055, rotY: 45 },
+    ],
   },
-  {
-    id: 36,
-    name: "Шпион",
-    desca: "+10% защиты от пистолетов\n+10% защиты от снайперок\n+9% к здоровью\nурон пистолетов на средней дистанции +7\nурон автоматов на средней дистанции +6",
-    ndesca: "",
-    items: [
-      ["Hats", "business"],
-      ["Masks", "businessgoogles"],
-      ["Shirts", "business"],
-      ["Gloves", "business"],
-      ["Pants", "business"],
-      ["Boots", "business"]
-    ]
+  arenaring: {
+    // Extracted from mapsnew/ArenaRing_unity3d/MapData/ArenaRing.points.json.
+    // ArenaRing is exposed as Team Deathmatch-only, so Respawn_T1/T2 are the active teams.
+    dm: [
+      { x: -117.322, y: -45.841, z: 300.186, rotY: 90 },
+      { x: -117.301, y: -45.841, z: 292.934, rotY: 90 },
+      { x: -109.441, y: -45.841, z: 303.228, rotY: 90 },
+      { x: -109.436, y: -45.841, z: 296.624, rotY: 90 },
+      { x: -109.441, y: -45.841, z: 285.776, rotY: 90 },
+      { x: -117.608, y: -45.841, z: 286.514, rotY: 90 },
+      { x: -117.125, y: -45.841, z: 306.935, rotY: 90 },
+      { x: 165.452, y: -45.698, z: 286.104, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 291.698, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 297.183, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 309.869, rotY: 270 },
+      { x: 158.131, y: -45.698, z: 308.932, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 303.747, rotY: 270 },
+      { x: 158.131, y: -45.698, z: 286.673, rotY: 270 },
+      { x: 158.131, y: -45.698, z: 298.105, rotY: 270 },
+    ],
+    team1: [
+      { x: -117.322, y: -45.841, z: 300.186, rotY: 90 },
+      { x: -117.301, y: -45.841, z: 292.934, rotY: 90 },
+      { x: -109.441, y: -45.841, z: 303.228, rotY: 90 },
+      { x: -109.436, y: -45.841, z: 296.624, rotY: 90 },
+      { x: -109.441, y: -45.841, z: 285.776, rotY: 90 },
+      { x: -117.608, y: -45.841, z: 286.514, rotY: 90 },
+      { x: -117.125, y: -45.841, z: 306.935, rotY: 90 },
+    ],
+    team2: [
+      { x: 165.452, y: -45.698, z: 286.104, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 291.698, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 297.183, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 309.869, rotY: 270 },
+      { x: 158.131, y: -45.698, z: 308.932, rotY: 270 },
+      { x: 165.452, y: -45.698, z: 303.747, rotY: 270 },
+      { x: 158.131, y: -45.698, z: 286.673, rotY: 270 },
+      { x: 158.131, y: -45.698, z: 298.105, rotY: 270 },
+    ],
   },
-  {
-    id: 35,
-    name: "Сталкер",
-    desca: "+15% защиты от дробовиков\n+15% защиты от огнеметов\n+5% защиты от снайперок\n+5% защиты от оружия ближнего боя\n+12% к здоровью\nурон дробовиков на средней дистанции +6\nурон автоматов на дальней дистанции +5",
-    ndesca: "",
-    items: [
-      ["Hats", "stalker"],
-      ["Masks", "stalkergasmask"],
-      ["Shirts", "stalker"],
-      ["Pants", "stalker"],
-      ["Gloves", "stalker"],
-      ["Boots", "stalker"]
-    ]
+  bit_map: {
+    // World positions from mapsnew/Bit_map_unity3d/Assets/Bit_map.unity.bak-large-fileids -> POINTS_RESCALE -> Respawn_T0/T1/T2.
+    dm: [
+      { x: 178.244, y: -15.663, z: 335.71, rotY: 0 },
+      { x: 99.715, y: -15.689, z: 303.016, rotY: 270 },
+      { x: 2.74, y: -15.798, z: 292.658, rotY: 90 },
+      { x: 243.241, y: -15.742, z: 362.263, rotY: 270 },
+      { x: -74.119, y: -15.764, z: 334.666, rotY: 0 },
+      { x: 67.259, y: -14.925, z: 343.686, rotY: 180 },
+    ],
+    team1: [
+      { x: -130.996, y: -15.663, z: 353.131, rotY: 90 },
+      { x: -132.44, y: -15.663, z: 276.096, rotY: 90 },
+      { x: -139.332, y: -15.663, z: 360.048, rotY: 90 },
+      { x: -125.957, y: -15.663, z: 261.735, rotY: 0 },
+      { x: -132.44, y: -15.663, z: 289.272, rotY: 90 },
+      { x: -139.408, y: -15.498, z: 329.31, rotY: 90 },
+      { x: -138.4, y: -15.663, z: 303.144, rotY: 90 },
+    ],
+    team2: [
+      { x: 230.451, y: -15.663, z: 261.518, rotY: 0 },
+      { x: 235.946, y: -15.663, z: 299.687, rotY: 270 },
+      { x: 242.88, y: -15.663, z: 313.017, rotY: 270 },
+      { x: 242.874, y: -15.663, z: 328.896, rotY: 270 },
+      { x: 236.406, y: -15.663, z: 274.035, rotY: 270 },
+      { x: 242.891, y: -15.663, z: 348.459, rotY: 270 },
+      { x: 235.394, y: -15.663, z: 287.297, rotY: 270 },
+      { x: 242.281, y: -15.663, z: 361.541, rotY: 270 },
+    ],
   },
-  {
-    id: 37,
-    name: "конТрАНОС",
-    desca: "+10% защиты от автоматов\n+5% защиты от снайперок\n+4% защиты от пистолетов\n+15% защиты от оружия ближнего боя\n+15% защиты от ракетниц\n+15% защиты от гранатометов\n+5% защиты от дробовиков\n+4% к здоровью\nурон ракетниц на дальней дистанции +6\nурон автоматов на средней дистанции +3",
-    ndesca: "",
-    items: [
-      ["Heads", "thanos"],
-      ["Masks", "thanos"],
-      ["Shirts", "thanos"],
-      ["Pants", "thanos"],
-      ["Gloves", "thanos"],
-      ["Boots", "thanos"],
-      ["Backpacks", "thanos"]
-    ]
-  }
-];
-
-function assemblageTextFor(id) {
-  const prefix = `assemblage_${id}`;
-  return {
-    name: wearTextTranslations.get(`${prefix}_name`) || prefix,
-    desca: wearTextTranslations.get(`${prefix}_desca`) || "",
-    ndesca: wearTextTranslations.get(`${prefix}_ndesc`) || ""
-  };
-}
-
-const restoredAssemblageDefinitions = [
-  { id: 1, code: "peak_reaper", items: [["Hats", "tophat"], ["Masks", "skeleton_H"], ["Shirts", "skeleton"], ["Backpacks", "tomb"], ["Gloves", "skeleton"], ["Pants", "skeleton"], ["Boots", "skeleton"], ["Others", "coins"]] },
-  { id: 2, code: "raven", items: [["Masks", "gasmask01"], ["Hats", "tactichelm01"], ["Shirts", "tactic01"], ["Gloves", "tactical01"], ["Pants", "tactic01"], ["Boots", "tactical01"]] },
-  { id: 3, code: "vandal", items: [["Hats", "cap02"], ["Masks", "band01"], ["Gloves", "bint02"], ["Shirts", "hood04"], ["Pants", "sport03"], ["Boots", "sneak02"], ["Backpacks", "darts"], ["Others", "maz"]] },
-  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Backpacks", "rocket02"], ["Others", "cola01"], ["Heads", "brown04"]] },
-  { id: 7, code: "mummy", items: [["Hats", "pharaoh"], ["Shirts", "mummy"], ["Backpacks", "sarcophagus"], ["Gloves", "mummy"], ["Pants", "mummy"], ["Boots", "mummy"], ["Masks", "mummy_H"], ["Others", "skrab"]] },
-  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Gloves", "clock02"]] },
-  { id: 9, code: "dead_moroz", items: [["Hats", "santa"], ["Masks", "santa"], ["Shirts", "santa"], ["Backpacks", "santa"], ["Gloves", "santa"], ["Pants", "santa"], ["Boots", "santa"], ["Others", "santa"]] },
-  { id: 10, code: "vdv", items: [["Hats", "beret03"], ["Shirts", "trooper"], ["Masks", "aviaglass"], ["Pants", "trooper"]] },
-  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Shirts", "tactic04"], ["Gloves", "tactical02"], ["Pants", "tactic04"]] },
-  { id: 12, code: "invader", items: [["Shirts", "tactic03"], ["Pants", "tactic03"], ["Boots", "boot02"], ["Masks", "googB02"], ["Hats", "beret01"]] },
-  { id: 14, code: "olympian", items: [["Hats", "Olympic"], ["Masks", "SnowGoggles"], ["Shirts", "hoodOlimpic"], ["Backpacks", "Snowboard"], ["Gloves", "Olympic"], ["Pants", "Olympic"], ["Boots", "sneakOlimpic"], ["Others", "medal"]] },
-  { id: 15, code: "vkks_gold_2014", items: [["Hats", "capVKKS01"], ["Pants", "sportVKKS01"], ["Others", "medalgold"], ["Shirts", "chood01"]] },
-  { id: 16, code: "vkks_silver_2014", items: [["Hats", "capVKKS02"], ["Shirts", "chood02"], ["Pants", "sportVKKS02"], ["Others", "medalsilver"]] },
-  { id: 17, code: "vkks_bronze_2014", items: [["Hats", "capVKKS03"], ["Shirts", "chood03"], ["Pants", "sportVKKS03"], ["Others", "medalbronze"]] },
-  { id: 18, code: "delta", items: [["Hats", "tacticalB01"], ["Shirts", "tacticB01"], ["Pants", "tacticB01"], ["Gloves", "tacticalB01"], ["Boots", "tacticalB01"], ["Others", "smertik"]] },
-  { id: 19, code: "ray", items: [["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Hats", "capB08"], ["Masks", "bandB07"]] },
-  { id: 20, code: "badboy", items: [["Shirts", "hoodB03"], ["Pants", "sportB03"], ["Others", "badboy"], ["Boots", "sneakV2B05"], ["Masks", "maskB01"], ["Hats", "capB04"]] },
-  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Masks", "bandB03"]] },
-  { id: 22, code: "stuzha", items: [["Hats", "santa2"], ["Masks", "santa2"], ["Shirts", "santa2"], ["Backpacks", "santa2"], ["Gloves", "santa2"], ["Pants", "santa2"], ["Boots", "santa2"], ["Others", "santa2"]] },
-  { id: 23, code: "red_heat", items: [["Hats", "capB06"], ["Shirts", "shirtB09"], ["Pants", "shortB12"], ["Masks", "googB01"], ["Boots", "sneakV2B07"]] },
-  { id: 24, code: "cool_breeze", items: [["Hats", "capB05"], ["Shirts", "shirtB04"], ["Pants", "shortB14"], ["Masks", "googB03"], ["Boots", "sneakV2B03"]] },
-  { id: 25, code: "necrowarrior", items: [["Heads", "franky"], ["Masks", "franky"], ["Shirts", "franky"], ["Pants", "franky"], ["Boots", "franky"], ["Gloves", "franky"], ["Others", "franky"], ["Backpacks", "frankyOctopus"]] },
-  { id: 26, code: "infernal", items: [["Hats", "infernal"], ["Shirts", "infernal"], ["Pants", "infernal"], ["Boots", "infernal"], ["Gloves", "infernal"], ["Masks", "infernal_H"], ["Others", "infernal"], ["Backpacks", "infernalRaven"]] },
-  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"]] },
-  { id: 28, code: "wanderer", items: [["Hats", "hatB01"], ["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"]] },
-  { id: 29, code: "snakecatcher", items: [["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Hats", "capB07"], ["Backpacks", "snake01"]] },
-  { id: 30, code: "ghost", items: [["Masks", "klavaB01"], ["Shirts", "prizrak"], ["Pants", "prizrak"], ["Gloves", "prizrak"], ["Boots", "prizrak"]] },
-  { id: 31, code: "anarchist", items: [["Hats", "capB01"], ["Shirts", "anarch"], ["Pants", "jeansB03"], ["Gloves", "wristwrapB03"], ["Boots", "anarch"], ["Others", "spinyellow"]] },
-  { id: 32, code: "biker", items: [["Hats", "biker"], ["Shirts", "biker"], ["Pants", "jeansB02"], ["Gloves", "biker"], ["Boots", "sneakV201"]] },
-  { id: 33, code: "scrapper", items: [["Hats", "hatB06"], ["Masks", "bandB04"], ["Shirts", "hoodB06"], ["Pants", "sportB06"], ["Boots", "zadira"], ["Others", "burger"]] },
-  { id: 34, code: "avenger", items: [["Hats", "avenger"], ["Masks", "avenger"], ["Shirts", "avenger"], ["Pants", "avenger"], ["Gloves", "avenger"], ["Boots", "avenger"], ["Others", "spinblue"]] },
-  { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"]] },
-  { id: 36, code: "spy", items: [["Hats", "business"], ["Masks", "businessgoogles"], ["Shirts", "business"], ["Pants", "business"], ["Gloves", "business"], ["Boots", "business"]] },
-  { id: 37, code: "contranos", items: [["Heads", "thanos"], ["Masks", "thanos"], ["Shirts", "thanos"], ["Pants", "thanos"], ["Gloves", "thanos"], ["Boots", "thanos"], ["Backpacks", "thanos"]] },
-  { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] }
-];
-
-// Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
-// Keep them out of the shop response instead of exposing sets the battle server cannot complete.
-const removedAssemblageIds = new Set([4, 5]);
-const shopAssemblages = restoredAssemblageDefinitions
-  .filter((definition) => !removedAssemblageIds.has(definition.id))
-  .map((definition) => {
-  const text = assemblageTextFor(definition.id);
-  return {
-    id: definition.id,
-    name: text.name,
-    desca: text.desca,
-    ndesca: text.ndesca,
-    items: JSON.stringify(definition.items.map(([slot, sname]) => assemblageWear(slot, sname)))
-  };
-  });
-
-// Hidden from the live shop: 2 "Лимонадный глоток", 6 "Пальцестрел",
-// 10 "Секир-башка", 11 "Подозрительность".
-const shopTaunts = [3, 4, 5, 7, 8, 9].map((id) => taunt(id, SHOP_PRICE));
-const shopEnhancers = SHOP_ENHANCER_IDS.map((id) =>
-  enhancer(id, SHOP_PRICE)
-);
-const canonicalWeaponsById = new Map([...defaultWeapons, ...shopWeapons].map((item) => [Number(item.w_id), item]));
-const weaponSnameKey = (item) => String(item?.sn || item?.sname || "").toLowerCase();
-const canonicalWeaponsBySname = new Map([...defaultWeapons, ...shopWeapons].map((item) => [weaponSnameKey(item), item]).filter(([key]) => key));
-const canonicalWearsById = new Map(shopWears.map((item) => [Number(item.w_id), item]));
-const canonicalTauntsById = new Map(shopTaunts.map((item) => [Number(item.t_id), item]));
-const canonicalEnhancersById = new Map(shopEnhancers.map((item) => [Number(item.e_id), item]));
-const viewWearKeys = ["hat", "head", "mask", "gloves", "shirt", "pants", "boots", "backpack", "other"];
-
-function allCatalogItems() {
-  return [...defaultWeapons, ...shopWeapons, ...shopWears, ...shopTaunts, ...shopEnhancers];
-}
-
-const abilityValueDefinitions = {
-  1: { type: "1", key: "cdef", values: [10, 20, 40, 60, 80] },
-  2: { type: "1", key: "cheal", values: [10, 20, 30, 40, 50] },
-  3: { type: "2", key: "cspd", values: [2, 4, 6, 8, 10] },
-  4: { type: "2", key: "cdecdam", values: [2, 4, 6, 8, 10] },
-  5: { type: "2", key: "wrap", values: [2, 4, 6, 8, 10] },
-  6: { type: "2", key: "wcrit", values: [5, 10, 15, 20, 25] },
-  7: { type: "2", key: "wam", values: [10, 30, 40, 50, 60] },
-  8: { type: "1", key: "wmdam", values: [1, 2, 3, 4, 5] },
-  9: { type: "1", key: "wmxdam", values: [1, 2, 3, 4, 5] },
-  10: { type: "1", key: "wacc", values: [1, 2, 3, 4, 5] },
-  11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] }
+  legoturnament: {
+    // World positions from mapsnew/LegoTurnament_unity3d/Assets/LegoTurnament.unity.bak-large-fileids -> POINTS_RESCALE.
+    dm: [
+      { x: 98.817, y: 14.554, z: 116.706, rotY: 330 },
+      { x: -74.851, y: 14.933, z: 117.843, rotY: 45 },
+      { x: 97.485, y: 14.196, z: 297.849, rotY: 225 },
+      { x: -85.626, y: 14.933, z: 297.573, rotY: 135 },
+      { x: 6.239, y: 14.933, z: 208.724, rotY: 180 },
+    ],
+    team1: [
+      { x: 21.008, y: 20.784, z: 25.909, rotY: 180 },
+      { x: 7.199, y: 21.485, z: -0.482, rotY: 0 },
+      { x: 7.857, y: 20.828, z: 26.118, rotY: 180 },
+      { x: -7.059, y: 20.597, z: -0.318, rotY: 0 },
+      { x: 16.649, y: 20.668, z: 0.282, rotY: 0 },
+      { x: 26.743, y: 20.606, z: 0.821, rotY: 0 },
+      { x: -8.106, y: 20.746, z: 17.215, rotY: 270 },
+    ],
+    team2: [
+      { x: 24.852, y: 20.822, z: 313.538, rotY: 180 },
+      { x: -6.359, y: 20.671, z: 312.792, rotY: 180 },
+      { x: 21.772, y: 20.694, z: 294.258, rotY: 0 },
+      { x: 11.614, y: 20.822, z: 293.706, rotY: 0 },
+      { x: 5.765, y: 20.655, z: 312.691, rotY: 180 },
+      { x: 0.131, y: 20.822, z: 293.174, rotY: 0 },
+      { x: 16.51, y: 20.676, z: 312.944, rotY: 180 },
+    ],
+  },
+  inferno: {
+    // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids -> POINTS_RESCALE.
+    dm: [
+      { x: 19.998, y: -20.936, z: 294.54, rotY: 270 },
+      { x: 103.554, y: -31.33, z: -35.494, rotY: 270 },
+      { x: -113.018, y: -32.175, z: 169.619, rotY: 90 },
+      { x: 55.97, y: -36.772, z: 298.581, rotY: 270 },
+      { x: 106.512, y: -38.506, z: 210.627, rotY: 180 },
+      { x: -6.091, y: -50.703, z: 15.123, rotY: 270 },
+      { x: 174.96, y: -28.484, z: 313.652, rotY: 180 },
+    ],
+    team1: [
+      { x: 289.406, y: -54.583, z: 179.367, rotY: 0 },
+      { x: 281.244, y: -54.105, z: 179.996, rotY: 45 },
+      { x: 300.727, y: -54.583, z: 185.215, rotY: 270 },
+      { x: 284.533, y: -54.105, z: 191.203, rotY: 45 },
+      { x: 300.39, y: -54.583, z: 186.977, rotY: 330 },
+      { x: 313.215, y: -50.928, z: 262.948, rotY: 270 },
+      { x: 284.321, y: -53.821, z: 200.322, rotY: 60 },
+    ],
+    team2: [
+      { x: -128.095, y: -31.862, z: 108.363, rotY: 90 },
+      { x: -125.603, y: -40.126, z: 25.032, rotY: 45 },
+      { x: -122.138, y: -32.121, z: 86.884, rotY: 135 },
+      { x: -127.335, y: -40.126, z: 64.064, rotY: 90 },
+      { x: -127.134, y: -40.126, z: 36.449, rotY: 90 },
+      { x: -127.903, y: -40.126, z: 49.714, rotY: 90 },
+      { x: -122.07, y: -40.126, z: 17.735, rotY: 45 },
+    ],
+  },
 };
 
-const abilityCatalog = [];
-for (const [abilityIdText, definition] of Object.entries(abilityValueDefinitions)) {
-  const abilityId = Number(abilityIdText);
-  for (let level = 1; level <= definition.values.length; level += 1) {
-    abilityCatalog.push({
-      i: abilityId,
-      l: level,
-      v: JSON.stringify([{ t: definition.type, [definition.key]: String(definition.values[level - 1]) }]),
-      sc: cost(5000 + abilityId * 10 + level, 100 * level)
-    });
-  }
-}
-
-const mapPlayers = "4,6,8,10,12,14,16";
 const MAP_MODE_DEATHMATCH = 1;
 const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
-const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
-const DOSSIER_GAME_MODE_STATS = [
-  MAP_MODE_DEATHMATCH,
-  MAP_MODE_TEAM_DEATHMATCH,
-  MAP_MODE_CAPTURE_THE_FLAG,
-  MAP_MODE_CONTROL_POINTS,
-  MAP_MODE_ZOMBIE
-];
-const mapEntry = (id, systemName, modes = 3) => ({ i: id, n: systemName, m: modes, p: mapPlayers, dp: 4 });
+const ZOMBIE_MODE = {
+  PAUSE: 1,
+  WAIT_FOR_PLAYERS: 2,
+  BOSS_INFECTION: 3,
+  MAIN: 4,
+};
+const ZOMBIE_TYPE = {
+  HUMAN: 0,
+  REGULAR: 1,
+  BOSS: 2,
+};
+const ZOMBIE_TEAM = 1;
+const HUMAN_TEAM = 2;
+const MAP_ALLOWED_MODES = {
+  zombi_2: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
+  zombi: [MAP_MODE_DEATHMATCH, MAP_MODE_ZOMBIE],
+  arenaring: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
+  arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+};
+const CTF_MAPS = {
+  arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
+  arenaring: [{team:1,x:-52.497,y:-65,z:282},{team:2,x:117.454,y:-65,z:295}],
+  inferno: [{team:1,x:394.08,y:-66.15,z:157.5},{team:2,x:-10.84,y:-51.73,z:-37.88}],
+  legoturnament: [{team:1,x:79.72,y:-65.41,z:65.65},{team:2,x:202.58,y:-71.92,z:70.62}],
+};
 
-function normalizeStatsMode(mode) {
-  const value = Number(mode || 0);
-  if (!Number.isFinite(value)) return 0;
-  if ((value & MAP_MODE_ZOMBIE) === MAP_MODE_ZOMBIE) return MAP_MODE_ZOMBIE;
-  if (value === MAP_MODE_DEATHMATCH || value === MAP_MODE_TEAM_DEATHMATCH || value === MAP_MODE_CAPTURE_THE_FLAG || value === MAP_MODE_CONTROL_POINTS) {
-    return value;
-  }
-  return value;
+// Centers are the exported Game/finish4/ControlPointN/ControlPoint transforms.
+// Bit_map deliberately has no entry: its active bundle has point prefabs only, not map objects.
+const CONTROL_POINT_MAPS = {
+  arena_3lvl: [{ id: 1, x: 26.692, y: -64.946, z: 288.789 }],
+  arenaring: [{ id: 1, x: 30.08, y: -24.095, z: 297.007 }],
+  inferno: [
+    { id: 1, x: 56.31, y: -60.76, z: 45.83 },
+    { id: 2, x: 238.08, y: -99.91, z: 43.89 },
+  ],
+};
+const CONTROL_POINT_CAPTURE_TICK_MS = Math.max(50, Number(process.env.CONTROL_POINT_CAPTURE_TICK_MS || 100));
+const CONTROL_POINT_CAPTURE_STEP = Math.max(1, Math.min(100, Number(process.env.CONTROL_POINT_CAPTURE_STEP || 1)));
+const CONTROL_POINT_SCORE_INTERVAL_MS = Math.max(250, Number(process.env.CONTROL_POINT_SCORE_INTERVAL_MS || 1000));
+
+function photonNow() {
+  return Math.max(0, Math.floor(Date.now() - PROCESS_START_MS)) >>> 0;
 }
 
-const maps = [
-  mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
-  mapEntry(13, "Zombi_2", MAP_MODE_DM_ZOMBIE),
-  mapEntry(14, "Zombi", MAP_MODE_DM_ZOMBIE),
-  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
-  mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
-  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS)
-];
+function roomAgeMs(room) {
+  const startedAt = Number(room?.startedAt);
+  return Number.isFinite(startedAt) ? Math.max(0, photonNow() - startedAt) : 0;
+}
 
-function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
+function hasEnvSpawnOverride() {
+  return process.env.SPAWN_X != null || process.env.SPAWN_Y != null || process.env.SPAWN_Z != null;
+}
+
+function envSpawnPoint() {
   return {
-    id,
-    key,
-    name: cleanName(name),
-    fullName: "Contra City Player",
-    level: START_LEVEL,
-    exp: START_EXP,
-    expMin: 0,
-    expMax: START_EXP_MAX,
-    money: START_MONEY,
-    view: {
-      hat: 0,
-      head: 0,
-      mask: 0,
-      gloves: 0,
-      shirt: 0,
-      pants: 0,
-      boots: 0,
-      backpack: 0,
-      other: 0
-    },
-    weap: {
-      id1: 0,
-      id2: 0,
-      id3: 0,
-      id4: 0,
-      id5: 0,
-      id6: 0,
-      id7: 0
-    },
-    taun: {
-      i0: 0,
-      i1: 0,
-      i2: 0
-    },
-    stats: {},
-    inventory: [],
-    abilities: [],
-    clanMaxRequest: 10,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    x: Number(process.env.SPAWN_X || 0),
+    y: Number(process.env.SPAWN_Y || 2) + (Number.isFinite(SPAWN_Y_OFFSET) ? SPAWN_Y_OFFSET : 0),
+    z: Number(process.env.SPAWN_Z || 0),
+    rotY: Number(process.env.SPAWN_ROT_Y || 0),
   };
 }
 
-function cleanName(value) {
-  const name = String(value || "").trim().slice(0, 24);
-  return name || "ContraCity";
+function mapKey(value) {
+  return String(value || DEFAULT_MAP)
+    .trim()
+    .replace(/\\/g, "/")
+    .split("/")
+    .pop()
+    .replace(/\.unity3d$/i, "")
+    .toLowerCase();
 }
 
-function nextAccountId() {
-  const ids = Object.keys(store?.accounts || {})
-    .map((id) => Number(id))
-    .filter((id) => Number.isInteger(id) && id > 0);
-  return (ids.length ? Math.max(...ids) : 0) + 1;
+function normalizeRoomModeValue(value, fallback = MAP_MODE_DEATHMATCH) {
+  const mode = Number(value);
+  return Number.isFinite(mode) && mode > 0 ? mode : fallback;
 }
 
-function newAccountKey(id) {
-  return `${DEFAULT_KEY}-${id}-${crypto.randomUUID()}`.slice(0, 128);
-}
-
-async function createNewAccount(name) {
-  const id = nextAccountId();
-  const account = starterAccount(name, id, newAccountKey(id));
-  account.namePending = true;
-  store.accounts[String(id)] = account;
-  await saveStore(store);
-  if (pgPool) {
-    const saved = await loadPostgresAccount(id);
-    if (!saved || saved.key !== account.key) {
-      throw new Error(`created account ${id} was not saved to postgres`);
-    }
-    store.accounts[String(id)] = saved;
+function normalizeModeForMap(mapName, requestedMode) {
+  const mode = normalizeRoomModeValue(requestedMode);
+  if (mode === MAP_MODE_CONTROL_POINTS && !CONTROL_POINT_MAPS[mapKey(mapName)]?.length) {
+    return MAP_MODE_DEATHMATCH;
   }
-  return account;
+  const allowed = MAP_ALLOWED_MODES[mapKey(mapName)];
+  if (!allowed?.length) return mode;
+  return allowed.includes(mode) ? mode : allowed[0];
 }
 
-function ensureStoreDir() {
-  fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+function allSpawnPointsForDeathmatch(mapSpawns) {
+  return [
+    ...(mapSpawns?.dm || []),
+    ...(mapSpawns?.team1 || []),
+    ...(mapSpawns?.team2 || []),
+  ];
 }
 
-function loadStore() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
-    if (parsed && typeof parsed === "object" && parsed.accounts) {
-      return normalizeStore(parsed);
-    }
-  } catch {
-    // First run on Railway has no data file yet.
+function pointListFor(session, team) {
+  const mapSpawns = MAP_SPAWN_POINTS[mapKey(session.room?.map)];
+  if (!mapSpawns) return null;
+  if (roomMode(session) === MAP_MODE_DEATHMATCH || roomMode(session) === MAP_MODE_ZOMBIE) {
+    const points = allSpawnPointsForDeathmatch(mapSpawns);
+    return points.length ? points : null;
   }
-  return normalizeStore({ accounts: {} });
+  if (team === 1 && mapSpawns.team1?.length) return mapSpawns.team1;
+  if (team === 2 && mapSpawns.team2?.length) return mapSpawns.team2;
+  return mapSpawns.dm?.length ? mapSpawns.dm : null;
 }
 
-function saveStore(store) {
-  if (pgPool) {
-    pgSaveChain = pgSaveChain.then(() => savePostgresStore(clone(store)));
-    return pgSaveChain;
+function preferredDmSpawnPoints(session, team, points) {
+  if (roomMode(session) === MAP_MODE_ZOMBIE) return points;
+  if (team !== 0) return points;
+  const map = mapKey(session.room?.map);
+  if (map === "arena_3lvl") {
+    return points.filter((point) => Number(point.y) <= -60);
   }
-
-  ensureStoreDir();
-  fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
-  return Promise.resolve();
-}
-
-let pgPool = null;
-let pgSaveChain = Promise.resolve();
-const viewSelectionSaveVersions = new Map();
-const weaponSelectionSaveVersions = new Map();
-const MANAGED_CATALOG_ITEM_TYPES = [1, 2, 3, 4];
-
-function enqueuePostgresMutation(operation) {
-  const run = pgSaveChain.catch(() => {}).then(operation);
-  pgSaveChain = run.catch((error) => {
-    console.error("[postgres] mutation failed", error);
-  });
-  return run;
-}
-
-function nextWeaponSelectionSaveVersion(accountId) {
-  const key = String(accountId || 0);
-  const version = Number(weaponSelectionSaveVersions.get(key) || 0) + 1;
-  weaponSelectionSaveVersions.set(key, version);
-  return version;
-}
-
-function isLatestWeaponSelectionSaveVersion(accountId, version) {
-  return Number(weaponSelectionSaveVersions.get(String(accountId || 0)) || 0) === Number(version);
-}
-
-function nextViewSelectionSaveVersion(accountId) {
-  const key = String(accountId || 0);
-  const version = Number(viewSelectionSaveVersions.get(key) || 0) + 1;
-  viewSelectionSaveVersions.set(key, version);
-  return version;
-}
-
-function isLatestViewSelectionSaveVersion(accountId, version) {
-  return Number(viewSelectionSaveVersions.get(String(accountId || 0)) || 0) === Number(version);
-}
-
-function jsonValue(value, fallback) {
-  if (value == null) return fallback;
-  if (typeof value !== "string") return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
+  if (map === "zombi_2") {
+    return points.filter((point) => Number(point.y) >= -30 && Number(point.y) <= -5);
   }
-}
-
-function inventoryItemKey(item) {
-  const itemType = Number(item?.itype || 0);
-  const itemId = Number(item?.id ?? item?.w_id ?? item?.t_id ?? item?.e_id ?? 0);
-  return `${itemType}:${itemId}`;
-}
-
-function inventoryItemId(item) {
-  return Number(item?.id ?? item?.w_id ?? item?.t_id ?? item?.e_id ?? 0);
-}
-
-async function runMigrations() {
-  await pgPool.query(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version TEXT PRIMARY KEY,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-
-  if (!fs.existsSync(MIGRATIONS_DIR)) return;
-
-  const files = fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((file) => /^\d+_.*\.sql$/i.test(file))
-    .sort();
-
-  for (const file of files) {
-    const version = file.replace(/\.sql$/i, "");
-    const applied = await pgPool.query("SELECT 1 FROM schema_migrations WHERE version = $1", [version]);
-    if (applied.rowCount) continue;
-
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8").replace(/^\uFEFF/, "");
-    const client = await pgPool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(sql);
-      await client.query("INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING", [version]);
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+  if (map === "zombi") {
+    return points.filter((point) => Number(point.y) >= -19);
   }
+  return points;
 }
 
-async function ensurePlayerNamePendingSchema() {
-  await pgPool.query("ALTER TABLE players ADD COLUMN IF NOT EXISTS name_pending BOOLEAN NOT NULL DEFAULT false");
-}
+function spawnPointFor(session, team) {
+  if (hasEnvSpawnOverride()) return envSpawnPoint();
 
-async function ensureLauncherDeviceSchema() {
-  await pgPool.query(`
-    CREATE TABLE IF NOT EXISTS launcher_devices (
-      player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
-      device_key_id TEXT NOT NULL,
-      device_public_key TEXT NOT NULL,
-      hwid_hash TEXT NOT NULL DEFAULT '',
-      risk JSONB NOT NULL DEFAULT '{}'::jsonb,
-      bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      reset_at TIMESTAMPTZ
-    )
-  `);
-  await pgPool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS launcher_devices_device_key_id_idx
-      ON launcher_devices (device_key_id)
-  `);
-}
+  const points = pointListFor(session, team);
+  if (!points?.length) return envSpawnPoint();
 
-async function syncPostgresCatalog(existingClient = null) {
-  const client = existingClient || (await pgPool.connect());
-  const ownsClient = !existingClient;
-  const catalogItems = allCatalogItems();
-  const catalogKeys = catalogItems.map(inventoryItemKey);
-
-  try {
-    if (ownsClient) await client.query("BEGIN");
-
-    await client.query(
-      `DELETE FROM catalog_items
-       WHERE item_type = ANY($1::int[])
-         AND NOT (item_key = ANY($2::text[]))`,
-      [MANAGED_CATALOG_ITEM_TYPES, catalogKeys]
-    );
-
-    for (const item of catalogItems) {
-      await client.query(
-        `INSERT INTO catalog_items (item_key, item_type, item_id, system_name, item_data, updated_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, now())
-         ON CONFLICT (item_key) DO UPDATE SET
-           item_type = EXCLUDED.item_type,
-           item_id = EXCLUDED.item_id,
-           system_name = EXCLUDED.system_name,
-           item_data = EXCLUDED.item_data,
-           updated_at = now()`,
-        [
-          inventoryItemKey(item),
-          Number(item.itype || 0),
-          inventoryItemId(item),
-          String(item.sn || item.sname || ""),
-          JSON.stringify(item)
-        ]
-      );
-    }
-
-    if (ownsClient) await client.query("COMMIT");
-  } catch (error) {
-    if (ownsClient) await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    if (ownsClient) client.release();
-  }
-}
-
-async function loadLegacyPostgresStore() {
-  const table = await pgPool.query("SELECT to_regclass('public.contracity_store') AS name");
-  if (!table.rows[0]?.name) return null;
-
-  const result = await pgPool.query("SELECT data FROM contracity_store WHERE id = $1", ["main"]);
-  return result.rows[0]?.data || null;
-}
-
-async function loadPostgresStore() {
-  const players = await pgPool.query("SELECT * FROM players ORDER BY id");
-  const inventory = await pgPool.query("SELECT player_id, item_data FROM player_inventory ORDER BY player_id, created_at, item_key");
-  const abilities = await pgPool.query("SELECT player_id, ability_id, ability_level FROM player_abilities ORDER BY player_id, ability_id");
-  const clansTable = await pgPool.query("SELECT to_regclass('public.clans') AS name");
-  const clans = clansTable.rows[0]?.name
-    ? await pgPool.query("SELECT * FROM clans ORDER BY id")
-    : { rows: [] };
-  const clanMembers = clansTable.rows[0]?.name
-    ? await pgPool.query("SELECT * FROM clan_members ORDER BY clan_id, joined_at, player_id")
-    : { rows: [] };
-  const clanInvitesTable = await pgPool.query("SELECT to_regclass('public.clan_invites') AS name");
-  const clanInvites = clanInvitesTable.rows[0]?.name
-    ? await pgPool.query("SELECT * FROM clan_invites ORDER BY clan_id, created_at, player_id")
-    : { rows: [] };
-  const clanEventsTable = await pgPool.query("SELECT to_regclass('public.clan_events') AS name");
-  const clanEvents = clanEventsTable.rows[0]?.name
-    ? await pgPool.query("SELECT * FROM clan_events ORDER BY clan_id, id")
-    : { rows: [] };
-  const clanTreasuryTable = await pgPool.query("SELECT to_regclass('public.clan_treasury_events') AS name");
-  const clanTreasury = clanTreasuryTable.rows[0]?.name
-    ? await pgPool.query("SELECT * FROM clan_treasury_events ORDER BY clan_id, id")
-    : { rows: [] };
-  const clanInventoryTable = await pgPool.query("SELECT to_regclass('public.clan_inventory') AS name");
-  const clanInventory = clanInventoryTable.rows[0]?.name
-    ? await pgPool.query("SELECT * FROM clan_inventory ORDER BY clan_id, created_at, item_key")
-    : { rows: [] };
-
-  const inventoryByPlayer = new Map();
-  for (const row of inventory.rows) {
-    const list = inventoryByPlayer.get(row.player_id) || [];
-    list.push(jsonValue(row.item_data, {}));
-    inventoryByPlayer.set(row.player_id, list);
-  }
-
-  const abilitiesByPlayer = new Map();
-  for (const row of abilities.rows) {
-    const list = abilitiesByPlayer.get(row.player_id) || [];
-    list.push({ i: Number(row.ability_id), l: Number(row.ability_level) });
-    abilitiesByPlayer.set(row.player_id, list);
-  }
-
-  const accounts = {};
-  for (const row of players.rows) {
-    const account = accountFromPostgresRow(row, inventoryByPlayer.get(row.id) || [], abilitiesByPlayer.get(row.id) || []);
-    accounts[String(account.id)] = account;
-  }
-
-  const clanStore = {
-    byId: {},
-    nextId: 1,
-    nextEventId: 1,
-    nextTreasuryEventId: 1
-  };
-  for (const row of clans.rows) {
-    const clan = normalizeClanRecord({
-      id: Number(row.id),
-      name: row.name,
-      tag: row.tag,
-      ownerPlayerId: Number(row.owner_player_id || 0),
-      level: Number(row.level || 1),
-      exp: Number(row.exp || 0),
-      money: Number(row.money || 0),
-      armId: Number(row.arm_id || 1),
-      tagColor: row.tag_color || "",
-      homepage: row.homepage || "",
-      desc: row.description || "",
-      access: Number(row.access ?? 1),
-      accessLevel: Number(row.access_level ?? CLAN_JOIN_LEVEL),
-      maxMembers: Number(row.max_members || CLAN_DEFAULT_MAX_MEMBERS),
-      deletedAt: postgresTimestamp(row.deleted_at) || null,
-      createdAt: postgresTimestamp(row.created_at),
-      updatedAt: postgresTimestamp(row.updated_at),
-      members: {},
-      invites: {},
-      events: [],
-      treasuryEvents: [],
-      inventory: []
-    });
-    clanStore.byId[String(clan.id)] = clan;
-    clanStore.nextId = Math.max(clanStore.nextId, Number(clan.id) + 1);
-  }
-  for (const row of clanMembers.rows) {
-    const clan = clanStore.byId[String(row.clan_id)];
-    if (!clan) continue;
-    clan.members[String(row.player_id)] = normalizeClanMemberRecord({
-      playerId: Number(row.player_id),
-      memberLevel: Number(row.member_level || (row.role === "owner" ? 2 : 1)),
-      money: Number(row.money || 0),
-      clanExp: Number(row.clan_exp || 0),
-      expKoef: Number(row.exp_koef || 0),
-      playerExp: Number(row.player_exp || 0),
-      joinedAt: postgresTimestamp(row.joined_at)
-    });
-  }
-  for (const row of clanInvites.rows) {
-    const clan = clanStore.byId[String(row.clan_id)];
-    if (!clan) continue;
-    clan.invites[String(row.player_id)] = {
-      playerId: Number(row.player_id),
-      createdAt: postgresTimestamp(row.created_at)
+  if (Number.isFinite(SPAWN_INDEX) && SPAWN_INDEX !== 0) {
+    const point = points[Math.abs(SPAWN_INDEX - 1) % points.length];
+    return {
+      ...point,
+      y: point.y + (Number.isFinite(SPAWN_Y_OFFSET) ? SPAWN_Y_OFFSET : 0),
     };
   }
-  for (const row of clanEvents.rows) {
-    const clan = clanStore.byId[String(row.clan_id)];
-    if (!clan) continue;
-    const event = normalizeClanEventRecord({
-      id: Number(row.id),
-      clanId: Number(row.clan_id),
-      type: Number(row.event_type || 0),
-      creatorPlayerId: Number(row.creator_player_id || 0),
-      data: jsonValue(row.data, {}),
-      expiresAt: postgresTimestamp(row.expires_at),
-      createdAt: postgresTimestamp(row.created_at)
-    });
-    if (event) clan.events.push(event);
-    clanStore.nextEventId = Math.max(clanStore.nextEventId, Number(row.id) + 1);
-  }
-  for (const row of clanTreasury.rows) {
-    const clan = clanStore.byId[String(row.clan_id)];
-    if (!clan) continue;
-    const event = normalizeClanTreasuryRecord({
-      id: Number(row.id),
-      clanId: Number(row.clan_id),
-      playerId: Number(row.player_id || 0),
-      playerName: row.player_name || "",
-      money: Number(row.money || 0),
-      type: Number(row.event_type || 0),
-      createdAt: postgresTimestamp(row.created_at)
-    });
-    if (event) clan.treasuryEvents.push(event);
-    clanStore.nextTreasuryEventId = Math.max(clanStore.nextTreasuryEventId, Number(row.id) + 1);
-  }
-  for (const row of clanInventory.rows) {
-    const clan = clanStore.byId[String(row.clan_id)];
-    if (!clan) continue;
-    const item = jsonValue(row.item_data, {});
-    if (item && typeof item === "object") clan.inventory.push({ ...item, itemKey: row.item_key });
-  }
 
-  return normalizeStore({ accounts, clans: clanStore });
+  // Restored maps can contain exported spawn layers that are not the playable DM floor.
+  const preferredPoints = preferredDmSpawnPoints(session, team, points);
+  const candidates = preferredPoints.length ? preferredPoints : points;
+  const mode = roomMode(session);
+  const baseIndex = mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_ZOMBIE
+    ? Math.floor(Math.random() * candidates.length)
+    : (Number(session.actorId) || 1) - 1;
+  const point = candidates[Math.abs(baseIndex) % candidates.length];
+  return {
+    ...point,
+    y: point.y + (Number.isFinite(SPAWN_Y_OFFSET) ? SPAWN_Y_OFFSET : 0),
+  };
 }
 
-async function initStore() {
-  if (!DATABASE_URL) {
-    return loadStore();
+function fmtPoint(point) {
+  return `${Number(point.x).toFixed(2)},${Number(point.y).toFixed(2)},${Number(point.z).toFixed(2)}@${Number(point.rotY || 0).toFixed(0)}`;
+}
+
+function fmtVector(point) {
+  return `${Number(point.x).toFixed(2)},${Number(point.y).toFixed(2)},${Number(point.z).toFixed(2)}`;
+}
+
+function u16(n) {
+  const b = Buffer.alloc(2);
+  b.writeUInt16BE(n & 0xffff, 0);
+  return b;
+}
+
+function i16(n) {
+  const b = Buffer.alloc(2);
+  b.writeInt16BE(n, 0);
+  return b;
+}
+
+function u32(n) {
+  const b = Buffer.alloc(4);
+  b.writeUInt32BE(n >>> 0, 0);
+  return b;
+}
+
+function i32(n) {
+  const b = Buffer.alloc(4);
+  b.writeInt32BE(n | 0, 0);
+  return b;
+}
+
+function i64(n) {
+  const b = Buffer.alloc(8);
+  b.writeBigInt64BE(BigInt(n), 0);
+  return b;
+}
+
+function f32(n) {
+  const b = Buffer.alloc(4);
+  b.writeFloatBE(Number(n) || 0, 0);
+  return b;
+}
+
+function readU16(buf, offset) {
+  return buf.readUInt16BE(offset);
+}
+
+function readI16(buf, offset) {
+  return buf.readInt16BE(offset);
+}
+
+function readU32(buf, offset) {
+  return buf.readUInt32BE(offset) >>> 0;
+}
+
+function readI32(buf, offset) {
+  return buf.readInt32BE(offset);
+}
+
+function key(port, rinfo) {
+  return `${port}:${rinfo.address}:${rinfo.port}`;
+}
+
+function refreshSessionReliableEndpoint(session, socket, rinfo) {
+  if (!session || !socket || !rinfo) return;
+  const pending = session.outboundReliable;
+  if (!(pending instanceof Map)) return;
+  for (const entry of pending.values()) {
+    entry.socket = socket;
+    entry.rinfo = { address: rinfo.address, port: rinfo.port };
+  }
+}
+
+function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
+  const incomingPeerId = msg.readUInt16BE(0);
+  const incomingChallenge = readU32(msg, 8);
+  if (!incomingChallenge || incomingPeerId === 0xffff) return null;
+
+  const matches = [];
+  for (const candidate of sessions.values()) {
+    if (!candidate || candidate.transportDisconnected) continue;
+    if (Number(candidate.port) !== Number(port)) continue;
+    if (Number(candidate.peerId) !== Number(incomingPeerId)) continue;
+    if (Number(candidate.challenge) !== Number(incomingChallenge)) continue;
+    if (!candidate.room || !candidate.actorId || !candidate.spawned) continue;
+    if (now - numberOr(candidate.lastSeenAt, 0) > ENET_NAT_REBIND_MAX_IDLE_MS) continue;
+    matches.push(candidate);
+    if (matches.length > 1) return null;
+  }
+  return matches[0] || null;
+}
+
+function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
+  const previousSessionId = session.sessionId;
+  const previousRemote = session.remoteKey || "unknown";
+  if (previousSessionId && previousSessionId !== sessionId && sessions.get(previousSessionId) === session) {
+    sessions.delete(previousSessionId);
+  }
+  sessions.set(sessionId, session);
+  session.sessionId = sessionId;
+  session.remoteKey = `${rinfo.address}:${rinfo.port}`;
+  session.socket = socket;
+  session.rinfo = { address: rinfo.address, port: rinfo.port };
+  refreshSessionReliableEndpoint(session, socket, rinfo);
+  console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0}`);
+  return session;
+}
+
+function makeHeader(peerId, commandCount, sentTime, challenge) {
+  return Buffer.concat([
+    u16(peerId),
+    Buffer.from([0x00, commandCount]),
+    u32(sentTime),
+    u32(challenge),
+  ]);
+}
+
+function makeAck(channel, reliableSeq, sentTime) {
+  return Buffer.concat([
+    Buffer.from([0x01, channel, 0x00, 0x04]),
+    u32(20),
+    u32(0),
+    u32(reliableSeq),
+    u32(sentTime),
+  ]);
+}
+
+function makeVerifyConnect(seq) {
+  return Buffer.concat([
+    Buffer.from([0x03, 0x00, 0x01, 0x04]),
+    u32(44),
+    u32(seq),
+    Buffer.from("000104b000080000000200000000000000000013880000000200000002", "hex"),
+  ]);
+}
+
+function makeReliable(seq, payload, channel = 0) {
+  return Buffer.concat([
+    Buffer.from([0x06, channel, 0x01, 0x04]),
+    u32(12 + payload.length),
+    u32(seq),
+    payload,
+  ]);
+}
+
+function makeReliableFragment(seq, startSeq, fragmentCount, fragmentNumber, totalLength, fragmentOffset, payload, channel = 0) {
+  return Buffer.concat([
+    Buffer.from([0x08, channel, 0x01, 0x04]),
+    u32(32 + payload.length),
+    u32(seq),
+    u32(startSeq),
+    u32(fragmentCount),
+    u32(fragmentNumber),
+    u32(totalLength),
+    u32(fragmentOffset),
+    payload,
+  ]);
+}
+
+function makeUnreliable(lastReliableSeq, unreliableSeq, payload, channel = 0) {
+  return Buffer.concat([
+    Buffer.from([0x07, channel, 0x00, 0x04]),
+    u32(16 + payload.length),
+    u32(Math.max(0, Number(lastReliableSeq) || 0)),
+    u32(unreliableSeq),
+    payload,
+  ]);
+}
+
+function cacheReliableResponse(session, cacheKey, reliableCommands) {
+  session.reliableResponses.set(cacheKey, reliableCommands);
+  while (session.reliableResponses.size > 128) {
+    const firstKey = session.reliableResponses.keys().next().value;
+    session.reliableResponses.delete(firstKey);
+  }
+  return reliableCommands;
+}
+
+function commandBytes(commands) {
+  return (commands || []).reduce((sum, command) => sum + (command?.length || 0), 0);
+}
+
+function reliableCommandSeq(command) {
+  return command?.length >= 12 ? readU32(command, 8) : null;
+}
+
+function reliableCommandSeqSummary(commands) {
+  const seqs = (commands || [])
+    .map((command) => reliableCommandSeq(command))
+    .filter((seq) => seq != null);
+  return seqs.length ? seqs.join(",") : "none";
+}
+
+function makeReliableCommandsForPayload(session, payload, channel = 0) {
+  const targetChannel = normalizeChannelId(channel, 0);
+  const packetBytes = 12 + 12 + payload.length;
+  if (!MAX_UDP_PACKET_BYTES || packetBytes <= MAX_UDP_PACKET_BYTES) {
+    const seq = nextReliableSeqForSession(session, targetChannel);
+    return [makeReliable(seq, payload, targetChannel)];
   }
 
-  const { Pool } = await import("pg");
-  pgPool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
-  });
-
-  await runMigrations();
-  await ensurePlayerNamePendingSchema();
-  await ensureLauncherDeviceSchema();
-  await syncPostgresCatalog();
-
-  let loaded = await loadPostgresStore();
-  if (Object.keys(loaded.accounts).length > 0) {
-    return loaded;
+  const maxFragmentPayload = Math.max(1, MAX_UDP_PACKET_BYTES - 12 - 32);
+  const fragmentCount = Math.ceil(payload.length / maxFragmentPayload);
+  if (fragmentCount > ENET_MAX_FRAGMENT_COUNT || payload.length > ENET_MAX_FRAGMENT_TOTAL_BYTES) {
+    const seq = nextReliableSeqForSession(session, targetChannel);
+    console.log(`[warn] outgoing-fragment-too-large actor=${session?.actorId || "?"} bytes=${payload.length} fragments=${fragmentCount}/${ENET_MAX_FRAGMENT_COUNT}`);
+    return [makeReliable(seq, payload, targetChannel)];
   }
 
-  const legacy = await loadLegacyPostgresStore();
-  if (legacy?.accounts) {
-    await savePostgresStore(legacy);
-    loaded = await loadPostgresStore();
-    if (Object.keys(loaded.accounts).length > 0) {
-      return loaded;
+  const commands = [];
+  let startSeq = null;
+  for (let index = 0; index < fragmentCount; index += 1) {
+    const fragmentOffset = index * maxFragmentPayload;
+    const fragmentPayload = payload.subarray(fragmentOffset, Math.min(payload.length, fragmentOffset + maxFragmentPayload));
+    const seq = nextReliableSeqForSession(session, targetChannel);
+    if (startSeq == null) startSeq = seq;
+    commands.push(makeReliableFragment(seq, startSeq, fragmentCount, index, payload.length, fragmentOffset, fragmentPayload, targetChannel));
+  }
+  if (ENET_FRAGMENT_TRACE) {
+    console.log(`[fragment] send actor=${session?.actorId || "?"} start=${startSeq} parts=${fragmentCount} bytes=${payload.length} maxPayload=${maxFragmentPayload} channel=${targetChannel}`);
+  }
+  return commands;
+}
+
+function fragmentReliableCommandIfNeeded(session, command) {
+  if (!command || command[0] !== 0x06 || !MAX_UDP_PACKET_BYTES) return [command];
+  if (12 + command.length <= MAX_UDP_PACKET_BYTES) return [command];
+
+  const targetChannel = normalizeChannelId(command[1], 0);
+  const commandLength = readU32(command, 4);
+  const totalLength = Math.max(0, Math.min(command.length, commandLength) - 12);
+  const payload = command.subarray(12, 12 + totalLength);
+  const maxFragmentPayload = Math.max(1, MAX_UDP_PACKET_BYTES - 12 - 32);
+  const fragmentCount = Math.ceil(payload.length / maxFragmentPayload);
+  if (fragmentCount < 2 || fragmentCount > ENET_MAX_FRAGMENT_COUNT || payload.length > ENET_MAX_FRAGMENT_TOTAL_BYTES) {
+    console.log(`[warn] outgoing-command-fragment-too-large actor=${session?.actorId || "?"} bytes=${payload.length} fragments=${fragmentCount}/${ENET_MAX_FRAGMENT_COUNT}`);
+    return [command];
+  }
+
+  const startSeq = readU32(command, 8);
+  const commands = [];
+  for (let index = 0; index < fragmentCount; index += 1) {
+    const fragmentOffset = index * maxFragmentPayload;
+    const fragmentPayload = payload.subarray(fragmentOffset, Math.min(payload.length, fragmentOffset + maxFragmentPayload));
+    const seq = index === 0 ? startSeq : nextReliableSeqForSession(session, targetChannel);
+    commands.push(makeReliableFragment(seq, startSeq, fragmentCount, index, payload.length, fragmentOffset, fragmentPayload, targetChannel));
+  }
+  if (ENET_FRAGMENT_TRACE) {
+    console.log(`[fragment] send actor=${session?.actorId || "?"} start=${startSeq} parts=${fragmentCount} bytes=${payload.length} maxPayload=${maxFragmentPayload} channel=${targetChannel} source=sendPacket`);
+  }
+  return commands;
+}
+
+function fragmentOutgoingReliableCommands(session, commands) {
+  return (commands || []).flatMap((command) => fragmentReliableCommandIfNeeded(session, command));
+}
+
+function ensureOutboundReliableMap(session) {
+  if (!session) return null;
+  if (!(session.outboundReliable instanceof Map)) session.outboundReliable = new Map();
+  return session.outboundReliable;
+}
+
+function outboundReliableKey(channel, reliableSeq) {
+  return `${normalizeChannelId(channel, 0)}:${Number(reliableSeq) >>> 0}`;
+}
+
+function outboundReliableCommandInfo(command) {
+  if (!command || command.length < 12) return null;
+  const commandType = command[0];
+  if (commandType !== 0x06 && commandType !== 0x08) return null;
+  return {
+    commandType,
+    channel: normalizeChannelId(command[1], 0),
+    reliableSeq: readU32(command, 8),
+  };
+}
+
+function outboundReliableRto(session) {
+  const roundTripTime = Math.max(1, numberOr(session?.outboundRoundTripTime, OUTBOUND_RELIABLE_INITIAL_RTO_MS));
+  const variance = Math.max(0, numberOr(session?.outboundRoundTripVariance, 0));
+  return Math.max(OUTBOUND_RELIABLE_INITIAL_RTO_MS, Math.round(roundTripTime + 4 * variance));
+}
+
+function trackOutboundReliableCommands(socket, rinfo, session, commands) {
+  const pending = ensureOutboundReliableMap(session);
+  if (!pending) return;
+  const now = Date.now();
+  for (const command of commands || []) {
+    const info = outboundReliableCommandInfo(command);
+    if (!info) continue;
+    const key = outboundReliableKey(info.channel, info.reliableSeq);
+    const existing = pending.get(key);
+    if (existing) {
+      existing.socket = socket;
+      existing.rinfo = { address: rinfo.address, port: rinfo.port };
+      existing.lastSentAt = now;
+      continue;
     }
+    pending.set(key, {
+      ...info,
+      command: Buffer.from(command),
+      socket,
+      rinfo: { address: rinfo.address, port: rinfo.port },
+      firstSentAt: now,
+      lastSentAt: now,
+      sentCount: 1,
+      roundTripTimeout: outboundReliableRto(session),
+    });
   }
-
-  return normalizeStore({ accounts: {} });
 }
 
-async function savePostgresStore(nextStore) {
-  const client = await pgPool.connect();
-  try {
-    nextStore = normalizeStore(nextStore);
-    await client.query("BEGIN");
+function acknowledgeOutboundReliable(session, channel, reliableSeq) {
+  const pending = ensureOutboundReliableMap(session);
+  if (!pending) return false;
+  const key = outboundReliableKey(channel, reliableSeq);
+  const entry = pending.get(key);
+  if (!entry) return false;
+  pending.delete(key);
 
-    for (const rawAccount of Object.values(nextStore.accounts || {})) {
-      const account = normalizeAccount(rawAccount);
-      const createdAt = account.createdAt || new Date().toISOString();
-      const updatedAt = account.updatedAt || new Date().toISOString();
-      const existingPlayer = await client.query("SELECT updated_at FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      if (existingPlayer.rows[0] && isOlderPostgresSnapshot(updatedAt, existingPlayer.rows[0].updated_at)) {
+  const sample = Math.max(1, Date.now() - entry.lastSentAt);
+  const previousRtt = Math.max(1, numberOr(session.outboundRoundTripTime, OUTBOUND_RELIABLE_INITIAL_RTO_MS));
+  const previousVariance = Math.max(0, numberOr(session.outboundRoundTripVariance, 0));
+  session.outboundRoundTripVariance = Math.round(previousVariance * 0.75 + Math.abs(previousRtt - sample) * 0.25);
+  session.outboundRoundTripTime = Math.round(previousRtt * 0.875 + sample * 0.125);
+  if (DEBUG_PACKETS) {
+    console.log(`[ack] actor=${session.actorId || 0} channel=${channel} seq=${reliableSeq} sample=${sample}ms pending=${pending.size}`);
+  }
+  return true;
+}
+
+function clearOutboundReliableState(session) {
+  if (!session) return;
+  session.outboundReliable = new Map();
+  session.outboundRoundTripTime = OUTBOUND_RELIABLE_INITIAL_RTO_MS;
+  session.outboundRoundTripVariance = 0;
+}
+
+function sendOutboundReliableRetry(session, entry) {
+  if (!session || !entry?.socket || !entry?.rinfo || !entry.command) return false;
+  const sentTime = photonNow();
+  const packet = Buffer.concat([
+    makeHeader(session.peerId, 1, sentTime, session.challenge),
+    entry.command,
+  ]);
+  try {
+    entry.socket.send(packet, entry.rinfo.port, entry.rinfo.address);
+  } catch (error) {
+    console.log(`[warn] reliable-retry failed actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} reason=${error.message}`);
+    return false;
+  }
+  return true;
+}
+
+function runOutboundReliableRetries() {
+  const now = Date.now();
+  const expiredSessions = new Map();
+  for (const session of sessions.values()) {
+    const pending = session?.outboundReliable;
+    if (!(pending instanceof Map) || pending.size <= 0) continue;
+    for (const [key, entry] of pending.entries()) {
+      if (now - entry.lastSentAt <= entry.roundTripTimeout) continue;
+      if (
+        entry.sentCount > OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE ||
+        now - entry.firstSentAt > OUTBOUND_RELIABLE_DISCONNECT_MS
+      ) {
+        pending.delete(key);
+        if (!expiredSessions.has(session)) expiredSessions.set(session, entry);
         continue;
       }
-
-      await client.query(
-        `INSERT INTO players (
-          id, cckey, name, full_name, level, exp, exp_min, exp_max, money,
-          view, weap, taun, stats, name_pending, created_at, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
-        ON CONFLICT (id) DO UPDATE SET
-          cckey = EXCLUDED.cckey,
-          name = EXCLUDED.name,
-          full_name = EXCLUDED.full_name,
-          level = EXCLUDED.level,
-          exp = EXCLUDED.exp,
-          exp_min = EXCLUDED.exp_min,
-          exp_max = EXCLUDED.exp_max,
-          money = EXCLUDED.money,
-          view = EXCLUDED.view,
-          weap = EXCLUDED.weap,
-          taun = EXCLUDED.taun,
-          stats = EXCLUDED.stats,
-          name_pending = EXCLUDED.name_pending,
-          updated_at = EXCLUDED.updated_at`,
-        [
-          account.id,
-          account.key,
-          account.name,
-          account.fullName,
-          account.level,
-          account.exp,
-          account.expMin,
-          account.expMax,
-          account.money,
-          JSON.stringify(account.view || {}),
-          JSON.stringify(account.weap || {}),
-          JSON.stringify(account.taun || {}),
-          JSON.stringify(account.stats || {}),
-          Boolean(account.namePending),
-          createdAt,
-          updatedAt
-        ]
-      );
-
-      await client.query("DELETE FROM player_inventory WHERE player_id = $1", [account.id]);
-      for (const item of account.inventory || []) {
-        await client.query(
-          `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
-           VALUES ($1, $2, $3, $4::jsonb, now())
-           ON CONFLICT (player_id, item_key) DO UPDATE SET
-             item_type = EXCLUDED.item_type,
-             item_data = EXCLUDED.item_data,
-             updated_at = now()`,
-          [account.id, inventoryItemKey(item), Number(item?.itype || 0), JSON.stringify(item)]
-        );
-      }
-
-      await client.query("DELETE FROM player_abilities WHERE player_id = $1", [account.id]);
-      for (const ability of account.abilities || []) {
-        await client.query(
-          `INSERT INTO player_abilities (player_id, ability_id, ability_level, updated_at)
-           VALUES ($1, $2, $3, now())
-           ON CONFLICT (player_id, ability_id) DO UPDATE SET
-             ability_level = EXCLUDED.ability_level,
-             updated_at = now()`,
-          [account.id, Number(ability.i || 0), Number(ability.l || 1)]
-        );
-      }
-
-      await client.query(
-        `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
-         VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
-         ON CONFLICT (player_id) DO UPDATE SET
-           view = EXCLUDED.view,
-           weap = EXCLUDED.weap,
-           taun = EXCLUDED.taun,
-           updated_at = now()`,
-        [account.id, JSON.stringify(account.view || {}), JSON.stringify(account.weap || {}), JSON.stringify(account.taun || {})]
-      );
-
-      const ownedWeapons = [...defaultWeapons, ...(account.inventory || []).filter((item) => Number(item.itype) === 1)];
-      const accountWeaponStats = new Map((account.weaponStats || []).map((item) => [Number(item.wid || item.weapon_id || 0), item]));
-      for (const weaponItem of ownedWeapons) {
-        const weaponId = Number(weaponItem.w_id || weaponItem.id || 0);
-        const weaponStats = accountWeaponStats.get(weaponId) || {};
-        await client.query(
-          `INSERT INTO player_weapon_stats (player_id, weapon_id, weapon_type, system_name, kills, headshots, nuts, shots, hits, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
-           ON CONFLICT (player_id, weapon_id) DO UPDATE SET
-             weapon_type = EXCLUDED.weapon_type,
-             system_name = EXCLUDED.system_name,
-             kills = GREATEST(player_weapon_stats.kills, EXCLUDED.kills),
-             headshots = GREATEST(player_weapon_stats.headshots, EXCLUDED.headshots),
-             nuts = GREATEST(player_weapon_stats.nuts, EXCLUDED.nuts),
-             shots = GREATEST(player_weapon_stats.shots, EXCLUDED.shots),
-             hits = GREATEST(player_weapon_stats.hits, EXCLUDED.hits),
-             updated_at = now()`,
-          [
-            account.id,
-            weaponId,
-            Number(weaponStats.wt ?? weaponStats.weapon_type ?? weaponItem.wt ?? 0),
-            String(weaponStats.sn || weaponStats.system_name || weaponItem.sn || weaponItem.sname || ""),
-            statNumber(weaponStats.k ?? weaponStats.kills, 0),
-            statNumber(weaponStats.hs ?? weaponStats.headshots, 0),
-            statNumber(weaponStats.ns ?? weaponStats.nuts, 0),
-            statNumber(weaponStats.sh ?? weaponStats.shots, 0),
-            statNumber(weaponStats.hi ?? weaponStats.hits, 0)
-          ]
-        );
-      }
-
-      const achievementProgress = achievementProgressFor(account);
-      for (const [achievementId, progress] of Object.entries(achievementProgress)) {
-        await client.query(
-          `INSERT INTO player_achievements (player_id, achievement_id, current_value, claimed_value, updated_at)
-           VALUES ($1, $2, $3, $4, now())
-           ON CONFLICT (player_id, achievement_id) DO UPDATE SET
-             current_value = EXCLUDED.current_value,
-             claimed_value = EXCLUDED.claimed_value,
-             updated_at = now()`,
-          [account.id, Number(achievementId), Number(progress.v || 0), Number(progress.c || 0)]
-        );
-      }
+      if (!sendOutboundReliableRetry(session, entry)) continue;
+      entry.sentCount += 1;
+      entry.lastSentAt = now;
+      entry.roundTripTimeout *= 2;
+      console.log(`[retry] reliable actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} type=${entry.commandType} count=${entry.sentCount} next=${entry.roundTripTimeout}ms pending=${pending.size}`);
     }
+  }
 
-    await client.query("DELETE FROM clan_inventory");
-    await client.query("DELETE FROM clan_treasury_events");
-    await client.query("DELETE FROM clan_events");
-    await client.query("DELETE FROM clan_invites");
-    await client.query("DELETE FROM clan_members");
-    await client.query("DELETE FROM clans");
-
-    for (const clan of Object.values(nextStore.clans?.byId || {})) {
-      const normalized = normalizeClanRecord(clan);
-      await client.query(
-        `INSERT INTO clans (
-          id, name, tag, owner_player_id, level, exp, money, arm_id,
-          tag_color, homepage, description, access, access_level, max_members,
-          deleted_at, created_at, updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
-        [
-          normalized.id,
-          normalized.name,
-          normalized.tag,
-          normalized.ownerPlayerId || null,
-          normalized.level,
-          normalized.exp,
-          normalized.money,
-          normalized.armId,
-          normalized.tagColor,
-          normalized.homepage,
-          normalized.desc,
-          normalized.access,
-          normalized.accessLevel,
-          normalized.maxMembers,
-          normalized.deletedAt,
-          normalized.createdAt,
-          normalized.updatedAt
-        ]
-      );
-
-      for (const member of Object.values(normalized.members || {})) {
-        if (!nextStore.accounts?.[String(member.playerId)]) continue;
-        await client.query(
-          `INSERT INTO clan_members (
-            clan_id, player_id, role, member_level, money, clan_exp, exp_koef, player_exp, joined_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            normalized.id,
-            member.playerId,
-            Number(member.playerId) === Number(normalized.ownerPlayerId) ? "owner" : "member",
-            member.memberLevel,
-            member.money,
-            member.clanExp,
-            member.expKoef,
-            member.playerExp,
-            member.joinedAt
-          ]
-        );
-      }
-
-      for (const invite of Object.values(normalized.invites || {})) {
-        if (!nextStore.accounts?.[String(invite.playerId)]) continue;
-        await client.query(
-          `INSERT INTO clan_invites (clan_id, player_id, created_at)
-           VALUES ($1, $2, $3)`,
-          [normalized.id, invite.playerId, invite.createdAt]
-        );
-      }
-
-      for (const event of normalized.events || []) {
-        await client.query(
-          `INSERT INTO clan_events (id, clan_id, event_type, creator_player_id, data, expires_at, created_at)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
-          [
-            event.id,
-            normalized.id,
-            event.type,
-            event.creatorPlayerId || null,
-            JSON.stringify(event.data || {}),
-            event.expiresAt,
-            event.createdAt
-          ]
-        );
-      }
-
-      for (const event of normalized.treasuryEvents || []) {
-        await client.query(
-          `INSERT INTO clan_treasury_events (id, clan_id, player_id, player_name, money, event_type, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [
-            event.id,
-            normalized.id,
-            event.playerId || null,
-            event.playerName,
-            event.money,
-            event.type,
-            event.createdAt
-          ]
-        );
-      }
-
-      for (const item of normalized.inventory || []) {
-        const itemKey = String(item.itemKey || inventoryItemKey(item));
-        await client.query(
-          `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
-           VALUES ($1, $2, $3::jsonb, $4, $5)
-           ON CONFLICT (clan_id, item_key) DO UPDATE SET
-             item_data = EXCLUDED.item_data,
-             expires_at = EXCLUDED.expires_at`,
-          [
-            normalized.id,
-            itemKey,
-            JSON.stringify(item),
-            Number(item.eD || 0) > 0 ? new Date(Number(item.eD) * 1000).toISOString() : null,
-            item.createdAt || new Date().toISOString()
-          ]
-        );
-      }
-    }
-
-    await syncPostgresCatalog(client);
-
-    await client.query("COMMIT");
-  } catch (error) {
-    console.error("Failed to save PostgreSQL store", error);
-    try {
-      await client.query("ROLLBACK");
-    } catch {
-      // Ignore rollback errors after a failed connection.
-    }
-  } finally {
-    client.release();
+  for (const [session, entry] of expiredSessions.entries()) {
+    if (session.transportDisconnected) continue;
+    session.transportDisconnected = true;
+    console.log(`[state] reliable timeout actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms`);
+    detachMasterSession(session, "reliable-timeout");
+    detachSessionFromRoom(session, "reliable-timeout");
+    if (session.sessionId) sessions.delete(session.sessionId);
   }
 }
 
-let store = await initStore();
+function shotTrajectoryCount(data) {
+  const trajectory = htGet(data, 15)?.value;
+  if (trajectory?.kind === "typed-array") return trajectory.items?.length || 0;
+  if (Array.isArray(trajectory)) return trajectory.length;
+  return 0;
+}
 
-function canonicalWeaponForRawItem(item) {
-  if (Number(item?.itype || 0) !== 1) return null;
-  const rawId = Number(item?.w_id ?? item?.id);
-  const byId = canonicalWeaponsById.get(rawId) || null;
-  if (rawId >= 1 && rawId <= 7 && byId) return byId;
-  return canonicalWeaponsBySname.get(weaponSnameKey(item)) || byId;
+function describeShotRequest(parsed) {
+  const data = parsed?.params?.get(245);
+  if (!data) return "type=? mode=? ts=none";
+  const weaponType = htGet(data, 91)?.value;
+  const launchMode = shotLaunchMode(data);
+  const ts = shotTimestampKey(data) || "none";
+  const landing = htGet(data, 9)?.value;
+  const trajectory = shotTrajectoryCount(data);
+  return `type=${weaponType ?? "?"} mode=${launchMode ?? "?"} ts=${ts} landing=${landing ?? "none"} trajectory=${trajectory}`;
+}
+
+async function buildReliableCommandsForParsedPayload(port, socket, rinfo, session, parsed, payload, channel) {
+  if (payload[0] === 0xf3 && payload[1] === 0x00) {
+    const initModes = INIT_REPLY === "both" ? ["callback", "legacy"] : [INIT_REPLY];
+    const initSeqs = [];
+    const reliableCommands = [];
+    for (const initMode of initModes) {
+      const initCommands = makeReliableCommandsForPayload(session, rawInit(initMode), channel);
+      initSeqs.push(reliableCommandSeqSummary(initCommands));
+      reliableCommands.push(...initCommands);
+    }
+    console.log(`[state] init accepted reply=${initModes.join("+")} seq=${initSeqs.join(",")}`);
+    if (PUSH_ROOM_LIST_AFTER_INIT) {
+      const roomListCommands = makeReliableCommandsForPayload(session, makeRoomListEvent(session), channel);
+      reliableCommands.push(...roomListCommands);
+      console.log(`[event] room list pushed after init seq=${reliableCommandSeqSummary(roomListCommands)} rooms=${roomListSummary()}`);
+    }
+    return reliableCommands;
+  }
+
+  const responses = await handleOperation(port, socket, rinfo, session, parsed, channel);
+  const reliableCommands = responses.flatMap((response) => makeReliableCommandsForPayload(session, response, channel));
+  if (SHOT_LOCAL_RESPONSE_TRACE && photonEventCode(parsed) === 97) {
+    console.log(`[sync] shot-response actor=${session.actorId} ${describeShotRequest(parsed)} responses=${responses.length} commands=${reliableCommands.length} bytes=${commandBytes(reliableCommands)} seq=${reliableCommandSeqSummary(reliableCommands)} channel=${channel}`);
+  }
+  return reliableCommands;
+}
+
+function reliableFragmentCacheKey(session, channel, fragmentStartSeq) {
+  return `${session.reliableGeneration || 0}:${channel}:fragment:${fragmentStartSeq}`;
+}
+
+function parseReliableFragmentCommand(msg, offset, commandEnd, channel, reliableSeq) {
+  if (offset + 32 > commandEnd) {
+    return { error: `short-fragment-header size=${commandEnd - offset}` };
+  }
+  const startSeq = readU32(msg, offset + 12);
+  const fragmentCount = readU32(msg, offset + 16);
+  const fragmentNumber = readU32(msg, offset + 20);
+  const totalLength = readU32(msg, offset + 24);
+  const fragmentOffset = readU32(msg, offset + 28);
+  const dataOffset = offset + 32;
+  const fragmentLength = commandEnd - dataOffset;
+  if (!Number.isFinite(fragmentCount) || fragmentCount < 1 || fragmentCount > ENET_MAX_FRAGMENT_COUNT) {
+    return { error: `bad-fragment-count count=${fragmentCount}` };
+  }
+  if (!Number.isFinite(fragmentNumber) || fragmentNumber < 0 || fragmentNumber >= fragmentCount) {
+    return { error: `bad-fragment-number number=${fragmentNumber} count=${fragmentCount}` };
+  }
+  if (!Number.isFinite(totalLength) || totalLength < 1 || totalLength > ENET_MAX_FRAGMENT_TOTAL_BYTES) {
+    return { error: `bad-fragment-total total=${totalLength}` };
+  }
+  if (!Number.isFinite(fragmentOffset) || fragmentOffset < 0 || fragmentOffset + fragmentLength > totalLength) {
+    return { error: `bad-fragment-offset offset=${fragmentOffset} len=${fragmentLength} total=${totalLength}` };
+  }
+  return {
+    channel,
+    reliableSeq,
+    startSeq,
+    fragmentCount,
+    fragmentNumber,
+    totalLength,
+    fragmentOffset,
+    payload: msg.subarray(dataOffset, commandEnd),
+  };
+}
+
+function addReliableFragment(session, fragment) {
+  if (!session.reliableFragments) session.reliableFragments = new Map();
+  const key = reliableFragmentCacheKey(session, fragment.channel, fragment.startSeq);
+  let entry = session.reliableFragments.get(key);
+  if (!entry || entry.totalLength !== fragment.totalLength || entry.fragmentCount !== fragment.fragmentCount) {
+    entry = {
+      buffer: Buffer.alloc(fragment.totalLength),
+      received: new Set(),
+      receivedBytes: 0,
+      totalLength: fragment.totalLength,
+      fragmentCount: fragment.fragmentCount,
+      createdAt: Date.now(),
+    };
+    session.reliableFragments.set(key, entry);
+  }
+  if (!entry.received.has(fragment.fragmentNumber)) {
+    fragment.payload.copy(entry.buffer, fragment.fragmentOffset);
+    entry.received.add(fragment.fragmentNumber);
+    entry.receivedBytes += fragment.payload.length;
+  }
+  while (session.reliableFragments.size > 32) {
+    const firstKey = session.reliableFragments.keys().next().value;
+    session.reliableFragments.delete(firstKey);
+  }
+  return entry.received.size === entry.fragmentCount ? { key, payload: entry.buffer } : null;
+}
+
+function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
+  const outgoingCommands = fragmentOutgoingReliableCommands(session, commands);
+  const sentTime = photonNow();
+  const buildPacket = (packetCommands) => Buffer.concat([
+    makeHeader(peerIdOverride ?? session.peerId, packetCommands.length, sentTime, session.challenge),
+    ...packetCommands,
+  ]);
+  const packet = buildPacket(outgoingCommands);
+
+  if (MAX_UDP_PACKET_BYTES > 0 && outgoingCommands.length > 1 && packet.length > MAX_UDP_PACKET_BYTES) {
+    let chunk = [];
+    for (const command of outgoingCommands) {
+      const nextChunk = [...chunk, command];
+      if (chunk.length > 0 && buildPacket(nextChunk).length > MAX_UDP_PACKET_BYTES) {
+        sendPacket(socket, rinfo, session, chunk, peerIdOverride);
+        chunk = [command];
+      } else {
+        chunk = nextChunk;
+      }
+    }
+    if (chunk.length > 0) {
+      sendPacket(socket, rinfo, session, chunk, peerIdOverride);
+    }
+    return;
+  }
+
+  socket.send(packet, rinfo.port, rinfo.address);
+  trackOutboundReliableCommands(socket, rinfo, session, outgoingCommands);
+  const ackOnly = outgoingCommands.every((command) => command[0] === 0x01);
+  if (LOG_SEND_PACKETS || (!ackOnly && MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES)) {
+    console.log(`[send] bytes=${packet.length} to=${rinfo.address}:${rinfo.port} cmds=${outgoingCommands.length}`);
+  }
+  if (MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES) {
+    console.log(`[warn] udp-packet-large bytes=${packet.length} max=${MAX_UDP_PACKET_BYTES} cmds=${outgoingCommands.length}`);
+  }
+}
+
+function nextReliableSeqForSession(session, channel = 0) {
+  const targetChannel = normalizeChannelId(channel, 0);
+  if (targetChannel === 0) return session.serverSeq++;
+  if (!session.serverSeqByChannel) session.serverSeqByChannel = new Map();
+  const seq = (Number(session.serverSeqByChannel.get(targetChannel)) || 0) + 1;
+  session.serverSeqByChannel.set(targetChannel, seq);
+  return seq;
+}
+
+function currentReliableSeqForSession(session, channel = 0) {
+  const targetChannel = normalizeChannelId(channel, 0);
+  if (targetChannel === 0) return Math.max(0, (Number(session.serverSeq) || 0) - 1);
+  return Math.max(0, Number(session.serverSeqByChannel?.get(targetChannel)) || 0);
+}
+
+function nextUnreliableSeqForSession(session, channel = 0) {
+  const targetChannel = normalizeChannelId(channel, 0);
+  if (targetChannel === 0) {
+    session.unreliableSeq = ((Number(session.unreliableSeq) || 0) + 1) >>> 0;
+    return session.unreliableSeq;
+  }
+  if (!session.unreliableSeqByChannel) session.unreliableSeqByChannel = new Map();
+  const seq = ((Number(session.unreliableSeqByChannel.get(targetChannel)) || 0) + 1) >>> 0;
+  session.unreliableSeqByChannel.set(targetChannel, seq);
+  return seq;
+}
+
+function sendReliablePayload(socket, rinfo, session, payload, channel = 0) {
+  sendPacket(socket, rinfo, session, makeReliableCommandsForPayload(session, payload, channel));
+}
+
+function reliableChannelForSession(session, fallback = 0, options = {}) {
+  if (options.forceChannel) return normalizeChannelId(fallback, 0);
+  const lastChannel = Number(session?.lastChannel);
+  if (Number.isInteger(lastChannel) && lastChannel >= 0 && lastChannel <= 255) return lastChannel;
+  return normalizeChannelId(fallback, 0);
+}
+
+function rawNull() {
+  return Buffer.from([0x2a]);
+}
+
+function rawByte(value) {
+  return Buffer.from([0x62, Number(value) & 0xff]);
+}
+
+function rawBool(value) {
+  return Buffer.from([0x6f, value ? 1 : 0]);
+}
+
+function rawShort(value) {
+  return Buffer.concat([Buffer.from([0x6b]), i16(Number(value) || 0)]);
+}
+
+function rawInt(value) {
+  return Buffer.concat([Buffer.from([0x69]), i32(Number(value) || 0)]);
+}
+
+function rawLong(value) {
+  return Buffer.concat([Buffer.from([0x6c]), i64(value ?? photonNow())]);
+}
+
+function rawFloat(value) {
+  return Buffer.concat([Buffer.from([0x66]), f32(value)]);
+}
+
+function rawString(value) {
+  const data = Buffer.from(String(value ?? ""), "utf8");
+  return Buffer.concat([Buffer.from([0x73]), u16(data.length), data]);
+}
+
+function rawStringArray(values) {
+  const items = values.map((value) => {
+    const data = Buffer.from(String(value ?? ""), "utf8");
+    return Buffer.concat([u16(data.length), data]);
+  });
+  return Buffer.concat([Buffer.from([0x61]), u16(items.length), ...items]);
+}
+
+function rawShortArray(values) {
+  return rawTypedArray(0x6b, values.map((value) => i16(Number(value) || 0)));
+}
+
+function rawHashtable(entries) {
+  return Buffer.concat([Buffer.from([0x68]), rawHashtableBody(entries)]);
+}
+
+function rawHashtableFromBody(body) {
+  return Buffer.concat([Buffer.from([0x68]), body]);
+}
+
+function rawHashtableBody(entries) {
+  return Buffer.concat([
+    u16(entries.length),
+    ...entries.flatMap((entry) => [entry.key, entry.value]),
+  ]);
+}
+
+function rawDictionary(keyType, valueType, entries) {
+  return Buffer.concat([
+    Buffer.from([0x44, keyType, valueType]),
+    u16(entries.length),
+    ...entries.flatMap((entry) => [entry.key, entry.value]),
+  ]);
+}
+
+function rawTypedDictionary(keyType, valueType, entries) {
+  return Buffer.concat([
+    Buffer.from([0x44, keyType, valueType]),
+    u16(entries.length),
+    ...entries.flatMap((entry) => [entry.keyBody, entry.valueBody]),
+  ]);
+}
+
+function rawTypedArray(itemType, itemBodies) {
+  return Buffer.concat([
+    Buffer.from([0x79]),
+    u16(itemBodies.length),
+    Buffer.from([itemType & 0xff]),
+    ...itemBodies,
+  ]);
+}
+
+function rawParamTable(entries) {
+  return Buffer.concat([
+    u16(entries.length),
+    ...entries.flatMap((entry) => [Buffer.from([entry.key & 0xff]), entry.value]),
+  ]);
+}
+
+function rawOperationResponse(opCode, entries, returnCode = 0, debugMessage = "") {
+  return Buffer.concat([
+    Buffer.from([0xf3, 0x03, opCode & 0xff]),
+    i16(returnCode),
+    debugMessage ? rawString(debugMessage) : rawNull(),
+    rawParamTable(entries),
+  ]);
+}
+
+function rawEvent(eventCode, entries) {
+  return Buffer.concat([
+    Buffer.from([0xf3, 0x04, eventCode & 0xff]),
+    rawParamTable(entries),
+  ]);
+}
+
+function rawInit(mode = INIT_REPLY) {
+  // Photon3Unity3D.dll routes message type 1 to PeerBase.InitCallback().
+  // Keep the option names stable because old VPS commands use INIT_REPLY=callback.
+  return mode === "both" ? Buffer.from([0xf3, 0x01]) : Buffer.from([0xf3, 0x01]);
+}
+
+function readString(buf, offset) {
+  const len = readU16(buf, offset);
+  const start = offset + 2;
+  return { value: repairWindows1251Mojibake(buf.subarray(start, start + len).toString("utf8")), offset: start + len };
+}
+
+function readTypedRaw(buf, offset, forcedType = null) {
+  const start = offset;
+  const type = forcedType == null ? buf[offset++] : forcedType;
+  let value = null;
+
+  if (type === 0x2a) {
+    return { type, value: null, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x62) {
+    value = buf[offset++];
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x6f) {
+    value = Boolean(buf[offset++]);
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x6b) {
+    value = readI16(buf, offset);
+    offset += 2;
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x69) {
+    value = readI32(buf, offset);
+    offset += 4;
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x6c) {
+    value = Number(buf.readBigInt64BE(offset));
+    offset += 8;
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x66) {
+    value = buf.readFloatBE(offset);
+    offset += 4;
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x64) {
+    value = buf.readDoubleBE(offset);
+    offset += 8;
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x73) {
+    const parsed = readString(buf, offset);
+    value = parsed.value;
+    offset = parsed.offset;
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x68) {
+    const count = readU16(buf, offset);
+    offset += 2;
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const keyParsed = readTypedRaw(buf, offset);
+      offset = keyParsed.offset;
+      const valueParsed = readTypedRaw(buf, offset);
+      offset = valueParsed.offset;
+      entries.push({ key: keyParsed, value: valueParsed });
+    }
+    value = { kind: "hashtable", entries };
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x44) {
+    const keyType = buf[offset++];
+    const valueType = buf[offset++];
+    const count = readU16(buf, offset);
+    offset += 2;
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const keyParsed = readTypedRaw(buf, offset, keyType === 0 || keyType === 0x2a ? null : keyType);
+      offset = keyParsed.offset;
+      const valueParsed = readTypedRaw(buf, offset, valueType === 0 || valueType === 0x2a ? null : valueType);
+      offset = valueParsed.offset;
+      entries.push({ key: keyParsed, value: valueParsed });
+    }
+    value = { kind: "dictionary", keyType, valueType, entries };
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x78) {
+    const len = readI32(buf, offset);
+    offset += 4 + len;
+    return { type, value: null, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x61) {
+    const count = readU16(buf, offset);
+    offset += 2;
+    const items = [];
+    for (let i = 0; i < count; i++) {
+      const parsed = readString(buf, offset);
+      offset = parsed.offset;
+      items.push(parsed.value);
+    }
+    return { type, value: items, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x6e) {
+    const count = readI32(buf, offset);
+    offset += 4 + count * 4;
+    return { type, value: null, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x7a) {
+    const count = readU16(buf, offset);
+    offset += 2;
+    for (let i = 0; i < count; i++) {
+      const parsed = readTypedRaw(buf, offset);
+      offset = parsed.offset;
+    }
+    return { type, value: null, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x76) {
+    const count = readU16(buf, offset);
+    offset += 2;
+    if (count > 0) {
+      const itemType = buf[offset++];
+      for (let i = 0; i < count; i++) {
+        const parsed = readTypedRaw(buf, offset, itemType);
+        offset = parsed.offset;
+      }
+    }
+    return { type, value: null, raw: buf.subarray(start, offset), offset };
+  }
+  if (type === 0x79) {
+    const count = readU16(buf, offset);
+    offset += 2;
+    const itemType = buf[offset++];
+    const items = [];
+    for (let i = 0; i < count; i++) {
+      const parsed = readTypedRaw(buf, offset, itemType);
+      offset = parsed.offset;
+      items.push(parsed);
+    }
+    value = { kind: "typed-array", itemType, items };
+    return { type, value, raw: buf.subarray(start, offset), offset };
+  }
+
+  throw new Error(`unsupported photon type 0x${type.toString(16)} at ${start}`);
+}
+
+function readParameterTable(buf, offset) {
+  const count = readU16(buf, offset);
+  offset += 2;
+  const params = new Map();
+  for (let i = 0; i < count; i++) {
+    const keyByte = buf[offset++];
+    const parsed = readTypedRaw(buf, offset);
+    offset = parsed.offset;
+    params.set(keyByte, parsed);
+  }
+  return { params, offset };
+}
+
+function parsePhotonRequest(payload) {
+  if (payload.length < 5 || payload[0] !== 0xf3) return null;
+  const messageType = payload[1] & 0x7f;
+  if (messageType !== 2) return { messageType };
+  const opCode = payload[2];
+  const parsed = readParameterTable(payload, 3);
+  return { messageType, opCode, params: parsed.params };
+}
+
+function htGet(parsedValue, wantedKey) {
+  if (!parsedValue || !parsedValue.value || !parsedValue.value.entries) return undefined;
+  for (const entry of parsedValue.value.entries) {
+    if (entry.key.value === wantedKey) return entry.value;
+    if (String(entry.key.value) === String(wantedKey)) return entry.value;
+  }
+  return undefined;
+}
+
+function describeHashtable(parsedValue) {
+  if (!parsedValue || !parsedValue.value || !parsedValue.value.entries) return "";
+  return parsedValue.value.entries
+    .map((entry) => `${String(entry.key.value)}:0x${Number(entry.value.type).toString(16)}`)
+    .join(",");
+}
+
+function photonEventCode(parsed) {
+  return parsed?.opCode === 253 ? parsed.params.get(244)?.value : null;
+}
+
+function isMoveEvent(parsed) {
+  return photonEventCode(parsed) === 99;
+}
+
+function shouldLogParsedPayload(parsed) {
+  return DEBUG_PACKETS || DEBUG_MOVE_PACKETS || !isMoveEvent(parsed);
+}
+
+function transformFromEventData(parsed) {
+  const data = parsed?.params?.get(245);
+  const x = Number(htGet(data, 1)?.value);
+  const y = Number(htGet(data, 2)?.value);
+  const z = Number(htGet(data, 3)?.value);
+  const rotX = Number(htGet(data, 4)?.value || 0);
+  const rotY = Number(htGet(data, 5)?.value ?? htGet(data, 7)?.value ?? 0);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+  return {
+    x,
+    y,
+    z,
+    rotX: Number.isFinite(rotX) ? rotX : 0,
+    rotY: Number.isFinite(rotY) ? rotY : 0,
+  };
+}
+
+function numberOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function stringOr(value, fallback = "") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+// Telemetry only: Contra City has legitimate weapon-propelled movement, so
+// movement is intentionally outside this first anti-cheat pass. These counters
+// cover only weapon events that the server has already rejected from its own
+// authoritative weapon state.
+function noteAntiCheatWeaponViolation(session, kind, reason, details = {}) {
+  if (!session) return;
+
+  const antiCheat = session.antiCheat || (session.antiCheat = {
+    weaponViolations: new Map(),
+    totalWeaponViolations: 0,
+  });
+  const key = `${kind}:${reason}`;
+  const count = numberOr(antiCheat.weaponViolations.get(key), 0) + 1;
+  antiCheat.weaponViolations.set(key, count);
+  antiCheat.totalWeaponViolations = numberOr(antiCheat.totalWeaponViolations, 0) + 1;
+
+  // Preserve useful evidence without turning an intentional packet flood into
+  // an AWS log flood.
+  if (count !== 1 && count !== 5 && count % 25 !== 0) return;
+
+  const weapon = details.weaponType == null ? "" : ` type=${details.weaponType}`;
+  const slot = details.slot == null ? "" : ` slot=${details.slot}`;
+  const wait = Number.isFinite(Number(details.waitMs)) && Number(details.waitMs) > 0
+    ? ` wait=${Math.round(Number(details.waitMs))}ms`
+    : "";
+  console.log(`[anticheat] weapon-rejected actor=${session.actorId ?? "?"} kind=${kind} reason=${reason}${weapon}${slot}${wait} count=${count} total=${antiCheat.totalWeaponViolations}`);
+}
+
+const WINDOWS_1251_DECODER = new TextDecoder("windows-1251");
+const WINDOWS_1251_ENCODER = new Map();
+for (let byte = 0; byte <= 0xff; byte += 1) {
+  WINDOWS_1251_ENCODER.set(WINDOWS_1251_DECODER.decode(Uint8Array.of(byte)), byte);
+}
+
+function repairWindows1251Mojibake(value) {
+  const source = String(value ?? "");
+  if (!/[��][\u0080-\u00bf]/.test(source)) return source;
+  const bytes = [];
+  for (const character of source) {
+    const byte = WINDOWS_1251_ENCODER.get(character);
+    if (byte == null) return source;
+    bytes.push(byte);
+  }
+  const decoded = Buffer.from(bytes).toString("utf8");
+  if (!decoded || decoded.includes("\ufffd")) return source;
+  if (!/[�-��-���]/.test(decoded)) return source;
+  return decoded;
+}
+function decodeLegacyBonusText(value) {
+  const source = stringOr(value, "");
+  // Restored tooltip constants contain UTF-8 bytes decoded as Windows-1251.
+  // API strings can already be valid UTF-8, so accept the reversal only when
+  // every character maps losslessly and the resulting UTF-8 has no replacement.
+  if (!/[РС][^\s]/.test(source)) return source;
+  const bytes = [];
+  for (const character of source) {
+    const byte = WINDOWS_1251_ENCODER.get(character);
+    if (byte == null) return source;
+    bytes.push(byte);
+  }
+  const decoded = Buffer.from(bytes).toString("utf8");
+  return decoded.includes("\ufffd") ? source : decoded;
+}
+
+function shortRoomValue(value, fallback, min = 0, max = 32767) {
+  const number = Math.trunc(numberOr(value, fallback));
+  return Math.max(min, Math.min(max, number));
+}
+
+function boolOr(value, fallback = false) {
+  if (value == null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(text)) return true;
+  if (["false", "0", "no", "off"].includes(text)) return false;
+  return fallback;
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.max(min, Math.min(max, number));
+}
+
+function hashStringToU32(value) {
+  const text = String(value ?? "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+  }
+  return hash >>> 0;
+}
+
+function deterministicUnit(...parts) {
+  return hashStringToU32(parts.join("|")) / 0x100000000;
+}
+
+function roomSettingsFrom(rawRoom) {
+  const hasFullSettings = Boolean(htGet(rawRoom, "map"));
+  const name = stringOr(htGet(rawRoom, "name")?.value, DEFAULT_ROOM);
+  const map = stringOr(htGet(rawRoom, "map")?.value, DEFAULT_MAP);
+  const modeValue = htGet(rawRoom, "game_mode")?.value;
+  const requestedMode = Number(modeValue ?? 1);
+  const mode = normalizeModeForMap(map, FORCE_TEAM_MODE ? MAP_MODE_TEAM_DEATHMATCH : requestedMode);
+  if (mode !== requestedMode) {
+    console.log(`[state] room mode normalized map=${map} requested=${requestedMode} accepted=${mode}`);
+  }
+  const maxUsers = htGet(rawRoom, "max_users")?.value;
+  const friendly = htGet(rawRoom, "friendly_fire")?.value;
+  const guestMode = htGet(rawRoom, "guest_mode")?.value;
+  return {
+    name,
+    map,
+    mode,
+    maxUsers: shortRoomValue(maxUsers, 8, 1, 64),
+    friendlyFire: boolOr(friendly, false),
+    timeLimit: shortRoomValue(htGet(rawRoom, "time_limit")?.value, 10, 1, 50),
+    fragLimit: shortRoomValue(htGet(rawRoom, "frag_limit")?.value, 50, 1, 1000),
+    lvlMin: shortRoomValue(htGet(rawRoom, "lvl_min")?.value, 1, 1, 99),
+    lvlMax: shortRoomValue(htGet(rawRoom, "lvl_max")?.value, 50, 1, 99),
+    password: stringOr(htGet(rawRoom, "password")?.value, ""),
+    guestMode: guestMode == null ? 0 : shortRoomValue(guestMode === true ? 1 : guestMode, 0, 0, 32767),
+    hasFullSettings,
+  };
+}
+
+function makeRoomSettingsRaw(settings) {
+  const entries = [
+    { key: rawString("time_limit"), value: rawShort(shortRoomValue(settings.timeLimit, 10, 1, 50)) },
+    { key: rawString("frag_limit"), value: rawShort(shortRoomValue(settings.fragLimit, 50, 1, 1000)) },
+    { key: rawString("friendly_fire"), value: rawBool(settings.friendlyFire) },
+    { key: rawString("lvl_min"), value: rawShort(shortRoomValue(settings.lvlMin, 1, 1, 99)) },
+    { key: rawString("lvl_max"), value: rawShort(shortRoomValue(settings.lvlMax, 50, 1, 99)) },
+    { key: rawString("game_mode"), value: rawByte(settings.mode) },
+    { key: rawString("map"), value: rawString(settings.map) },
+    { key: rawString("max_users"), value: rawShort(shortRoomValue(settings.maxUsers, 8, 1, 64)) },
+    { key: rawString("name"), value: rawString(settings.name) },
+    {
+      key: rawString("game_param"),
+      value: rawHashtable([
+        { key: rawString("remote_animation_send"), value: rawBool(true) },
+        { key: rawString("remote_animation_receive"), value: rawBool(true) },
+        { key: rawString("transform_per_second"), value: rawInt(20) },
+        { key: rawString("tcp_transform_per_second"), value: rawInt(0) },
+        { key: rawString("interpolation_mode"), value: rawByte(ROOM_INTERPOLATION_MODE) },
+        { key: rawString("destroy_geometry"), value: rawBool(DESTROY_GEOMETRY) },
+      ]),
+    },
+  ];
+  if (settings.password) {
+    entries.push({ key: rawString("password"), value: rawString(settings.password) });
+  }
+  if (settings.guestMode) {
+    entries.push({ key: rawString("guest_mode"), value: rawShort(shortRoomValue(settings.guestMode, 0)) });
+  }
+  return rawHashtable(entries);
+}
+
+function makeEmptyActorListRaw() {
+  return rawHashtable([]);
+}
+
+function shouldDeferPeerFromJoinActorList(playerSession) {
+  return Boolean(
+    playerSession?.actorWearCount > 0 &&
+    !playerSession.joinActorHasWears &&
+    playerSession.peerActorHasWears &&
+    playerSession.peerActorRaw
+  );
+}
+
+function makeRoomActorListRaw(room, excludeSession = null) {
+  if (excludeSession) {
+    excludeSession.joinActorListIds = new Set();
+    excludeSession.deferredJoinActorIds = new Set();
+  }
+  if (!room?.players?.size) return makeEmptyActorListRaw();
+  const entries = [];
+  for (const [actorId, playerSession] of room.players.entries()) {
+    if (!playerSession || playerSession === excludeSession) continue;
+    refreshActorWireDataForRoomActorList(playerSession);
+    if (excludeSession && shouldDeferPeerFromJoinActorList(playerSession)) {
+      excludeSession.deferredJoinActorIds.add(Number(actorId));
+      console.log(`[state] actor-list defer target=${excludeSession.actorId || "pending"} actor=${actorId} reason=join-no-wears peerProfile=${playerSession.peerActorProfile || "n/a"} peerPacket=${playerSession.peerActorRawBytes || 0} joinProfile=${playerSession.joinActorProfile || "n/a"} joinPacket=${playerSession.joinActorRawBytes || 0} wears=${playerSession.actorWearCount || 0} wearList=${playerSession.actorWearSummary || "none"}`);
+      continue;
+    }
+    const playerActorRaw = playerSession.joinActorRaw || playerSession.peerActorRaw || playerSession.actorRaw;
+    if (!playerActorRaw) continue;
+    excludeSession?.joinActorListIds?.add(Number(actorId));
+    entries.push({
+      key: rawInt(actorId),
+      value: playerActorRaw,
+    });
+  }
+  return rawHashtable(entries);
+}
+
+const WEAPON_NAME_OVERRIDES = {
+  ohca_basebalbat: "OHCA_BasebalBat",
+  ohca_crowbar: "OHCA_Crowbar",
+  thca_scythe_b: "THCA_Scythe_B",
+  ohca_torch_f: "OHCA_Torch_F",
+  thca_katana_b: "THCA_Katana_B",
+  ohca_zombie: "OHCA_Zombie",
+  ohca_candy: "OHCA_Candy",
+  ohca_candy2: "OHCA_Candy2",
+  hg_makarov: "HG_Makarov",
+  hg_walther_r: "HG_Walther_R",
+  hg_tt: "HG_TT",
+  hg_taurus: "HG_Taurus",
+  hg_usp: "HG_USP",
+  hg_sigsauerp226_b: "HG_SIGSauerP226_B",
+  hg_glock_s: "HG_Glock_S",
+  hg_desert: "HG_Desert",
+  hg_glockb01_s: "HG_GlockB01_S",
+  hg_desertb01: "HG_DesertB01",
+  hg_waltherp99: "HG_WaltherP99",
+  mg_ak47: "MG_AK47",
+  mg_m16: "MG_M16",
+  mg_ak103: "MG_AK103",
+  mg_ak103_o: "MG_AK103_O",
+  mg_ak103d_o: "MG_AK103D_O",
+  mg_ak47b06: "MG_AK47B06",
+  mg_ak47b07: "MG_AK47B07",
+  mg_ak47b08: "MG_AK47B08",
+  mg_m4: "MG_M4",
+  mg_m4_o: "MG_M4_O",
+  mg_m4d_o: "MG_M4D_O",
+  mg_aug1_o: "MG_AUG1_O",
+  mg_aug2_o: "MG_AUG2_O",
+  mg_aug3_o: "MG_AUG3_O",
+  mg_aug4_o: "MG_AUG4_O",
+  mg_aug5_o: "MG_AUG5_O",
+  mg_assaultrifle02: "MG_AssaultRifle02",
+  mg_assaultrifle03: "MG_AssaultRifle03",
+  mg_ump45: "MG_UMP45",
+  mg_ump45d_o: "MG_UMP45D_O",
+  mg_ump45d2_o: "MG_UMP45D2_O",
+  mg_ump45vkks_o: "MG_UMP45VKKS_O",
+  fl_n1: "FL_N1",
+  gg_m134: "GG_M134",
+  gg_m249: "GG_M249",
+  gg_fnmag: "GG_FNMAG",
+  gg_m134b01: "GG_M134B01",
+  gg_m134b02: "GG_M134B02",
+  gg_m134b03: "GG_M134B03",
+  gg_n2: "GG_N2",
+  sg_winchester1887: "SG_Winchester1887",
+  sg_novapump: "SG_Novapump",
+  sg_spas: "SG_Spas",
+  sg_remington: "SG_Remington",
+  sg_db: "SG_DB",
+  rl_rpg26: "RL_RPG26",
+  rl_rpg7: "RL_RPG7",
+  rl_rpg7b02: "RL_RPG7B02",
+  rl_m202a1: "RL_M202A1",
+  gl_milkor: "GL_Milkor",
+  gl_milkor_a: "GL_Milkor_A",
+  gl_ex41: "GL_EX41",
+  gl_grenadelauncher03: "GL_GrenadeLauncher03",
+  gl_snowlauncher: "GL_SnowLauncher",
+  bl_sticky: "BL_Sticky",
+  bl_stickyb02: "BL_StickyB02",
+  sng_snowgun: "SNG_Snowgun",
+  sr_svd: "SR_SVD",
+  sr_sniperrifle03: "SR_SniperRifle03",
+  sr_wildcat1: "SR_Wildcat1",
+  sr_wildcat2: "SR_Wildcat2",
+  sr_vintorez: "SR_Vintorez",
+  sr_arctic: "SR_Arctic",
+  sr_arcticb01: "SR_ArcticB01",
+  sr_hk417_d: "SR_HK417_D",
+  sr_m110_b: "SR_M110_B",
+  sr_steyr: "SR_Steyr",
+  sr_steyrb01: "SR_SteyrB01",
+};
+
+const DEFAULT_LOADOUT_WEAPONS = [
+  { w_id: 1, id: 1, wt: 1, ws: 1, sn: "ohca_basebalbat", vel: 100, rad: 8, ang: 2.05, rap: 340, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 8, dev: 2, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 },
+  { w_id: 2, id: 2, wt: 3, ws: 2, sn: "hg_makarov", vel: 100, rad: 10, ang: 0, rap: 240, rt: 2967, ammo: 12, ammo_tot: 60, lt: 520, krit: 7, dev: 8, smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 },
+  { w_id: 3, id: 3, wt: 4, ws: 3, sn: "mg_ak47", vel: 100, rad: 12, ang: 0, rap: 150, rt: 2967, ammo: 30, ammo_tot: 90, lt: 650, krit: 5, dev: 12, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 },
+  { w_id: 4, id: 4, wt: 6, ws: 4, sn: "gg_m134", vel: 100, rad: 14, ang: 0, rap: 125, rt: 800, ammo: 90, ammo_tot: 180, lt: 1100, krit: 4, dev: 18, smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 },
+  { w_id: 5, id: 5, wt: 7, ws: 5, sn: "sg_winchester1887", vel: 100, rad: 18, ang: 0, rap: 620, rt: 4500, ammo: 6, ammo_tot: 36, lt: 900, krit: 6, dev: 24, smindam: 42, smaxdam: 62, mmindam: 22, mmaxdam: 35, lmindam: 8, lmaxdam: 14 },
+  { w_id: 6, id: 6, wt: 8, ws: 6, sn: "rl_rpg26", vel: 65, rad: 28, ang: 0, rap: 900, rt: 2300, ammo: 1, ammo_tot: 8, lt: 1150, krit: 3, dev: 6, smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 },
+  { w_id: 7, id: 7, wt: 10, ws: 7, sn: "sr_svd", vel: 100, rad: 10, ang: 0, rap: 850, rt: 2967, ammo: 10, ammo_tot: 40, lt: 1000, krit: 8, dev: 3, smindam: 34, smaxdam: 48, mmindam: 38, mmaxdam: 54, lmindam: 42, lmaxdam: 60 },
+];
+
+const WEAR_VIEW_KEYS = [
+  ["hat", 1],
+  ["mask", 2],
+  ["gloves", 3],
+  ["shirt", 4],
+  ["pants", 5],
+  ["boots", 6],
+  ["backpack", 7],
+  ["other", 8],
+  ["head", 9],
+];
+
+const PASSIVE_BATTLE_ENHANCER_IDS = new Set([
+  1, 2, 3, 4, 5,
+  10, 11, 12,
+  30, 31, 32, 33, 34, 35, 36,
+]);
+
+const IMPACT_TYPE = Object.freeze({
+  NONE: 0,
+  FIRE: 1,
+  BLOOD: 2,
+  POISON: 3,
+  FROST: 5,
+});
+
+const IMPACT_DOT_DEFINITIONS = [
+  { type: IMPACT_TYPE.FIRE, min: 3, max: 6, ids: [80], keys: ["mg_aug5_o"] },
+  { type: IMPACT_TYPE.FIRE, min: 2, max: 5, ids: [72], keys: ["ohca_candy"] },
+  { type: IMPACT_TYPE.FIRE, min: 6, max: 10, ids: [104], keys: ["gl_grenadelauncher03"] },
+  { type: IMPACT_TYPE.FROST, min: 2, max: 5, ids: [71], keys: ["ohca_candy2"] },
+  { type: IMPACT_TYPE.BLOOD, min: 6, max: 10, ids: [59], keys: ["rl_rpg7b02"] },
+  { type: IMPACT_TYPE.BLOOD, min: 3, max: 6, ids: [79, 109], keys: ["mg_aug4_o", "sg_remington"] },
+  { type: IMPACT_TYPE.POISON, min: 3, max: 5, ids: [76], keys: ["mg_aug1_o"] },
+  { type: IMPACT_TYPE.POISON, min: 4, max: 7, ids: [45], keys: ["gl_milkor_a"] },
+  { type: IMPACT_TYPE.POISON, min: 3, max: 6, ids: [75], keys: ["sr_wildcat2"] },
+].map((definition) => ({
+  ...definition,
+  ticks: Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS)),
+}));
+
+const IMPACT_DOT_BY_WEAPON_ID = new Map();
+const IMPACT_DOT_BY_WEAPON_KEY = new Map();
+for (const definition of IMPACT_DOT_DEFINITIONS) {
+  for (const id of definition.ids || []) IMPACT_DOT_BY_WEAPON_ID.set(Number(id), definition);
+  for (const key of definition.keys || []) IMPACT_DOT_BY_WEAPON_KEY.set(String(key).toLowerCase(), definition);
+}
+
+const IMPACT_PROTECTION_ENHANCER_BY_TYPE = new Map([
+  [IMPACT_TYPE.FIRE, 30],
+  [IMPACT_TYPE.BLOOD, 31],
+  [IMPACT_TYPE.POISON, 32],
+  [IMPACT_TYPE.FROST, 34],
+]);
+const ARCING_LAUNCHER_VELOCITY = 10;
+const ARCING_LAUNCHER_LIFE = 7000;
+const ARCING_LAUNCHER_DISTANCE = 10;
+
+const WEAPON_STAT_OVERRIDES = {
+  ohca_basebalbat: {
+    rt: 0,
+    ammo: 0,
+    ammo_tot: 0,
+    rad: 8,
+    ang: 2.05
+  },
+  ohca_candy: {
+    w_id: 72, id: 72, wt: 1, ws: 1, sn: "ohca_candy", vel: 100, rad: 8, ang: 2.05, rap: 330, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 10, dev: 2,
+    smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15
+  },
+  ohca_candy2: {
+    w_id: 71, id: 71, wt: 1, ws: 1, sn: "ohca_candy2", vel: 100, rad: 8, ang: 2.05, rap: 335, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
+    smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16
+  },
+  hg_taurus: {
+    w_id: 108, id: 108, wt: 3, ws: 2, sn: "hg_taurus", vel: 100, rad: 10, ang: 0, rap: 260, rt: 2533, ammo: 6, ammo_tot: 38, lt: 520, krit: 10, dev: 6,
+    smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22
+  },
+  hg_usp: {
+    w_id: 105, id: 105, wt: 3, ws: 2, sn: "hg_usp", vel: 100, rad: 10, ang: 0, rap: 205, rt: 2667, ammo: 13, ammo_tot: 45, lt: 520, krit: 9, dev: 5,
+    smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19
+  },
+  hg_desertb01: {
+    w_id: 69, id: 69, wt: 3, ws: 2, sn: "hg_desertb01", vel: 100, rad: 10, ang: 0, rap: 280, rt: 2533, ammo: 7, ammo_tot: 42, lt: 520, krit: 10, dev: 6,
+    smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19
+  },
+  hg_desert: {
+    w_id: 53, id: 53, wt: 3, ws: 2, sn: "hg_desert", vel: 100, rad: 10, ang: 0, rap: 260, rt: 2533, ammo: 7, ammo_tot: 42, lt: 520, krit: 9, dev: 7,
+    smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21
+  },
+  hg_glockb01_s: {
+    w_id: 68, id: 68, wt: 3, ws: 2, sn: "hg_glockb01_s", vel: 100, rad: 10, ang: 0, rap: 150, rt: 2667, ammo: 18, ammo_tot: 108, lt: 520, krit: 6, dev: 9,
+    smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16
+  },
+  mg_assaultrifle02: {
+    w_id: 101, id: 101, wt: 4, ws: 3, sn: "mg_assaultrifle02", vel: 100, rad: 12, ang: 0, rap: 145, rt: 3000, ammo: 35, ammo_tot: 175, lt: 650, krit: 6, dev: 9,
+    smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19
+  },
+  mg_ump45vkks_o: {
+    w_id: 73, id: 73, wt: 4, ws: 3, sn: "mg_ump45vkks_o", vel: 100, rad: 12, ang: 0, rap: 145, rt: 3000, ammo: 35, ammo_tot: 210, lt: 650, krit: 8, dev: 6,
+    smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26
+  },
+  mg_aug1_o: {
+    w_id: 76, id: 76, wt: 4, ws: 3, sn: "mg_aug1_o", vel: 100, rad: 12, ang: 0, rap: 145, rt: 3000, ammo: 30, ammo_tot: 180, lt: 650, krit: 6, dev: 9,
+    smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19
+  },
+  mg_aug5_o: {
+    w_id: 80, id: 80, wt: 4, ws: 3, sn: "mg_aug5_o", vel: 100, rad: 12, ang: 0, rap: 135, rt: 3000, ammo: 30, ammo_tot: 132, lt: 650, krit: 8, dev: 8,
+    smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_aug4_o: {
+    w_id: 79, id: 79, wt: 4, ws: 3, sn: "mg_aug4_o", vel: 100, rad: 12, ang: 0, rap: 130, rt: 3000, ammo: 30, ammo_tot: 168, lt: 650, krit: 8, dev: 6,
+    smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  sr_svd: {
+    smindam: 34,
+    smaxdam: 48,
+    mmindam: 38,
+    mmaxdam: 54,
+    lmindam: 42,
+    lmaxdam: 60,
+    krit: 8
+  },
+  gg_fnmag: {
+    w_id: 110, id: 110, wt: 6, ws: 4, sn: "gg_fnmag", vel: 100, rad: 14, ang: 0, rap: 125, rt: 4000, ammo: 90, ammo_tot: 270, lt: 1100, krit: 6, dev: 14,
+    smindam: 17, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 19
+  },
+  gg_m134b03: {
+    w_id: 67, id: 67, wt: 6, ws: 4, sn: "gg_m134b03", vel: 100, rad: 14, ang: 0, rap: 115, rt: 800, ammo: 100, ammo_tot: 300, lt: 1100, krit: 4, dev: 20,
+    smindam: 15, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 10, lmaxdam: 17
+  },
+  sg_remington: {
+    w_id: 109, id: 109, wt: 7, ws: 5, sn: "sg_remington", vel: 100, rad: 18, ang: 0, rap: 660, rt: 3864, ammo: 3, ammo_tot: 11, lt: 900, krit: 11, dev: 26,
+    smindam: 58, smaxdam: 86, mmindam: 34, mmaxdam: 52, lmindam: 10, lmaxdam: 18,
+    wsp: 15,
+    shake: 1
+  },
+  sg_spas: {
+    w_id: 106, id: 106, wt: 7, ws: 5, sn: "sg_spas", vel: 100, rad: 18, ang: 0, rap: 650, rt: 3500, ammo: 6, ammo_tot: 36, lt: 900, krit: 8, dev: 22,
+    smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16
+  },
+  rl_m202a1: {
+    w_id: 43, id: 43, wt: 8, ws: 6, sn: "rl_m202a1", vel: 60, rad: 30, ang: 0, rap: 920, rt: 5067, ammo: 4, ammo_tot: 16, lt: 1200, krit: 3, dev: 7,
+    smindam: 45, smaxdam: 70, mmindam: 34, mmaxdam: 54, lmindam: 22, lmaxdam: 38,
+    wsp: -15,
+    launch: 1,
+    shake: 1
+  },
+  rl_rpg7b02: {
+    w_id: 59, id: 59, wt: 8, ws: 6, sn: "rl_rpg7b02", vel: 65, rad: 28, ang: 0, rap: 900, rt: 2967, ammo: 1, ammo_tot: 9, lt: 1150, krit: 4, dev: 6,
+    smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78
+  },
+  gl_grenadelauncher03: {
+    w_id: 104, id: 104, wt: 9, ws: 6, sn: "gl_grenadelauncher03", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, rap: 880, rt: 4000, ammo: 3, ammo_tot: 18, lt: ARCING_LAUNCHER_LIFE, krit: 4, dev: 5,
+    smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62
+  },
+  gl_milkor: {
+    w_id: 44, id: 44, wt: 9, ws: 6, sn: "gl_milkor", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 30, lt: ARCING_LAUNCHER_LIFE, krit: 3, dev: 6,
+    smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48
+  },
+  gl_milkor_a: {
+    w_id: 45, id: 45, wt: 9, ws: 6, sn: "gl_milkor_a", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 36, lt: ARCING_LAUNCHER_LIFE, krit: 3, dev: 6,
+    smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50
+  },
+  sr_vintorez: {
+    w_id: 107, id: 107, wt: 10, ws: 7, sn: "sr_vintorez", vel: 100, rad: 10, ang: 0, rap: 700, rt: 3167, ammo: 20, ammo_tot: 100, lt: 1000, krit: 10, dev: 3,
+    smindam: 42, smaxdam: 58, mmindam: 48, mmaxdam: 66, lmindam: 54, lmaxdam: 74
+  },
+  sr_sniperrifle03: {
+    w_id: 103, id: 103, wt: 10, ws: 7, sn: "sr_sniperrifle03", vel: 100, rad: 10, ang: 0, rap: 950, rt: 3667, ammo: 5, ammo_tot: 35, lt: 1000, krit: 14, dev: 2,
+    smindam: 54, smaxdam: 72, mmindam: 62, mmaxdam: 82, lmindam: 70, lmaxdam: 88
+  },
+  sr_wildcat1: {
+    w_id: 74, id: 74, wt: 10, ws: 7, sn: "sr_wildcat1", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 1, ammo_tot: 16, lt: 1000, krit: 12, dev: 2,
+    smindam: 50, smaxdam: 68, mmindam: 58, mmaxdam: 78, lmindam: 66, lmaxdam: 84
+  },
+  sr_wildcat2: {
+    w_id: 75, id: 75, wt: 10, ws: 7, sn: "sr_wildcat2", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 1, ammo_tot: 16, lt: 1000, krit: 11, dev: 2,
+    smindam: 46, smaxdam: 62, mmindam: 54, mmaxdam: 72, lmindam: 62, lmaxdam: 82
+  }
+};
+
+const ABILITY_BONUS_LEVELS = {
+  1: { armorFlat: [10, 20, 40, 60, 80] },
+  2: { healthFlat: [10, 20, 30, 40, 50] },
+  3: { speedPercent: [2, 4, 6, 8, 10] },
+  4: { damageReductionPercent: [2, 4, 6, 8, 10] },
+  5: { weaponRapidityPercent: [2, 4, 6, 8, 10] },
+  6: { weaponCritPercent: [5, 10, 15, 20, 25] },
+  7: { weaponAmmoPercent: [10, 30, 40, 50, 60] },
+  8: { weaponMinDamageFlat: [1, 2, 3, 4, 5] },
+  9: { weaponMaxDamageFlat: [1, 2, 3, 4, 5] },
+  10: { weaponAccuracyFlat: [1, 2, 3, 4, 5] },
+  11: { weaponHeadDamagePercent: [5, 10, 15, 20, 25] },
+};
+
+const SET_BONUS_DEFINITIONS = [
+  {
+    id: 32,
+    code: "biker",
+    required: ["1:biker", "4:biker", "5:jeansb02", "3:biker", "6:sneakv201"],
+    healthPercent: 15,
+    healthFloor: BIKER_SET_HEALTH_FLOOR,
+    speedPercent: 2,
+    clientSpeedFloor: BIKER_SET_SPEED_FLOOR,
+    weaponSpeedPercent: BIKER_SET_WEAPON_SPEED_BONUS,
+    shotgunJumpBonus: BIKER_SET_SHOTGUN_JUMP_BONUS,
+    damageBonuses: [
+      { types: [10], range: "medium", amount: 2 },
+      { types: [4], range: "long", amount: 4 },
+    ],
+    protections: { shotgun: 10, sniper: 5, rocket: 5, flamer: 10, grenade: 5, melee: 20 },
+  },
+  {
+    id: 36,
+    code: "spy",
+    required: ["1:business", "2:businessgoogles", "4:business", "5:business", "3:business", "6:business"],
+    healthPercent: 9,
+    damageBonuses: [
+      { types: [3], range: "medium", amount: 7 },
+      { types: [4], range: "medium", amount: 6 },
+    ],
+    protections: { pistol: 10, sniper: 10 },
+  },
+  {
+    id: 35,
+    code: "stalker",
+    required: ["1:stalker", "2:stalkergasmask", "4:stalker", "5:stalker", "3:stalker", "6:stalker"],
+    healthPercent: 12,
+    damageBonuses: [
+      { types: [7], range: "medium", amount: 6 },
+      { types: [4], range: "long", amount: 5 },
+    ],
+    protections: { shotgun: 15, flamer: 15, sniper: 5, melee: 5 },
+  },
+  {
+    id: 37,
+    code: "contranos",
+    required: ["9:thanos", "2:thanos", "4:thanos", "5:thanos", "3:thanos", "6:thanos", "7:thanos"],
+    healthPercent: 4,
+    damageBonuses: [
+      { types: [8], range: "long", amount: 6 },
+      { types: [4], range: "medium", amount: 3 },
+    ],
+    protections: { automatic: 10, sniper: 5, pistol: 4, melee: 15, rocket: 15, grenade: 15, shotgun: 5 },
+  },
+];
+
+const ASSEMBLAGE_BONUS_TEXTS = {
+  1: "+15% Р·Р°С‰РёС‚Р° РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  2: "+15% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  3: "+5% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\nРќРµР±РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  6: "+10% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Рє Р‘СЂРѕРЅРµ",
+  7: "+5% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+2% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ",
+  8: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  9: "+35% Р·Р°С‰РёС‚С‹ РѕС‚ Р»РµРґРѕРјРµС‚РѕРІ\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ\n-20% Р·Р°С‰РёС‚С‹ РѕС‚ РїРѕРґР¶РёРіР°СЋС‰РµРіРѕ РѕСЂСѓР¶РёСЏ",
+  10: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  11: "РЈСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґ. РґРёСЃС‚Р°РЅС†РёРё +2\nР—Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ +5%\nР—Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє +15%\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  12: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  14: "РЈСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґ. РґРёСЃС‚Р°РЅС†РёРё +2\nР—Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ +10%\nР—Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє +10%\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ",
+  15: "Р—РґРѕСЂРѕРІСЊРµ +7%\nР—Р°С‰РёС‚Р° РѕС‚:\nСЂР°РєРµС‚РЅРёС† +15%\nР°РІС‚РѕРјР°С‚РѕРІ +11%\nРґСЂРѕР±РѕРІРёРєРѕРІ +10%\nСЃРЅР°Р№РїРµСЂРѕРє +15%\nРїРёСЃС‚РѕР»РµС‚РѕРІ +7%\nРЈСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4",
+  16: "Р—РґРѕСЂРѕРІСЊРµ +5%\nР—Р°С‰РёС‚Р° РѕС‚:\nСЂР°РєРµС‚РЅРёС† +13%\nР°РІС‚РѕРјР°С‚РѕРІ +10%\nРґСЂРѕР±РѕРІРёРєРѕРІ +9%\nСЃРЅР°Р№РїРµСЂРѕРє +15%\nРїРёСЃС‚РѕР»РµС‚РѕРІ +5%\nРЈСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  17: "Р—РґРѕСЂРѕРІСЊРµ +5%\nР—Р°С‰РёС‚Р° РѕС‚:\nСЂР°РєРµС‚РЅРёС† +11%\nР°РІС‚РѕРјР°С‚РѕРІ +9%\nРґСЂРѕР±РѕРІРёРєРѕРІ +8%\nСЃРЅР°Р№РїРµСЂРѕРє +15%\nРїРёСЃС‚РѕР»РµС‚РѕРІ +3%\nРЈСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  18: "+6% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+8% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  19: "+3% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+3% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+5% Р—Р°С‰РёС‚Р° РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\nСѓРІРµР»РёС‡РёРІР°РµС‚ СЃРєРѕСЂРѕСЃС‚СЊ РїРµСЂРµРґРІРёР¶РµРЅРёСЏ",
+  20: "+6% Рє Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+8% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  21: "+7% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+7% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+3% Р·Р°С‰РёС‚Р° РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Рє Р—РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  22: "+15% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+10% Р—РґРѕСЂРѕРІСЊСЋ",
+  23: "+6% Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+3% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚Р° РџСЂРѕРІРѕРєР°С‚РѕСЂ\n+3% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ",
+  24: "+5% Р—РґРѕСЂРѕРІСЊСЋ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+7% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєР° РЎРёР±РёСЂСЏРє",
+  25: "+7% Р—РґРѕСЂРѕРІСЊСЋ\n+7% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+7% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ \n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  26: "+6% Р—РґРѕСЂРѕРІСЊСЋ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  27: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ",
+  28: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЂСѓС‡РЅРѕРіРѕ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРєРё РџРёСЃРµС†\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  29: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+7% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4",
+  30: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+4% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ РїРёСЃС‚РѕР»РµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  31: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+12% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+8% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+6% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° Р±Р»РёР¶РЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+  32: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+20% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+15% Рє Р·РґРѕСЂРѕРІСЊСЋ\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\nСѓСЂРѕРЅ СЃРЅР°Р№РїРµСЂРѕРє РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4",
+  33: "+3% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+4% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +4\nСѓСЂРѕРЅ РїРёСЃС‚РѕР»РµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +2",
+  34: "+5% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+4% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+5% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+  35: "+15% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+12% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ РґСЂРѕР±РѕРІРёРєРѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +6\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+  36: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+9% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ РїРёСЃС‚РѕР»РµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +7\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +6",
+  37: "+10% Р·Р°С‰РёС‚С‹ РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+4% Р·Р°С‰РёС‚С‹ РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ СЂР°РєРµС‚РЅРёС†\n+15% Р·Р°С‰РёС‚С‹ РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+4% Рє Р·РґРѕСЂРѕРІСЊСЋ\nСѓСЂРѕРЅ СЂР°РєРµС‚РЅРёС† РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +6\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3",
+  38: "+50% Р·Р°С‰РёС‚С‹ РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\n+50% Р·Р°С‰РёС‚С‹ РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+150 Рє Р·РґРѕСЂРѕРІСЊСЋ\n+20 Рє Р±СЂРѕРЅРµ\nСѓСЂРѕРЅ Р°РІС‚РѕРјР°С‚РѕРІ РЅР° РґР°Р»СЊРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +3\nСѓСЂРѕРЅ РїСѓР»РµРјРµС‚РѕРІ РЅР° СЃСЂРµРґРЅРµР№ РґРёСЃС‚Р°РЅС†РёРё +5",
+};
+
+const RESTORED_SET_BONUS_DEFINITIONS = [
+  { id: 1, code: "peak_reaper", required: ["1:tophat", "2:skeleton_h", "4:skeleton", "7:tomb", "3:skeleton", "5:skeleton", "6:skeleton", "8:coins"] },
+  { id: 2, code: "raven", required: ["2:gasmask01", "1:tactichelm01", "4:tactic01", "3:tactical01", "5:tactic01", "6:tactical01"] },
+  { id: 3, code: "vandal", required: ["1:cap02", "2:band01", "3:bint02", "4:hood04", "5:sport03", "6:sneak02", "7:darts", "8:maz"] },
+  { id: 6, code: "belov", required: ["1:indiana02", "2:goog02", "3:bint01", "4:hood03", "5:sport02", "7:rocket02", "8:cola01", "9:brown04"] },
+  { id: 7, code: "mummy", required: ["1:pharaoh", "4:mummy", "7:sarcophagus", "3:mummy", "5:mummy", "6:mummy", "2:mummy_h", "8:skrab"] },
+  { id: 8, code: "recon", required: ["1:tactichelm02", "2:gasmask02", "4:tactic02", "5:tactic02", "6:tactical02", "3:clock02"] },
+  { id: 9, code: "dead_moroz", required: ["1:santa", "2:santa", "4:santa", "7:santa", "3:santa", "5:santa", "6:santa", "8:santa"] },
+  { id: 10, code: "vdv", required: ["1:beret03", "4:trooper", "2:aviaglass", "5:trooper"] },
+  { id: 11, code: "barkhan", required: ["1:milcap03", "4:tactic04", "3:tactical02", "5:tactic04"] },
+  { id: 12, code: "invader", required: ["4:tactic03", "5:tactic03", "6:boot02", "2:googb02", "1:beret01"] },
+  { id: 14, code: "olympian", required: ["1:olympic", "2:snowgoggles", "4:hoodolimpic", "7:snowboard", "3:olympic", "5:olympic", "6:sneakolimpic", "8:medal"] },
+  { id: 15, code: "vkks_gold_2014", required: ["1:capvkks01", "5:sportvkks01", "8:medalgold", "4:chood01"] },
+  { id: 16, code: "vkks_silver_2014", required: ["1:capvkks02", "4:chood02", "5:sportvkks02", "8:medalsilver"] },
+  { id: 17, code: "vkks_bronze_2014", required: ["1:capvkks03", "4:chood03", "5:sportvkks03", "8:medalbronze"] },
+  { id: 18, code: "delta", required: ["1:tacticalb01", "4:tacticb01", "5:tacticb01", "3:tacticalb01", "6:tacticalb01", "8:smertik"] },
+  { id: 19, code: "ray", required: ["4:hoodb08", "5:sportb08", "6:sneakv2b02", "1:capb08", "2:bandb07"], speedPercent: 1 },
+  { id: 20, code: "badboy", required: ["4:hoodb03", "5:sportb03", "8:badboy", "6:sneakv2b05", "2:maskb01", "1:capb04"] },
+  { id: 21, code: "acid_warrior", required: ["1:hatb08", "4:hoodb10", "5:sportb10", "6:sneakv2b06", "2:bandb03"] },
+  { id: 22, code: "stuzha", required: ["1:santa2", "2:santa2", "4:santa2", "7:santa2", "3:santa2", "5:santa2", "6:santa2", "8:santa2"] },
+  { id: 23, code: "red_heat", required: ["1:capb06", "4:shirtb09", "5:shortb12", "2:googb01", "6:sneakv2b07"] },
+  { id: 24, code: "cool_breeze", required: ["1:capb05", "4:shirtb04", "5:shortb14", "2:googb03", "6:sneakv2b03"] },
+  { id: 25, code: "necrowarrior", required: ["9:franky", "2:franky", "4:franky", "5:franky", "6:franky", "3:franky", "8:franky", "7:frankyoctopus"] },
+  { id: 26, code: "infernal", required: ["1:infernal", "4:infernal", "5:infernal", "6:infernal", "3:infernal", "2:infernal_h", "8:infernal", "7:infernalraven"] },
+  { id: 27, code: "cyborg", required: ["2:maskb02", "4:hoodb05", "5:sportb05", "6:sneakv2b04"] },
+  { id: 28, code: "wanderer", required: ["1:hatb01", "2:bandb05", "4:hoodb01", "5:sportb01", "6:sneakv2b10"] },
+  { id: 29, code: "snakecatcher", required: ["2:bandb01", "4:hoodb04", "5:sportb04", "1:capb07", "7:snake01"] },
+  { id: 30, code: "ghost", required: ["2:klavab01", "4:prizrak", "5:prizrak", "3:prizrak", "6:prizrak"] },
+  { id: 31, code: "anarchist", required: ["1:capb01", "4:anarch", "5:jeansb03", "3:wristwrapb03", "6:anarch", "8:spinyellow"] },
+  {
+    id: 32,
+    code: "biker",
+    required: ["1:biker", "4:biker", "5:jeansb02", "3:biker", "6:sneakv201"],
+    healthFloor: BIKER_SET_HEALTH_FLOOR,
+    clientSpeedFloor: BIKER_SET_SPEED_FLOOR,
+    weaponSpeedPercent: BIKER_SET_WEAPON_SPEED_BONUS,
+    shotgunJumpBonus: BIKER_SET_SHOTGUN_JUMP_BONUS,
+  },
+  { id: 33, code: "scrapper", required: ["1:hatb06", "2:bandb04", "4:hoodb06", "5:sportb06", "6:zadira", "8:burger"] },
+  { id: 34, code: "avenger", required: ["1:avenger", "2:avenger", "4:avenger", "5:avenger", "3:avenger", "6:avenger", "8:spinblue"] },
+  { id: 35, code: "stalker", required: ["1:stalker", "2:stalkergasmask", "4:stalker", "5:stalker", "3:stalker", "6:stalker"] },
+  { id: 36, code: "spy", required: ["1:business", "2:businessgoogles", "4:business", "5:business", "3:business", "6:business"] },
+  { id: 37, code: "contranos", required: ["9:thanos", "2:thanos", "4:thanos", "5:thanos", "3:thanos", "6:thanos", "7:thanos"] },
+  { id: 38, code: "blue_soldier", required: ["9:spec99", "1:ushanka2", "4:trooper2", "5:pant032", "3:glov022", "6:slip99", "7:rec2", "8:vodka"] },
+].map((definition) => ({
+  ...definition,
+  bonusText: ASSEMBLAGE_BONUS_TEXTS[definition.id] || "",
+}));
+
+function normalizeSystemName(value, fallback) {
+  const raw = stringOr(value, fallback);
+  const lower = raw.toLowerCase();
+  if (WEAPON_NAME_OVERRIDES[lower]) return WEAPON_NAME_OVERRIDES[lower];
+  const parts = lower.split("_");
+  if (parts.length < 2) return raw;
+  return `${parts[0].toUpperCase()}_${parts.slice(1).map((part) => part ? `${part[0].toUpperCase()}${part.slice(1)}` : "").join("_")}`;
+}
+
+function weaponSlot(item = {}, index = 0) {
+  const slot = numberOr(item.ws ?? item.slot, index + 1);
+  if (slot >= 1 && slot <= 7) return slot;
+  return Math.min(7, Math.max(1, index + 1));
 }
 
 function weaponAllowedInSlot(item, slot) {
   return Number(item?.ws || 0) === Number(slot);
 }
 
-function hasActiveWeaponUpgrade(item, now = currentUnixSeconds()) {
-  if (Number(item?.itype || 0) !== 1 || item?.u_id == null) return false;
-  const expiresAt = Number(item?.eD || 0);
-  return Number.isFinite(expiresAt) && expiresAt > now;
+function defaultWeaponForSlot(slot) {
+  return DEFAULT_LOADOUT_WEAPONS.find((item) => Number(item.ws) === Number(slot)) || DEFAULT_LOADOUT_WEAPONS[0];
 }
 
-function normalizeInventoryItem(item) {
-  const type = Number(item?.itype || 0);
-  if (type === 1) {
-    const canonical = canonicalWeaponForRawItem(item);
-    if (canonical && item?.u_id != null) {
-      if (!hasActiveWeaponUpgrade(item)) return clone(canonical);
-      return {
-        ...clone(canonical),
-        ...clone(item),
-        id: canonical.id,
-        w_id: canonical.w_id,
-        sname: canonical.sname,
-        sn: canonical.sn,
-        wt: canonical.wt,
-        ws: canonical.ws,
-        name: canonical.name
-      };
-    }
-    return canonical
-      ? {
-          ...clone(item),
-          ...clone(canonical),
-          id: canonical.id,
-          w_id: canonical.w_id,
-          sname: canonical.sname,
-          sn: canonical.sn,
-          wt: canonical.wt,
-          ws: canonical.ws,
-          name: canonical.name,
-          sc: canonical.sc
-        }
-      : item;
-  }
-  if (type === 3) {
-    const canonical = canonicalWearsById.get(Number(item?.w_id ?? item?.id));
-    return canonical
-      ? {
-          ...clone(item),
-          ...clone(canonical),
-          id: canonical.id,
-          w_id: canonical.w_id,
-          sname: canonical.sname,
-          sn: canonical.sn,
-          wt: canonical.wt
-        }
-      : item;
-  }
-  if (type === 4) {
-    const canonical = canonicalTauntsById.get(Number(item?.t_id ?? item?.id));
-    return canonical ? { ...clone(canonical), ...clone(item), t_id: canonical.t_id, sname: canonical.sname, sn: canonical.sn } : item;
-  }
-  if (type === 2) {
-    const canonical = canonicalEnhancersById.get(Number(item?.e_id ?? item?.id));
-    return canonical ? { ...clone(canonical), ...clone(item), e_id: canonical.e_id, sname: canonical.sname, sn: canonical.sn } : item;
-  }
-  return item;
+function defaultWeaponSpeedPercent(item = {}) {
+  return 0;
 }
 
-function normalizeWeaponSelection(selection, rawInventory = []) {
-  const byRawId = new Map();
-  for (const raw of rawInventory.map(normalizeInventoryItem)) {
-    const rawId = Number((raw?.w_id ?? raw?.id) || 0);
-    const canonical = canonicalWeaponForRawItem(raw);
-    if (rawId && canonical) byRawId.set(rawId, canonical);
-  }
-
-  const normalized = { ...selection };
-  for (let slot = 1; slot <= 7; slot += 1) {
-    const key = `id${slot}`;
-    const selectedId = Number(normalized[key] || 0);
-    if (!selectedId) continue;
-
-    const canonical = canonicalWeaponsById.get(selectedId) || byRawId.get(selectedId);
-    if (canonical && weaponAllowedInSlot(canonical, slot)) {
-      normalized[key] = Number(canonical.w_id || canonical.id);
-    } else {
-      normalized[key] = 0;
-    }
-  }
-  return normalized;
+function isColdArmsWeaponType(type) {
+  const value = numberOr(type, 0);
+  return value === 1 || value === 2;
 }
 
-function inventoryWeaponId(item) {
-  return Number(item?.w_id ?? item?.id ?? 0);
-}
+const MELEE_DEFAULT_DISTANCE = 8;
+const MELEE_DEFAULT_ANGLE = 2.05;
 
-function hasInventoryWeapon(inventory, weaponId) {
-  return inventory.some((item) => Number(item?.itype || 0) === 1 && inventoryWeaponId(item) === Number(weaponId));
-}
-
-function inventoryWearId(item) {
-  return Number(item?.w_id ?? item?.id ?? 0);
-}
-
-const viewKeyByWearType = new Map([
-  [1, "hat"],
-  [2, "mask"],
-  [3, "gloves"],
-  [4, "shirt"],
-  [5, "pants"],
-  [6, "boots"],
-  [7, "backpack"],
-  [8, "other"],
-  [9, "head"]
-]);
-
-function viewAfterPurchasedWear(view, item) {
-  const current = { ...(view || {}) };
-  if (Number(item?.itype || 0) !== 3) return current;
-  const viewKey = viewKeyByWearType.get(Number(item?.wt || 0));
-  const wearId = inventoryWearId(item);
-  if (viewKey && wearId > 0) current[viewKey] = wearId;
-  return current;
-}
-
-function weaponSelectionAfterPurchasedWeapon(selection, item) {
-  const current = { ...(selection || {}) };
-  if (Number(item?.itype || 0) !== 1) return current;
-  const slot = Number(item?.ws || 0);
-  const weaponId = inventoryWeaponId(item);
-  if (slot < 1 || slot > 7 || weaponId <= 0) return current;
-  current[`id${slot}`] = weaponId;
-  return current;
-}
-
-function hasInventoryWear(inventory, wearId) {
-  return inventory.some((item) => Number(item?.itype || 0) === 3 && inventoryWearId(item) === Number(wearId));
-}
-
-function normalizeLoadoutInventory(selection, rawInventory = []) {
-  const inventory = rawInventory.map(normalizeInventoryItem);
-  const weap = normalizeWeaponSelection(selection, inventory);
-
-  for (let slot = 1; slot <= 7; slot += 1) {
-    const key = `id${slot}`;
-    const weaponId = Number(weap[key] || 0);
-    if (!weaponId) continue;
-
-    const canonical = canonicalWeaponsById.get(weaponId);
-    if (!canonical) {
-      weap[key] = 0;
-      continue;
-    }
-
-    if (!hasInventoryWeapon(inventory, weaponId)) {
-      inventory.push(clone(canonical));
-    }
-  }
-
-  return { weap, inventory };
-}
-
-function normalizeViewInventory(view, rawInventory = []) {
-  const inventory = rawInventory.map(normalizeInventoryItem);
-  const normalized = { ...view };
-
-  for (const key of viewWearKeys) {
-    const wearId = Number(normalized[key] || 0);
-    if (!wearId) continue;
-
-    const canonical = canonicalWearsById.get(wearId);
-    if (!canonical) {
-      normalized[key] = 0;
-      continue;
-    }
-
-    if (!hasInventoryWear(inventory, wearId)) {
-      inventory.push(clone(canonical));
-    }
-  }
-
-  return { view: normalized, inventory };
-}
-
-function profileInventoryItems(account) {
-  return Array.isArray(account?.inventory) ? account.inventory.map(normalizeInventoryItem) : [];
-}
-
-function selectedProfileWear(inventory, wearId) {
-  const id = Number(wearId || 0);
-  if (!id) return 0;
-
-  const owned = inventory.find((item) => Number(item?.itype || 0) === 3 && inventoryWearId(item) === id);
-  const item = owned || canonicalWearsById.get(id);
-  return item ? clone(normalizeInventoryItem(item)) : 0;
-}
-
-function selectedProfileWeapon(inventory, weaponId, slot) {
-  const id = Number(weaponId || 0);
-  if (!id) return 0;
-
-  const owned = inventory.find((item) => Number(item?.itype || 0) === 1 && inventoryWeaponId(item) === id);
-  const item = normalizeInventoryItem(owned || canonicalWeaponsById.get(id));
-  if (!item || !weaponAllowedInSlot(item, slot)) return 0;
-  return clone(item);
-}
-
-function profileViewObjectPayload(account) {
-  const inventory = profileInventoryItems(account);
-  return Object.fromEntries(
-    viewWearKeys.map((key) => [key, selectedProfileWear(inventory, account?.view?.[key])])
-  );
-}
-
-function profileWeaponObjectPayload(account) {
-  const inventory = profileInventoryItems(account);
-  const result = {};
-  for (let slot = 1; slot <= 7; slot += 1) {
-    const key = `id${slot}`;
-    result[key] = selectedProfileWeapon(inventory, account?.weap?.[key], slot);
-  }
+function normalizeMeleeWeaponStats(item = {}) {
+  const type = numberOr(item.wt ?? item.type, 0);
+  if (!isColdArmsWeaponType(type)) return item;
+  const result = { ...item };
+  const distance = numberOr(result.rad ?? result.distance, 0);
+  if (distance <= 0 || distance > 15) result.rad = MELEE_DEFAULT_DISTANCE;
+  const angle = Number(result.ang ?? result.angle);
+  if (!Number.isFinite(angle) || angle <= 0 || angle > Math.PI) result.ang = MELEE_DEFAULT_ANGLE;
   return result;
 }
 
-function normalizeAccount(account) {
-  const fresh = starterAccount(account?.name);
-  const rawInventory = Array.isArray(account?.inventory) ? account.inventory : [];
-  const loadoutInventory = normalizeLoadoutInventory({ ...fresh.weap, ...(account?.weap || {}) }, rawInventory);
-  const viewInventory = normalizeViewInventory({ ...fresh.view, ...(account?.view || {}) }, loadoutInventory.inventory);
-  return {
-    ...fresh,
-    ...account,
-    view: viewInventory.view,
-    weap: loadoutInventory.weap,
-    taun: { ...fresh.taun, ...(account?.taun || {}) },
-    stats: { ...fresh.stats, ...(account?.stats || {}) },
-    inventory: viewInventory.inventory,
-    abilities: Array.isArray(account?.abilities) ? account.abilities : [],
-    clanMaxRequest: Number(account?.clanMaxRequest || fresh.clanMaxRequest || 10),
-    clan: normalizeClanSummary(account?.clan || null),
-    weaponStats: Array.isArray(account?.weaponStats) ? account.weaponStats : [],
-    modeStats: Array.isArray(account?.modeStats) ? account.modeStats : [],
-    mapStats: Array.isArray(account?.mapStats) ? account.mapStats : []
-  };
+function weaponMaxLoadedAmmo(item = {}, fallback = {}) {
+  if (isColdArmsWeaponType(item.wt ?? fallback.wt)) return 0;
+  return Math.max(0, numberOr(item.ammo, fallback.ammo ?? 0));
 }
 
-function ensureDesktopAccount() {
-  const existing = store.accounts["1"] ? normalizeAccount(store.accounts["1"]) : null;
-  if (existing) {
-    existing.id = 1;
-    store.accounts["1"] = existing;
-    return existing;
+function weaponMaxAmmoReserve(item = {}, fallback = {}) {
+  if (isColdArmsWeaponType(item.wt ?? fallback.wt)) return 0;
+  return Math.max(0, numberOr(item.ammo_tot, fallback.ammo_tot ?? weaponMaxLoadedAmmo(item, fallback)));
+}
+
+function weaponSpeedPercent(item = {}) {
+  const explicitSpeed = item.wsp ?? item.sp ?? item.speed ?? item.speed_percent ?? item.speedPercent ?? item.spd ?? item.stSp ?? item.wSpeed ?? item.WeaponSpeed;
+  if (explicitSpeed !== undefined && explicitSpeed !== null && explicitSpeed !== "") {
+    return numberOr(explicitSpeed, 0);
   }
-
-  store.accounts["1"] = normalizeAccount(starterAccount(process.env.PLAYER_NAME || "ContraCity", 1, DEFAULT_KEY));
-  saveStore(store);
-  return store.accounts["1"];
+  return defaultWeaponSpeedPercent(item);
 }
 
-function randomLauncherToken() {
-  return crypto
-    .randomBytes(32)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+function weaponRapidity(item = {}, fallback = {}) {
+  const rawRapidity = numberOr(item.rap ?? item.rapid ?? item.rapidity, fallback.rap ?? 100);
+  if (!NORMALIZE_WEAPON_RAPIDITY) return rawRapidity;
+
+  const weaponType = numberOr(item.wt ?? fallback.wt, 0);
+  const floor = RAPIDITY_FLOORS_BY_TYPE.get(weaponType);
+  return Math.max(rawRapidity, floor ?? 100);
 }
 
-function pruneLauncherSessions(now = Date.now()) {
-  for (const [token, session] of launcherSessions) {
-    if (!session || Number(session.expiresAt || 0) <= now) {
-      launcherSessions.delete(token);
-    }
-  }
+function clientSafeWeaponDeviation(deviation, weaponType) {
+  const value = Math.max(0, numberOr(deviation, 0));
+  // Active ShotController treats zero deviation on handguns, machine guns and gatlings as a cheat path
+  // and returns before SendShot(), so accuracy bonuses must not serialize these weapons as perfectly accurate.
+  return (weaponType === 3 || weaponType === 4 || weaponType === 6) ? Math.max(1, value) : value;
 }
 
-function createLauncherSession(account) {
-  pruneLauncherSessions();
-  const token = randomLauncherToken();
-  const expiresAt = Date.now() + LAUNCHER_SESSION_TTL_MS;
-  launcherSessions.set(token, {
-    id: String(account.id),
-    key: String(account.key),
-    expiresAt
-  });
-  return {
-    token,
-    expiresInSeconds: Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))
-  };
+function weaponRapidityForProfile(item = {}, fallback = {}, profile = null) {
+  const rapidity = weaponRapidity(item, fallback);
+  return Math.max(70, shotIntervalMsForProfileRapidity(rapidity, profile) - 10);
 }
 
-function launcherSessionCredentials(rawToken) {
-  const token = String(rawToken || "").trim();
-  if (!token) return null;
-  pruneLauncherSessions();
-  const session = launcherSessions.get(token);
-  if (!session) return null;
-  return { id: String(session.id), key: String(session.key) };
+function shotIntervalMsFromRapidity(rapidity) {
+  const shotTimeMs = numberOr(rapidity, 100) + 10;
+  return shotTimeMs < 100 ? 110 : shotTimeMs;
 }
 
-function accountCredentialsFrom(url) {
-  const rawId = url.searchParams.get("ccid");
-  const key = url.searchParams.get("cckey");
-  const idNumber = Number(rawId);
-
-  if (rawId && Number.isInteger(idNumber) && idNumber > 0 && key) {
-    if (key === "contra-revive-key") return null;
-    return { id: String(idNumber), key };
-  }
-
-  const sessionCredentials = launcherSessionCredentials(url.searchParams.get("ccsession"));
-  if (sessionCredentials) {
-    return sessionCredentials;
-  }
-
-  return null;
+function rapidityBonusPercent(profile = null) {
+  const stats = playerRuntimeStats(profile);
+  return clampNumber(stats.modifiers.weaponRapidityPercent ?? 0, 0, 80);
 }
 
-const ajaxActAliases = {
-  profile: "i",
-  inventory: "inv",
-  weapons: "weap",
-  weapon: "weap",
-  wears: "wear",
-  clothes: "wear",
-  abilities: "abil",
-  maps: "map",
-  achievements: "ach"
-};
-
-function normalizedAjaxRoute(url) {
-  let page = url.searchParams.get("page") || "";
-  let act = url.searchParams.get("act") || url.searchParams.get("action") || "";
-
-  if (page === "sh") page = "shop";
-  if (page === "ch") page = "pl";
-  act = ajaxActAliases[act] || act;
-
-  return { page, act };
+function shotIntervalMsForProfileRapidity(rapidity, profile = null) {
+  const base = shotIntervalMsFromRapidity(rapidity);
+  const rapidityPercent = rapidityBonusPercent(profile);
+  return Math.max(80, Math.round(base * (100 - rapidityPercent) / 100));
 }
 
-function isWeaponSelectionSaveRequest(url) {
-  const { page, act } = normalizedAjaxRoute(url);
-  return page === "pl" && act === "sweap";
+function rapidityDeltaForWeapon(profile = null, rapidity = 0) {
+  const base = shotIntervalMsFromRapidity(rapidity);
+  return shotIntervalMsForProfileRapidity(rapidity, profile) - base;
 }
 
-function isEquipmentSelectionSaveRequest(url) {
-  const { page, act } = normalizedAjaxRoute(url);
-  return page === "pl" && (act === "sweap" || act === "sview");
+function reloadDurationMsFromRaw(reloadTimeMs) {
+  const reloadMs = numberOr(reloadTimeMs, 0) + 10;
+  return reloadMs < 100 ? 110 : reloadMs;
 }
 
-function accountFrom(url) {
-  const credentials = accountCredentialsFrom(url);
-  if (!credentials) {
-    return null;
-  }
+const WEAPON_MODE = Object.freeze({
+  READY: "ready",
+  RELOADING: "reloading",
+  RELOADING_READY: "reloading_ready",
+  CHANGING: "changing",
+  SHOOTING: "shooting",
+  LAUNCHING: "launching",
+});
 
-  const account = store.accounts[credentials.id] ? normalizeAccount(store.accounts[credentials.id]) : null;
-  if (!account || account.key !== credentials.key) {
-    return null;
-  }
-  store.accounts[credentials.id] = account;
-  return account;
+const WEAPON_CHANGE_DURATION_MS = 300;
+const DEFAULT_WEAPON_LAUNCH_DURATION_MS = 1500;
+const FAST_GATLING_LAUNCH_DURATION_MS = 400;
+const MELEE_DELAYED_SHOT_MS = 200;
+const MELEE_DELAYED_SHOT_GRACE_MS = 350;
+const PROJECTILE_IMPACT_GRACE_MS = 5000;
+const PROJECTILE_SHOT_MAX_AGE_MS = 120000;
+const MAX_ACTIVE_PROJECTILE_SHOTS = 32;
+const ACTIVE_ITEM_SHOT_GRACE_MS = 5000;
+const ACTIVE_ITEM_SHOT_MAX_AGE_MS = 180000;
+const MAX_ACTIVE_ITEM_SHOTS = 64;
+const TURRET_SHOT_WARMUP_MS = 2000;
+const TURRET_SHOT_INTERVAL_MS = 250;
+const TURRET_SHOT_TIMER_GRACE_MS = 150;
+
+const LAUNCH_MODE = Object.freeze({
+  SHOT: 0,
+  LAUNCH: 1,
+  BLOW: 2,
+  TURRET_SHOT: 3,
+  TURRET_CONTROL: 4,
+  SPIN: 5,
+  DISACTIVATE: 6,
+});
+
+const ACTIVE_MINE_WEAPON_TYPES = new Set([103, 104, 105, 106, 107]);
+const ACTIVE_TURRET_WEAPON_TYPES = new Set([102, 108]);
+const ACTIVE_ITEM_WEAPON_TYPES = new Set([
+  ...ACTIVE_MINE_WEAPON_TYPES,
+  ...ACTIVE_TURRET_WEAPON_TYPES,
+]);
+
+function launchDurationMsForSystemName(systemName) {
+  return systemName === "GG_M249" || systemName === "GG_FNMAG"
+    ? FAST_GATLING_LAUNCH_DURATION_MS
+    : DEFAULT_WEAPON_LAUNCH_DURATION_MS;
 }
 
-function persist(account) {
-  account.updatedAt = new Date().toISOString();
-  store.accounts[String(account.id)] = normalizeAccount(account);
-  saveStore(store);
+function weaponAdditionalValuesRaw(item = {}) {
+  const entries = [];
+  const speedPercent = weaponSpeedPercent(item);
+  if (speedPercent !== 0) entries.push({ key: rawByte(78), value: rawInt(speedPercent) });
+  if (numberOr(item.launch, 0) > 0) entries.push({ key: rawByte(75), value: rawInt(1) });
+  if (numberOr(item.shake, 0) > 0) entries.push({ key: rawByte(76), value: rawInt(1) });
+  return entries.length ? rawHashtable(entries) : null;
 }
 
-async function accountFromRequest(url) {
-  const credentials = accountCredentialsFrom(url);
-  if (!credentials) {
-    return null;
-  }
-
-  const skipPreRefresh = isEquipmentSelectionSaveRequest(url);
-  const cached = store.accounts[credentials.id] ? normalizeAccount(store.accounts[credentials.id]) : null;
-  if (cached && cached.key === credentials.key) {
-    store.accounts[credentials.id] = cached;
-    return skipPreRefresh ? cached : refreshAccountFromPostgres(cached);
-  }
-
-  if (pgPool) {
-    try {
-      await pgSaveChain.catch(() => {});
-      const fresh = await loadPostgresAccount(credentials.id);
-      if (fresh && fresh.key === credentials.key) {
-        store.accounts[credentials.id] = fresh;
-        return fresh;
-      }
-    } catch (error) {
-      console.error("[postgres] account lookup failed", error);
-    }
-  }
-
-  const account = accountFrom(url);
-  return skipPreRefresh ? account : refreshAccountFromPostgres(account);
-}
-
-function postgresTimestamp(value) {
-  return value?.toISOString?.() || value;
-}
-
-function isOlderPostgresSnapshot(snapshotUpdatedAt, databaseUpdatedAt) {
-  const snapshotMs = Date.parse(postgresTimestamp(snapshotUpdatedAt));
-  const databaseMs = Date.parse(postgresTimestamp(databaseUpdatedAt));
-  return Number.isFinite(snapshotMs) && Number.isFinite(databaseMs) && snapshotMs < databaseMs;
-}
-
-function accountFromPostgresRow(row, inventory = [], abilities = [], weaponStats = [], modeStats = [], mapStats = []) {
-  return normalizeAccount({
-    id: Number(row.id),
-    key: row.cckey,
-    name: row.name,
-    namePending: Boolean(row.name_pending),
-    fullName: row.full_name,
-    level: Number(row.level),
-    exp: Number(row.exp),
-    expMin: Number(row.exp_min),
-    expMax: Number(row.exp_max),
-    money: Number(row.money),
-    view: jsonValue(row.view, {}),
-    weap: jsonValue(row.weap, {}),
-    taun: jsonValue(row.taun, {}),
-    stats: jsonValue(row.stats, {}),
-    inventory,
-    abilities,
-    weaponStats,
-    modeStats,
-    mapStats,
-    createdAt: postgresTimestamp(row.created_at),
-    updatedAt: postgresTimestamp(row.updated_at)
-  });
-}
-
-async function loadPostgresAccount(id) {
-  if (!pgPool) return null;
-  const player = await pgPool.query("SELECT * FROM players WHERE id = $1", [Number(id)]);
-  const row = player.rows[0];
-  if (!row) return null;
-
-  const inventory = await pgPool.query(
-    "SELECT item_data FROM player_inventory WHERE player_id = $1 ORDER BY created_at, item_key",
-    [Number(row.id)]
-  );
-  const abilities = await pgPool.query(
-    "SELECT ability_id, ability_level FROM player_abilities WHERE player_id = $1 ORDER BY ability_id",
-    [Number(row.id)]
-  );
-  const weaponStats = await pgPool.query(
-    `SELECT weapon_id, weapon_type, system_name, kills, headshots, nuts, shots, hits
-     FROM player_weapon_stats
-     WHERE player_id = $1
-     ORDER BY kills DESC, weapon_id`,
-    [Number(row.id)]
-  );
-  const modeStats = await pgPool.query(
-    `SELECT mode, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
-     FROM player_match_stats
-     WHERE player_id = $1
-     GROUP BY mode
-     ORDER BY play_time DESC, mode`,
-    [Number(row.id)]
-  );
-  const mapStats = await pgPool.query(
-    `SELECT map_name, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
-     FROM player_match_stats
-     WHERE player_id = $1
-     GROUP BY map_name
-     ORDER BY play_time DESC, map_name`,
-    [Number(row.id)]
-  );
-
-  const account = accountFromPostgresRow(
-    row,
-    inventory.rows.map((itemRow) => jsonValue(itemRow.item_data, {})),
-    abilities.rows.map((abilityRow) => ({ i: Number(abilityRow.ability_id), l: Number(abilityRow.ability_level) })),
-    weaponStats.rows.map((statRow) => ({
-      wid: Number(statRow.weapon_id),
-      wt: Number(statRow.weapon_type),
-      sn: String(statRow.system_name || ""),
-      k: Number(statRow.kills || 0),
-      hs: Number(statRow.headshots || 0),
-      ns: Number(statRow.nuts || 0),
-      sh: Number(statRow.shots || 0),
-      hi: Number(statRow.hits || 0)
-    })),
-    modeStats.rows.map((statRow) => ({
-      m: Number(statRow.mode || 0),
-      w: Number(statRow.wins || 0),
-      l: Number(statRow.losses || 0),
-      pt: Number(statRow.play_time || 0)
-    })),
-    mapStats.rows.map((statRow) => ({
-      n: String(statRow.map_name || ""),
-      w: Number(statRow.wins || 0),
-      l: Number(statRow.losses || 0),
-      pt: Number(statRow.play_time || 0)
-    }))
-  );
-  account.clan = clanSummaryForPlayer(account.id);
-  return normalizeAccount(account);
-}
-
-async function refreshAccountFromPostgres(account) {
-  if (!pgPool || !account?.id) return account;
-
-  try {
-    await pgSaveChain.catch(() => {});
-    const fresh = await loadPostgresAccount(account.id);
-    if (!fresh) return account;
-    if (account.key && fresh.key && account.key !== fresh.key) return account;
-
-    store.accounts[String(fresh.id)] = fresh;
-    return fresh;
-  } catch (error) {
-    console.error("[postgres] account refresh failed", error);
-    return account;
-  }
-}
-
-async function profileAccountForView(account, url) {
-  const targetId = Number(url.searchParams.get("ui") || 0);
-  if (!Number.isInteger(targetId) || targetId <= 0 || targetId === Number(account.id)) return account;
-
-  let target = accountById(targetId);
-  if (pgPool) {
-    try {
-      await pgSaveChain.catch(() => {});
-      const fresh = await loadPostgresAccount(targetId);
-      if (fresh) {
-        store.accounts[String(fresh.id)] = fresh;
-        account.money = nextPlayerMoney;
-        target = fresh;
-      }
-    } catch (error) {
-      console.error("[postgres] profile view account load failed", error);
-    }
-  }
-
-  if (target) {
-    console.log(`[profile-view] requester=${account.id} target=${target.id}`);
-  } else {
-    console.warn(`[profile-view] requester=${account.id} target=${targetId} missing`);
-  }
-  return target || account;
-}
-
-function sessionAuth(account) {
-  return `ccid=${encodeURIComponent(String(account.id))}&cckey=${encodeURIComponent(String(account.key))}&`;
-}
-
-function publicBaseUrl(requestOrigin = null) {
-  return String((ALLOW_DYNAMIC_PUBLIC_ORIGIN ? requestOrigin : "") || PUBLIC_BASE_URL || "").replace(/\/+$/, "");
-}
-
-function loginLink(account, requestOrigin = null) {
-  return `${publicBaseUrl(requestOrigin)}/vk-login?${sessionAuth(account)}`;
-}
-
-function sessionPayload(account, requestOrigin = null) {
-  return {
-    ccid: account.id,
-    cckey: account.key,
-    sessionAuth: sessionAuth(account),
-    loginLink: loginLink(account, requestOrigin),
-    ajaxUrl: `${publicBaseUrl(requestOrigin)}/ajax.php?${sessionAuth(account)}`,
-    storage: pgPool ? "postgres" : "json-file"
-  };
-}
-
-function launcherPlayerPayload(account) {
-  const stats = playerStats(account);
-  const modeStats = gameModeStatItems(account);
-  const wins = statNumber(stats.w, 0) || modeStats.reduce((sum, item) => sum + statNumber(item.w, 0), 0);
-  const playMinutes = statNumber(stats.pt, 0) || modeStats.reduce((sum, item) => sum + statNumber(item.pt, 0), 0);
-  const level = Number(account.level || 1);
-  return {
-    username: String(account.name || account.fullName || `Player ${account.id}`),
-    level,
-    kills: statNumber(stats.k, 0),
-    deaths: statNumber(stats.d, 0),
-    wins,
-    playtime_hours: Math.max(0, Math.floor(playMinutes / 60))
-  };
-}
-
-function launcherNewsPayload() {
-  return [
-    {
-      id: "fresh-build",
-      title: `\u0421\u0432\u0435\u0436\u0430\u044f \u0441\u0431\u043e\u0440\u043a\u0430 v${LAUNCHER_VERSION}`,
-      is_pinned: true
-    }
+function weaponBodyFromItem(item = {}, index = 0, profile = null, options = {}) {
+  const fallback = defaultWeaponForSlot(index + 1);
+  const slot = weaponSlot({ ...fallback, ...(item || {}) }, index);
+  const merged = mergedWeaponForSlot(item, fallback, slot, profile);
+  const weaponId = numberOr(merged.w_id ?? merged.id, numberOr(process.env.DEFAULT_WEAPON_ID, fallback.w_id));
+  const systemName = normalizeSystemName(merged.sn ?? merged.sname, fallback.sn);
+  const maxLoadedAmmo = weaponMaxLoadedAmmo(merged, fallback);
+  const maxAmmoReserve = weaponMaxAmmoReserve(merged, fallback);
+  const rapidity = weaponRapidityForProfile(merged, fallback, profile);
+  const entries = [
+    { key: rawByte(99), value: rawString(systemName) },
+    { key: rawByte(98), value: rawInt(numberOr(merged.wt, fallback.wt)) },
+    { key: rawByte(97), value: rawInt(numberOr(merged.vel, fallback.vel)) },
+    { key: rawByte(96), value: rawInt(numberOr(merged.rad, fallback.rad)) },
+    { key: rawByte(95), value: rawFloat(numberOr(merged.ang, fallback.ang)) },
+    { key: rawByte(94), value: rawInt(rapidity) },
+    { key: rawByte(93), value: rawInt(numberOr(merged.rt, fallback.rt)) },
+    { key: rawByte(92), value: rawInt(maxLoadedAmmo) },
+    { key: rawByte(91), value: rawInt(maxAmmoReserve) },
+    { key: rawByte(90), value: rawInt(numberOr(merged.lt, fallback.lt)) },
+    { key: rawByte(87), value: rawInt(clientSafeWeaponDeviation(merged.dev ?? fallback.dev, numberOr(merged.wt, fallback.wt))) },
+    { key: rawByte(80), value: rawInt(weaponId) },
   ];
-}
 
-function launcherStatePayload(account) {
-  return {
-    result: true,
-    version: LAUNCHER_VERSION,
-    manifestUrl: GAME_CLASSIC_MANIFEST_URL,
-    textureManifestUrl: GAME_NEW_TEXTURES_MANIFEST_URL,
-    updateKey: GAME_CLASSIC_UPDATE_KEY,
-    textureUpdateKey: GAME_NEW_TEXTURES_UPDATE_KEY,
-    sessionAuth: account ? sessionAuth(account) : "",
-    player: account ? launcherPlayerPayload(account) : null,
-    news: launcherNewsPayload(),
-    downloads: {
-      u: LAUNCHER_MANIFEST_URL,
-      k: LAUNCHER_UPDATE_KEY
-    }
-  };
-}
-
-function normalizeLauncherDeviceKeyId(value) {
-  const keyId = String(value || "").trim();
-  if (!/^[A-Za-z0-9._:-]{8,160}$/.test(keyId)) return "";
-  return keyId;
-}
-
-function normalizeLauncherPublicKey(value) {
-  const publicKey = String(value || "").trim();
-  if (!publicKey || publicKey.length > 2048) return "";
-  if (!publicKey.includes("BEGIN PUBLIC KEY") || !publicKey.includes("END PUBLIC KEY")) return "";
-  return publicKey;
-}
-
-function normalizeHwidRiskHash(value) {
-  const hash = String(value || "").trim().toLowerCase();
-  return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
-}
-
-function launcherDeviceCredentials(body, url = null) {
-  const rawId = body?.ccid ?? url?.searchParams?.get("ccid");
-  const key = String(body?.cckey ?? url?.searchParams?.get("cckey") ?? "");
-  const id = Number(rawId);
-  if (!Number.isInteger(id) || id <= 0 || !key) return null;
-  return { id: String(id), key };
-}
-
-async function accountFromLauncherDeviceBody(body, url = null) {
-  const credentials = launcherDeviceCredentials(body, url);
-  if (!credentials) return null;
-  const credentialUrl = new URL("https://launcher.local/launcher-state");
-  credentialUrl.searchParams.set("ccid", credentials.id);
-  credentialUrl.searchParams.set("cckey", credentials.key);
-  return accountFromRequest(credentialUrl);
-}
-
-async function loadLauncherDevice(accountId) {
-  if (!accountId) return null;
-  if (pgPool) {
-    const result = await pgPool.query("SELECT * FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
-    const row = result.rows[0];
-    if (!row) return null;
-    return {
-      playerId: Number(row.player_id),
-      deviceKeyId: row.device_key_id,
-      publicKey: row.device_public_key,
-      hwidHash: row.hwid_hash || "",
-      risk: jsonValue(row.risk, {}),
-      boundAt: postgresTimestamp(row.bound_at),
-      lastSeenAt: postgresTimestamp(row.last_seen_at),
-      resetAt: postgresTimestamp(row.reset_at)
-    };
-  }
-
-  const account = store.accounts[String(accountId)];
-  return account?.launcherDevice || null;
-}
-
-async function bindLauncherDevice(account, body, req) {
-  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
-  const publicKey = normalizeLauncherPublicKey(body?.devicePublicKey);
-  const hwidHash = normalizeHwidRiskHash(body?.hwidRiskHash);
-  if (!deviceKeyId || !publicKey || !hwidHash) {
-    return { ok: false, error: "device_bind_required" };
-  }
-
-  const now = new Date().toISOString();
-  const risk = { hwidChanged: false, ip: requestClientIp(req), userAgent: String(req.headers["user-agent"] || "").slice(0, 160) };
-  if (pgPool) {
-    const existingDevice = await pgPool.query(
-      "SELECT player_id FROM launcher_devices WHERE device_key_id = $1 AND player_id <> $2",
-      [deviceKeyId, Number(account.id)]
+  if (INCLUDE_WEAPON_LEGACY_FIELDS) {
+    entries.push(
+      { key: rawByte(89), value: rawInt(slot) },
+      { key: rawByte(88), value: rawInt(numberOr(merged.krit, fallback.krit)) },
+      { key: rawByte(86), value: rawInt(numberOr(merged.smindam, fallback.smindam)) },
+      { key: rawByte(85), value: rawInt(numberOr(merged.smaxdam, fallback.smaxdam)) },
+      { key: rawByte(84), value: rawInt(numberOr(merged.mmindam, fallback.mmindam)) },
+      { key: rawByte(83), value: rawInt(numberOr(merged.mmaxdam, fallback.mmaxdam)) },
+      { key: rawByte(82), value: rawInt(numberOr(merged.lmindam, fallback.lmindam)) },
+      { key: rawByte(81), value: rawInt(numberOr(merged.lmaxdam, fallback.lmaxdam)) },
     );
-    if (existingDevice.rowCount) {
-      return { ok: false, error: "device_already_bound" };
-    }
-
-    try {
-      await pgPool.query(
-        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, hwid_hash, risk, bound_at, last_seen_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
-         ON CONFLICT (player_id) DO NOTHING`,
-        [Number(account.id), deviceKeyId, publicKey, hwidHash, JSON.stringify(risk)]
-      );
-    } catch (error) {
-      if (error?.code === "23505") {
-        return { ok: false, error: "device_already_bound" };
-      }
-      throw error;
-    }
-  } else {
-    for (const existing of Object.values(store.accounts || {})) {
-      if (Number(existing?.id) !== Number(account.id) && existing?.launcherDevice?.deviceKeyId === deviceKeyId) {
-        return { ok: false, error: "device_already_bound" };
-      }
-    }
-    const normalized = normalizeAccount(account);
-    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, hwidHash, risk, boundAt: now, lastSeenAt: now };
-    store.accounts[String(account.id)] = normalized;
-    await saveStore(store);
   }
 
-  console.log(`[launcher-device] bound player=${account.id} keyId=${deviceKeyId}`);
-  return { ok: true };
-}
-
-async function touchLauncherDevice(account, device, hwidHash, req) {
-  const normalizedHash = normalizeHwidRiskHash(hwidHash);
-  const risk = {
-    hwidChanged: Boolean(device?.hwidHash && normalizedHash && device.hwidHash !== normalizedHash),
-    ip: requestClientIp(req),
-    userAgent: String(req.headers["user-agent"] || "").slice(0, 160)
-  };
-
-  if (pgPool) {
-    await pgPool.query(
-      `UPDATE launcher_devices
-       SET hwid_hash = COALESCE(NULLIF($2, ''), hwid_hash), risk = $3::jsonb, last_seen_at = now()
-       WHERE player_id = $1`,
-      [Number(account.id), normalizedHash, JSON.stringify(risk)]
-    );
-  } else if (store.accounts[String(account.id)]?.launcherDevice) {
-    const normalized = normalizeAccount(store.accounts[String(account.id)]);
-    normalized.launcherDevice = { ...normalized.launcherDevice, hwidHash: normalizedHash || normalized.launcherDevice.hwidHash, risk, lastSeenAt: new Date().toISOString() };
-    store.accounts[String(account.id)] = normalized;
-    await saveStore(store);
+  if (options.includeWeaponAdditional !== false) {
+    const additional = weaponAdditionalValuesRaw(merged);
+    if (additional) entries.push({ key: rawByte(79), value: additional });
   }
 
-  if (risk.hwidChanged) {
-    console.warn(`[launcher-device] hwid risk player=${account.id} keyId=${device.deviceKeyId}`);
-  }
+  return rawHashtableBody(entries);
 }
 
-function pruneLauncherDeviceChallenges() {
-  const now = Date.now();
-  for (const [nonce, challenge] of launcherDeviceChallenges) {
-    if (challenge.expiresAt <= now) launcherDeviceChallenges.delete(nonce);
-  }
+function makeDefaultWeaponBody(index = 0) {
+  return weaponBodyFromItem(defaultWeaponForSlot(index + 1), index);
 }
 
-function createLauncherDeviceChallenge(account, deviceKeyId) {
-  pruneLauncherDeviceChallenges();
-  const nonce = crypto.randomBytes(32).toString("base64url");
-  const expiresAt = Date.now() + LAUNCHER_DEVICE_CHALLENGE_TTL_MS;
-  launcherDeviceChallenges.set(nonce, { playerId: Number(account.id), deviceKeyId, expiresAt });
-  return { nonce, expiresInSeconds: Math.max(1, Math.floor((expiresAt - Date.now()) / 1000)) };
-}
-
-function consumeLauncherDeviceChallenge(account, deviceKeyId, nonce) {
-  pruneLauncherDeviceChallenges();
-  const challenge = launcherDeviceChallenges.get(String(nonce || ""));
-  if (!challenge) return false;
-  launcherDeviceChallenges.delete(String(nonce));
-  return challenge.playerId === Number(account.id) && challenge.deviceKeyId === deviceKeyId && challenge.expiresAt > Date.now();
-}
-
-function decodeSignature(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return null;
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || value.trim() === "") return [];
   try {
-    return Buffer.from(raw, "base64");
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    try {
-      return Buffer.from(raw, "base64url");
-    } catch {
-      return null;
-    }
+    return [];
   }
 }
 
-function verifyLauncherDeviceSignature(device, nonce, signature) {
-  const signatureBytes = decodeSignature(signature);
-  if (!signatureBytes || !nonce) return false;
-  try {
-    return crypto.verify("sha256", Buffer.from(String(nonce), "utf8"), device.publicKey, signatureBytes);
-  } catch (error) {
-    console.warn(`[launcher-device] signature verify failed keyId=${device.deviceKeyId}: ${error.message}`);
-    return false;
-  }
+function itemId(item) {
+  return numberOr(item?.id ?? item?.w_id ?? item?.t_id ?? item?.e_id, 0);
 }
 
-async function verifyLauncherDeviceAccess(account, body, req) {
-  const current = await loadLauncherDevice(account.id);
-  if (!current) {
-    const bound = await bindLauncherDevice(account, body, req);
-    if (!bound.ok) return { ok: false, status: 403, error: bound.error };
-    return { ok: true, bound: true };
-  }
-
-  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
-  if (!deviceKeyId || deviceKeyId !== current.deviceKeyId) {
-    return { ok: false, status: 403, error: "device_signature_required" };
-  }
-
-  const nonce = String(body?.challengeNonce || "").trim();
-  if (!nonce || !body?.challengeSignature) {
-    return { ok: false, status: 403, error: "device_signature_required" };
-  }
-
-  if (!consumeLauncherDeviceChallenge(account, deviceKeyId, nonce)) {
-    return { ok: false, status: 403, error: "device_challenge_invalid" };
-  }
-
-  if (!verifyLauncherDeviceSignature(current, nonce, body.challengeSignature)) {
-    return { ok: false, status: 403, error: "device_signature_invalid" };
-  }
-
-  await touchLauncherDevice(account, current, body?.hwidRiskHash, req);
-  return { ok: true, bound: true };
+function isActiveWorkshopWeaponUpgrade(item = {}) {
+  if (Number(item?.itype || 0) !== 1 || item?.u_id == null) return false;
+  const expiresAt = numberOr(item.eD, 0);
+  return expiresAt > Math.floor(Date.now() / 1000);
 }
 
-async function resetLauncherDeviceBinding(accountId) {
-  if (pgPool) {
-    const result = await pgPool.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
-    return result.rowCount > 0;
-  }
-  const account = store.accounts[String(accountId)];
-  if (!account?.launcherDevice) return false;
-  delete account.launcherDevice;
-  store.accounts[String(accountId)] = account;
-  await saveStore(store);
-  return true;
+function workshopUpgradedWeaponStats(item = {}) {
+  const result = { ...item };
+  const ammo = numberOr(result.ammo, 0);
+  const ammoTotal = numberOr(result.ammo_tot, 0);
+  result.rap = Math.max(60, Math.round(numberOr(result.rap, 100) * 0.9));
+  result.dev = Math.max(0, Math.round(numberOr(result.dev, 0) * 0.9));
+  result.krit = numberOr(result.krit, 0) + 2;
+  result.smindam = Math.max(0, Math.round(numberOr(result.smindam, 0) * 1.1));
+  result.smaxdam = Math.max(result.smindam, Math.round(numberOr(result.smaxdam, 0) * 1.1));
+  result.mmindam = Math.max(0, Math.round(numberOr(result.mmindam, 0) * 1.1));
+  result.mmaxdam = Math.max(result.mmindam, Math.round(numberOr(result.mmaxdam, 0) * 1.1));
+  result.lmindam = Math.max(0, Math.round(numberOr(result.lmindam, 0) * 1.1));
+  result.lmaxdam = Math.max(result.lmindam, Math.round(numberOr(result.lmaxdam, 0) * 1.1));
+  result.ammo_tot = ammoTotal > 0 ? Math.max(ammo, Math.round(ammoTotal * 1.1)) : ammoTotal;
+  return result;
 }
 
-async function loginAccountFromUrl(url) {
-  if (!accountCredentialsFrom(url)) {
-    return null;
-  }
-  return accountFromRequest(url);
+function inventoryWeaponForBattle(item = {}, baseWeaponsById = new Map()) {
+  if (item?.u_id == null || isActiveWorkshopWeaponUpgrade(item)) return item;
+  return baseWeaponsById.get(itemId(item)) || item;
 }
 
-function cookieHeaders(account) {
-  return [
-    `ccid=${account.id}; Path=/; SameSite=None; Secure`,
-    `cckey=${account.key}; Path=/; SameSite=None; Secure`
+function selectedWeapons(profile) {
+  if (!profile) return null;
+  const defaultWeapons = profile.defaultWeapons || [];
+  const catalogWeapons = profile.catalogWeapons || [];
+  const baseWeaponsById = new Map([...defaultWeapons, ...catalogWeapons].map((item) => [itemId(item), item]));
+  const inventoryWeapons = (profile.inventory || [])
+    .filter((item) => Number(item.itype) === 1)
+    .map((item) => inventoryWeaponForBattle(item, baseWeaponsById));
+  const weapons = [
+    ...defaultWeapons,
+    ...catalogWeapons,
+    ...inventoryWeapons,
   ];
-}
-
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-const playerStatKeys = ["k", "d", "s", "hs", "ns", "pt", "w", "l", "dhs", "dns", "do", "re", "mdo", "mre", "sh", "hi"];
-
-function statNumber(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : fallback;
-}
-
-function normalizePlayerStats(rawStats = {}) {
-  return Object.fromEntries(playerStatKeys.map((key) => [key, statNumber(rawStats?.[key], 0)]));
-}
-
-function levelStateForExp(totalExp, currentLevel = START_LEVEL) {
-  const exp = statNumber(totalExp, START_EXP);
-  const calculatedLevel = Math.floor(exp / LEVEL_EXP_STEP) + 1;
-  const level = Math.max(1, calculatedLevel, statNumber(currentLevel, START_LEVEL || 1));
-  return {
-    level,
-    exp,
-    expMin: (level - 1) * LEVEL_EXP_STEP,
-    expMax: level * LEVEL_EXP_STEP
-  };
-}
-
-async function awardPlayerExperience(client, playerId, amount) {
-  const id = Number(playerId || 0);
-  const expGain = statNumber(amount, 0);
-  if (!Number.isInteger(id) || id <= 0 || expGain <= 0) return null;
-
-  const row = await client.query("SELECT level, exp FROM players WHERE id = $1 FOR UPDATE", [id]);
-  const player = row.rows[0];
-  if (!player) return null;
-
-  const oldLevel = statNumber(player.level, START_LEVEL || 1);
-  const oldExp = statNumber(player.exp, START_EXP);
-  const next = levelStateForExp(oldExp + expGain, oldLevel);
-  await client.query(
-    `UPDATE players
-     SET level = $2, exp = $3, exp_min = $4, exp_max = $5, updated_at = now()
-     WHERE id = $1`,
-    [id, next.level, next.exp, next.expMin, next.expMax]
-  );
-
-  const cached = store.accounts[String(id)];
-  if (cached) {
-    cached.level = next.level;
-    cached.exp = next.exp;
-    cached.expMin = next.expMin;
-    cached.expMax = next.expMax;
-    cached.updatedAt = new Date().toISOString();
+  const byId = new Map(weapons.map((item) => [itemId(item), item]));
+  const bySlot = new Map(DEFAULT_LOADOUT_WEAPONS.map((item) => [Number(item.ws), item]));
+  for (const item of weapons) {
+    const slot = weaponSlot(item);
+    if (slot && !bySlot.has(slot)) bySlot.set(slot, item);
   }
 
-  console.log(`[battle-exp] player=${id} add=${expGain} exp=${oldExp}->${next.exp} level=${oldLevel}->${next.level} next=${next.expMax}`);
-  return {
-    gained: expGain,
-    expBefore: oldExp,
-    exp: next.exp,
-    levelBefore: oldLevel,
-    level: next.level,
-    expMin: next.expMin,
-    expMax: next.expMax
-  };
-}
-
-async function awardClanExperience(client, playerId, amount) {
-  const id = Number(playerId || 0);
-  const expGain = statNumber(amount, 0);
-  if (!Number.isInteger(id) || id <= 0 || expGain <= 0) return null;
-
-  const clan = playerClanRecord(id);
-  const member = clan?.members?.[String(id)];
-  if (!clan || !member) return null;
-
-  member.clanExp = Number(member.clanExp || 0) + expGain;
-  const account = accountById(id);
-  member.playerExp = Number(account?.exp || member.playerExp || 0);
-  clan.exp = Object.values(clan.members || {}).reduce((sum, item) => sum + Number(item.clanExp || 0), 0);
-  clan.updatedAt = new Date().toISOString();
-  refreshAllAccountClanSummaries(store);
-
-  await client.query(
-    `UPDATE clan_members
-     SET clan_exp = clan_exp + $2,
-         player_exp = COALESCE((SELECT exp FROM players WHERE id = $1), player_exp)
-     WHERE player_id = $1`,
-    [id, expGain]
-  );
-  await client.query(
-    `UPDATE clans
-     SET exp = exp + $2,
-         updated_at = now()
-     WHERE id = $1`,
-    [Number(clan.id), expGain]
-  );
-
-  console.log(`[clan-exp] player=${id} clan=${clan.id} add=${expGain} total=${clan.exp}`);
-  return {
-    gained: expGain,
-    clanId: Number(clan.id),
-    clanExp: Number(clan.exp),
-    memberExp: Number(member.clanExp)
-  };
-}
-
-function profilePayload(account, full = false) {
-  const publicName = account.namePending ? "" : account.name;
-  const payload = {
-    result: true,
-    info: {
-      u_id: account.id,
-      un: publicName,
-      fname: account.fullName,
-      lvl: account.level,
-      vcur: account.money,
-      exp: {
-        cur: account.exp,
-        min: account.expMin,
-        max: account.expMax
-      }
-    },
-    conf: {
-      cst: {
-        cn: 30
-      }
-    },
-    name_pending: Boolean(account.namePending)
-  };
-
-  if (full) {
-    payload.view = clone(account.view);
-    payload.weap = clone(account.weap);
-    payload.taun = clone(account.taun);
-  }
-
-  const liveClan = clanSummaryForPlayer(account.id) || account.clan || null;
-  if (liveClan) {
-    const clanRecord = clanById(liveClan.cid);
-    payload.cl = {
-      cid: Number(liveClan.cid),
-      l: Number(liveClan.l || 1),
-      fid: Number(liveClan.fid || 0),
-      fn: String(liveClan.fn || ""),
-      a: Number(liveClan.a || 0),
-      alvl: Number(liveClan.alvl || 0),
-      mcnt: Number(liveClan.mcnt || 0),
-      macnt: Number(liveClan.macnt || CLAN_DEFAULT_MAX_MEMBERS),
-      e: Number(liveClan.e || 0),
-      n: String(liveClan.n || ""),
-      t: String(liveClan.t || ""),
-      tc: String(liveClan.tc || ""),
-      aid: Number(liveClan.aid || 0),
-      h: String(liveClan.h || ""),
-      d: String(liveClan.d || ""),
-      vc: Number(liveClan.vc || 0),
-      ek: Number(liveClan.ek || 0),
-      ue: Number(account.exp || liveClan.ue || 0)
-    };
-    payload.clinv = activeClanInventoryItems(clanRecord);
-  }
-
-  payload.sA = statsBlock(account);
-  payload.vk = "0";
-
-  return payload;
-}
-
-function inventoryPayload(account) {
-  return {
-    result: true,
-    st: Math.floor(Date.now() / 1000),
-    data: {
-      items: JSON.stringify(account.inventory || []),
-      dw: clone(defaultWeapons)
-    }
-  };
-}
-
-function shopPayload() {
-  return {
-    result: true,
-    weap: {
-      upg: clone(shopWeaponUpgrades),
-      items: clone(shopWeapons)
-    },
-    wear: {
-      items: clone(shopWears)
-    },
-    taunt: {
-      items: clone(shopTaunts)
-    },
-    enh: {
-      items: clone(shopEnhancers)
-    }
-  };
-}
-
-function logShopItemsPayload(account, act) {
-  const weapons = shopWeapons.map((item) => `${item.w_id}:${item.sn || item.sname}:ws${item.ws}`).join(",");
-  console.log(`[shop-items] account=${account?.id || "unknown"} act=${act || "items"} weapons=${shopWeapons.length} ids=${weapons}`);
-}
-
-function abilitiesPayload(account) {
-  return {
-    result: true,
-    b: clone(abilityCatalog),
-    u: clone(account.abilities || [])
-  };
-}
-
-function mapsPayload() {
-  const gameMasterPort = process.env.GAME_MASTER_PORT || "5058";
-  const socialMasterPort = process.env.SOCIAL_MASTER_PORT || "5057";
-  const battlePorts = String(process.env.CLIENT_BATTLE_PORTS || process.env.BATTLE_PORTS || "5055,5056,5255")
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value && value !== gameMasterPort && value !== socialMasterPort)
-    .join(",") || "5055";
-  const battleServers = BATTLE_HOST
-    ? [
-        { h: BATTLE_HOST, p: battlePorts, n: BATTLE_NAME, pL: "100", lM: "0", lMa: "100", m: "0" },
-        { h: BATTLE_HOST, p: socialMasterPort, n: `${BATTLE_NAME} Master`, pL: "100", lM: "0", lMa: "100", m: "1" }
-      ]
-    : [];
-  const gameMasters = BATTLE_HOST
-    ? [
-        { h: BATTLE_HOST, p: gameMasterPort, n: BATTLE_NAME, pL: "100", lM: "0", lMa: "100", m: "1", iD: "1" }
-      ]
-    : [];
-
-  return {
-    result: true,
-    s: battleServers,
-    gm: gameMasters,
-    b: clone(maps)
-  };
-}
-
-const ACHIEVEMENTS_TEXT_PATH = process.env.ACHIEVEMENTS_TEXT_PATH || path.join(API_DIR, "achievements.txt");
-const ACHIEVEMENT_MODE_FAMILY_TO_MODE = Object.freeze({
-  201: 1,
-  202: 2,
-  204: 4,
-  208: 8,
-  264: 64
-});
-const ACHIEVEMENT_REWARD_BY_GROUP = Object.freeze({
-  100003600: [15, 25, 35, 50, 70],
-  100005800: [15, 25, 35, 50, 70],
-  100006200: [25, 50, 90, 140, 200],
-  100006900: [10, 20, 30, 40, 50],
-  100010000: [20, 35, 60, 100, 160],
-  100010200: [20, 35, 60, 100, 160],
-  100010300: [15, 35, 100, 200, 500],
-  400000132: [15, 25, 35, 50, 70]
-});
-const ACHIEVEMENT_REWARD_DEFAULT = Object.freeze([10, 20, 30, 40, 50]);
-const ACHIEVEMENT_REWARD_WEAPON = Object.freeze([10, 20, 35, 50, 70]);
-const ACHIEVEMENT_REWARD_MODE = Object.freeze([15, 25, 40, 60, 90]);
-const ACHIEVEMENT_COMPACT_ID_BASE = 1000;
-
-function achievementTextValue(line) {
-  const prefix = 'msgstr "';
-  if (!String(line || "").startsWith(prefix) || !String(line || "").endsWith('"')) return "";
-  return String(line).slice(prefix.length, -1).replace(/\\"/g, '"');
-}
-
-function achievementThreshold(description) {
-  const values = Array.from(String(description || "").matchAll(/\d[\d ]*/g))
-    .map((match) => Number(String(match[0]).replace(/\s+/g, "")))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  return values.length ? values[values.length - 1] : 1;
-}
-
-function achievementReward(achievementId) {
-  const text = String(Math.trunc(Number(achievementId) || 0)).padStart(11, "0");
-  const group = text.slice(0, -2);
-  const level = Math.max(1, Math.min(5, Number(text.slice(-2)) || 1));
-  const parts = achievementParts(achievementId);
-  const override = ACHIEVEMENT_REWARD_BY_GROUP[group];
-  if (override?.[level - 1] != null) return override[level - 1];
-  if (ACHIEVEMENT_MODE_FAMILY_TO_MODE[parts.family]) return ACHIEVEMENT_REWARD_MODE[level - 1];
-  if ((parts.family === 100 && parts.weaponId > 0) || (parts.family >= 101 && parts.family <= 110)) {
-    return ACHIEVEMENT_REWARD_WEAPON[level - 1];
-  }
-  return ACHIEVEMENT_REWARD_DEFAULT[level - 1];
-}
-
-function achievementParts(achievementId) {
-  const text = String(Math.trunc(Number(achievementId) || 0)).padStart(11, "0");
-  const group = text.slice(0, -2);
-  return {
-    family: Number(group.slice(0, 3)),
-    weaponId: Number(group.slice(3, 7)),
-    hitZone: Number(group.slice(7, 9)),
-    level: Number(text.slice(-2))
-  };
-}
-
-function loadAchievementCatalog() {
-  let text = "";
-  try {
-    text = fs.readFileSync(ACHIEVEMENTS_TEXT_PATH, "utf8");
-  } catch (error) {
-    console.warn(`[achievements] catalog read failed path=${ACHIEVEMENTS_TEXT_PATH} error=${error.message}`);
-  }
-
-  const rows = new Map();
-  const lines = text.split(/\r?\n/);
-  for (let idx = 0; idx < lines.length - 1; idx += 1) {
-    const match = /^msgid "ach(\d+)(name|desc|img)"$/.exec(lines[idx]);
-    if (!match) continue;
-    const [, achievementId, field] = match;
-    if (!rows.has(achievementId)) rows.set(achievementId, {});
-    rows.get(achievementId)[field] = achievementTextValue(lines[idx + 1]);
-  }
-
-  const catalog = Array.from(rows.entries())
-    .filter(([, item]) => item.name && item.desc && item.img)
-    .sort(([left], [right]) => Number(left) - Number(right))
-    .map(([achievementId], index) => {
-      const parts = achievementParts(achievementId);
-      return {
-        id: ACHIEVEMENT_COMPACT_ID_BASE + index + 1,
-        i: Number(achievementId),
-        v: achievementThreshold(rows.get(achievementId).desc),
-        r: achievementReward(achievementId),
-        ul: 1,
-        parts
-      };
-    });
-  console.log(`[achievements] catalog loaded count=${catalog.length} path=${ACHIEVEMENTS_TEXT_PATH}`);
-  return catalog;
-}
-
-const achievementCatalog = loadAchievementCatalog();
-const achievementBase = achievementCatalog.map(({ parts, ...achievement }) => achievement);
-const achievementCatalogIds = new Set(achievementCatalog.map((achievement) => Number(achievement.id)));
-const ACHIEVEMENT_POP_HISTORICAL = process.env.ACHIEVEMENT_POP_HISTORICAL === "1";
-
-function achievementWeaponStats(account) {
-  return (account.weaponStats || []).map((item) => ({
-    wid: Number(item.wid ?? item.weapon_id ?? item.w_id ?? 0),
-    wt: Number(item.wt ?? item.weapon_type ?? 0),
-    k: statNumber(item.k ?? item.kills, 0),
-    hs: statNumber(item.hs ?? item.headshots, 0),
-    ns: statNumber(item.ns ?? item.nuts, 0)
-  }));
-}
-
-function achievementWeaponValue(account, predicate, hitZone) {
-  return achievementWeaponStats(account)
-    .filter(predicate)
-    .reduce((sum, item) => {
-      if (hitZone === 16) return sum + item.ns;
-      if (hitZone === 32) return sum + item.hs;
-      return sum + item.k;
-    }, 0);
-}
-
-function achievementModeWins(account, mode) {
-  return (account.modeStats || [])
-    .filter((item) => Number(item.m ?? item.mode ?? 0) === Number(mode))
-    .reduce((sum, item) => sum + statNumber(item.w ?? item.wins, 0), 0);
-}
-
-function achievementValueFor(account, achievement) {
-  const stats = playerStats(account);
-  const { family, weaponId, hitZone } = achievement.parts || achievementParts(achievement.i);
-
-  if (family === 100 && weaponId === 0) {
-    if (hitZone === 16) return statNumber(stats.ns, 0);
-    if (hitZone === 32) return statNumber(stats.hs, 0);
-    return statNumber(stats.k, 0);
-  }
-
-  if (family >= 101 && family <= 110 && weaponId === 0) {
-    const weaponType = family - 100;
-    return achievementWeaponValue(account, (item) => item.wt === weaponType, hitZone);
-  }
-
-  if ((family === 100 || (family >= 101 && family <= 110)) && weaponId > 0) {
-    return achievementWeaponValue(account, (item) => item.wid === weaponId, hitZone);
-  }
-
-  if (ACHIEVEMENT_MODE_FAMILY_TO_MODE[family]) {
-    return achievementModeWins(account, ACHIEVEMENT_MODE_FAMILY_TO_MODE[family]);
-  }
-
-  return 0;
-}
-
-function achievementProgressFor(account) {
-  return Object.fromEntries(
-    achievementCatalog.map((achievement) => {
-      const value = Math.max(0, Math.trunc(achievementValueFor(account, achievement)));
-      return [
-        String(achievement.id),
-        {
-          c: value >= Number(achievement.v || 0) ? 1 : 0,
-          v: value
-        }
-      ];
-    })
-  );
-}
-
-function achievementsPayload(account) {
-  return {
-    result: true,
-    b: achievementBase,
-    u: {
-      data: JSON.stringify(achievementProgressFor(account))
-    }
-  };
-}
-
-async function loadAchievementAccountFromPostgres(client, playerId) {
-  const id = Number(playerId || 0);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  const player = await client.query("SELECT id, stats FROM players WHERE id = $1", [id]);
-  const row = player.rows[0];
-  if (!row) return null;
-
-  const weaponStats = await client.query(
-    `SELECT weapon_id, weapon_type, kills, headshots, nuts
-     FROM player_weapon_stats
-     WHERE player_id = $1`,
-    [id]
-  );
-  const modeStats = await client.query(
-    `SELECT mode, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins
-     FROM player_match_stats
-     WHERE player_id = $1
-     GROUP BY mode`,
-    [id]
-  );
-
-  return {
-    id,
-    stats: jsonValue(row.stats, {}),
-    weaponStats: weaponStats.rows.map((statRow) => ({
-      wid: Number(statRow.weapon_id || 0),
-      wt: Number(statRow.weapon_type || 0),
-      k: Number(statRow.kills || 0),
-      hs: Number(statRow.headshots || 0),
-      ns: Number(statRow.nuts || 0)
-    })),
-    modeStats: modeStats.rows.map((statRow) => ({
-      m: Number(statRow.mode || 0),
-      w: Number(statRow.wins || 0)
-    }))
-  };
-}
-
-async function syncPostgresAchievements(client, playerId) {
-  if (!achievementCatalog.length) return [];
-  const account = await loadAchievementAccountFromPostgres(client, playerId);
-  if (!account) return [];
-
-  const existing = await client.query(
-    "SELECT achievement_id, claimed_value FROM player_achievements WHERE player_id = $1",
-    [account.id]
-  );
-  const hasCatalogProgress = existing.rows.some((row) => achievementCatalogIds.has(Number(row.achievement_id)));
-  const baselineOnly = !ACHIEVEMENT_POP_HISTORICAL && !hasCatalogProgress;
-  const completedBefore = new Set(
-    existing.rows
-      .filter((row) => Number(row.claimed_value || 0) > 0)
-      .map((row) => Number(row.achievement_id))
-  );
-  const progress = achievementProgressFor(account);
-  const newlyCompleted = [];
-  let completedCount = 0;
-
-  for (const achievement of achievementCatalog) {
-    const itemProgress = progress[String(achievement.id)] || { c: 0, v: 0 };
-    const currentValue = Math.max(0, Number(itemProgress.v || 0));
-    const complete = Number(itemProgress.c || 0) > 0 ? 1 : 0;
-    if (complete) completedCount += 1;
-
-    if (!baselineOnly && complete && !completedBefore.has(Number(achievement.id))) {
-      newlyCompleted.push({
-        id: Number(achievement.id),
-        i: Number(achievement.i),
-        maxValue: Number(achievement.v || 0),
-        currentValue,
-        reward: Number(achievement.r || 0),
-        userId: account.id
-      });
-    }
-
-    await client.query(
-      `INSERT INTO player_achievements (player_id, achievement_id, current_value, claimed_value, updated_at)
-       VALUES ($1, $2, $3, $4, now())
-       ON CONFLICT (player_id, achievement_id) DO UPDATE SET
-         current_value = EXCLUDED.current_value,
-         claimed_value = GREATEST(player_achievements.claimed_value, EXCLUDED.claimed_value),
-         updated_at = now()`,
-      [account.id, Number(achievement.id), currentValue, complete]
-    );
-  }
-
-  if (baselineOnly) {
-    console.log(`[achievements] baseline player=${account.id} completed=${completedCount} catalog=${achievementCatalog.length}`);
-  } else if (newlyCompleted.length) {
-    console.log(`[achievements] unlock player=${account.id} count=${newlyCompleted.length} ids=${newlyCompleted.map((item) => item.i).join(",")}`);
-  }
-  return newlyCompleted;
-}
-
-function leagueLimits() {
-  const limits = {};
-  for (let i = 1; i <= 15; i += 1) {
-    limits[String(i)] = [(i - 1) * 10000, i === 15 ? 0 : i * 10000];
-  }
-  return limits;
-}
-
-function leagueIndexForExp(exp, limits) {
-  const value = Number(exp || 0);
-  for (let i = 1; i <= 15; i += 1) {
-    const [min, max] = limits[String(i)];
-    if (value >= Number(min || 0) && (Number(max || 0) === 0 || value < Number(max || 0))) return i;
-  }
-  return 1;
-}
-
-async function leaguePayload(account) {
-  const accounts = await allAccountsForStats();
-  const sorted = sortRatingAccounts(accounts, 2);
-  const currentIndex = sorted.findIndex((ratedAccount) => Number(ratedAccount.id) === Number(account.id));
-  const currentAccount = currentIndex >= 0 ? sorted[currentIndex] : account;
-  const me = ratingUser(currentAccount, currentIndex >= 0 ? currentIndex + 1 : 1);
-  const limits = leagueLimits();
-  const leagues = Object.fromEntries(Array.from({ length: 15 }, (_, idx) => [`l${idx + 1}`, []]));
-
-  for (const ratedAccount of sorted) {
-    const row = ratingUser(ratedAccount);
-    const leagueIndex = leagueIndexForExp(row.exp, limits);
-    if (leagues[`l${leagueIndex}`].length < 101 || Number(row.id) === Number(account.id)) {
-      leagues[`l${leagueIndex}`].push(row);
-    }
-  }
-
-  return {
-    result: true,
-    u: me,
-    ls: limits,
-    ...leagues
-  };
-}
-
-function playerStats(account) {
-  return normalizePlayerStats(account.stats || {});
-}
-
-function weaponStatItems(account) {
-  const owned = [...defaultWeapons, ...(account.inventory || []).filter((item) => Number(item.itype) === 1)];
-  const statByWeaponId = new Map((account.weaponStats || []).map((item) => [Number(item.wid || item.weapon_id || 0), item]));
+  const selected = [];
   const seen = new Set();
-  return owned
-    .filter((item) => {
-      const key = Number(item.w_id || item.id);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map((item) => {
-      const weaponId = Number(item.w_id || item.id);
-      const stats = statByWeaponId.get(weaponId) || {};
-      return {
-        wid: weaponId,
-        wt: Number(stats.wt ?? stats.weapon_type ?? item.wt ?? 0),
-        sn: String(stats.sn || stats.system_name || item.sn || item.sname || `weapon_${weaponId}`),
-        k: statNumber(stats.k ?? stats.kills, 0),
-        hs: statNumber(stats.hs ?? stats.headshots, 0),
-        ns: statNumber(stats.ns ?? stats.nuts, 0),
-        sh: statNumber(stats.sh ?? stats.shots, 0),
-        hi: statNumber(stats.hi ?? stats.hits, 0)
-      };
-    });
-}
-
-function gameModeStatItems(account) {
-  const statByMode = new Map();
-  for (const item of account.modeStats || []) {
-    const mode = normalizeStatsMode(item.m || item.mode || 0);
-    if (!mode) continue;
-    const current = statByMode.get(mode) || { w: 0, l: 0, pt: 0 };
-    current.w += statNumber(item.w ?? item.wins, 0);
-    current.l += statNumber(item.l ?? item.losses, 0);
-    current.pt += statNumber(item.pt ?? item.play_time, 0);
-    statByMode.set(mode, current);
-  }
-  return DOSSIER_GAME_MODE_STATS.map((mode) => {
-    const stats = statByMode.get(mode) || {};
-    return {
-      m: mode,
-      w: statNumber(stats.w ?? stats.wins, 0),
-      l: statNumber(stats.l ?? stats.losses, 0),
-      pt: statNumber(stats.pt ?? stats.play_time, 0)
-    };
-  });
-}
-
-function mapStatItems(account) {
-  const statByMap = new Map((account.mapStats || []).map((item) => [String(item.n || item.map_name || ""), item]));
-  return maps.map((map) => {
-    const stats = statByMap.get(map.n) || {};
-    return {
-      n: map.n,
-      w: statNumber(stats.w ?? stats.wins, 0),
-      l: statNumber(stats.l ?? stats.losses, 0),
-      pt: statNumber(stats.pt ?? stats.play_time, 0)
-    };
-  });
-}
-
-function statsBlock(account) {
-  return {
-    wd: JSON.stringify(weaponStatItems(account)),
-    ud: JSON.stringify(playerStats(account)),
-    md: JSON.stringify(gameModeStatItems(account)),
-    mad: JSON.stringify(mapStatItems(account))
-  };
-}
-
-function usesProfileObjectLoadout(account, url) {
-  const targetId = Number(url.searchParams.get("ui") || 0);
-  return Number.isInteger(targetId) && targetId > 0 && targetId !== Number(account.id);
-}
-
-function advancedStatsPayload(account, options = {}) {
-  const objectLoadout = Boolean(options.objectLoadout);
-  const payload = {
-    ...profilePayload(account, true),
-    sA: statsBlock(account),
-    vk: "0"
-  };
-  if (objectLoadout) {
-    payload.view = profileViewObjectPayload(account);
-    payload.weap = profileWeaponObjectPayload(account);
-  }
-  console.log(
-    `[profile-payload] user=${account.id} loadout=${objectLoadout ? "objects" : "ids"} view=${viewSelectionSummary(account.view)} weap=${weaponSelectionSummary(account.weap)}`
-  );
-  return payload;
-}
-
-function ratingUser(account, pos = 1, overrides = {}) {
-  const stats = playerStats(account);
-  const death = Number(overrides.death ?? stats.d);
-  const kill = Number(overrides.kill ?? stats.k);
-  const liveClan = clanSummaryForPlayer(account.id) || account.clan || null;
-  return {
-    pos,
-    id: Number(overrides.id ?? account.id),
-    uid: Number(overrides.id ?? account.id),
-    name: String(overrides.name ?? account.name),
-    un: String(overrides.name ?? account.name),
-    n: String(overrides.name ?? account.name),
-    lvl: Number(overrides.lvl ?? account.level),
-    l: Number(overrides.lvl ?? account.level),
-    exp: Number(overrides.exp ?? account.exp),
-    e: Number(overrides.exp ?? account.exp),
-    kill,
-    k: kill,
-    death,
-    d: death,
-    kd: death > 0 ? Math.round((kill / death) * 1000) : kill * 1000,
-    h: Number(overrides.h ?? stats.hs),
-    f: Number(overrides.f ?? 0),
-    p: Number(overrides.p ?? 0),
-    do: Number(overrides.do ?? stats.do),
-    nu: Number(overrides.nu ?? stats.ns),
-    a: Number(overrides.a ?? 0),
-    ach: Number(overrides.ach ?? 0),
-    ptime: Number(overrides.ptime ?? stats.pt),
-    cid: Number(overrides.cid ?? liveClan?.cid ?? 0),
-    clid: Number(overrides.cid ?? liveClan?.cid ?? 0),
-    clan_id: Number(overrides.cid ?? liveClan?.cid ?? 0),
-    aid: Number(overrides.aid ?? liveClan?.aid ?? 0),
-    caid: Number(overrides.aid ?? liveClan?.aid ?? 0),
-    arm_id: Number(overrides.aid ?? liveClan?.aid ?? 0),
-    ctag: String(overrides.ct ?? liveClan?.t ?? ""),
-    clan_name: String(overrides.ct ?? liveClan?.t ?? "")
-  };
-}
-
-async function allAccountsForStats() {
-  if (pgPool) {
-    try {
-      await pgSaveChain.catch(() => {});
-      const loaded = await loadPostgresStore();
-      store.accounts = { ...(store.accounts || {}), ...(loaded.accounts || {}) };
-    } catch (error) {
-      console.error("[postgres] stats account load failed", error);
+  for (let slot = 1; slot <= 7; slot += 1) {
+    const selectedId = numberOr(profile.weap?.[`id${slot}`], 0);
+    const selectedItem = selectedId > 0 ? byId.get(selectedId) : null;
+    if (selectedItem && !weaponAllowedInSlot(selectedItem, slot)) {
+      console.log(`[loadout] ignored slot-mismatch slot=${slot} id=${selectedId} itemSlot=${weaponSlot(selectedItem)} name=${stringOr(selectedItem.sn ?? selectedItem.sname, "unknown")}`);
+    }
+    const item = (selectedItem && weaponAllowedInSlot(selectedItem, slot) ? selectedItem : null) || bySlot.get(slot) || defaultWeaponForSlot(slot);
+    const id = itemId(item) || Number(item?.w_id || slot);
+    const uniqueKey = `${slot}:${id}`;
+    if (item && !seen.has(uniqueKey)) {
+      selected.push({ ...item, ws: slot });
+      seen.add(uniqueKey);
     }
   }
-  const byId = new Map();
-  for (const raw of Object.values(store.accounts || {})) {
-    const account = normalizeAccount(raw);
-    const id = Number(account.id || 0);
-    if (!Number.isInteger(id) || id <= 0) continue;
-    const existing = byId.get(id);
-    if (!existing || statNumber(account.exp, 0) >= statNumber(existing.exp, 0)) {
-      byId.set(id, account);
-    }
-  }
-  return Array.from(byId.values());
+  return selected.length ? selected : null;
 }
 
-function ratingSortValue(account, type) {
-  const stats = playerStats(account);
-  const kills = statNumber(stats.k, 0);
-  const deaths = statNumber(stats.d, 0);
-  switch (Number(type || 0)) {
-    case 1: return statNumber(account.level, 0);
-    case 2: return statNumber(account.exp, 0);
-    case 3: return kills;
-    case 4: return deaths;
-    case 5: return deaths > 0 ? kills / deaths : kills;
-    case 6: return 0;
-    case 7: return statNumber(stats.pt, 0);
-    default: return statNumber(account.exp, 0);
-  }
+function selectedWeaponUpgradeSummary(profile) {
+  const upgraded = (selectedWeapons(profile) || []).filter((item) => isActiveWorkshopWeaponUpgrade(item));
+  if (!upgraded.length) return "none";
+  return upgraded
+    .map((item) => `${weaponSlot(item)}:${itemId(item)}:${stringOr(item.sn ?? item.sname, "")}:u=${numberOr(item.u_id, 0)}:eD=${numberOr(item.eD, 0)}`)
+    .join(",");
 }
 
-function sortRatingAccounts(accounts, type) {
-  return [...accounts].sort((left, right) => {
-    const scoreDiff = ratingSortValue(right, type) - ratingSortValue(left, type);
-    if (scoreDiff !== 0) return scoreDiff;
-    const expDiff = statNumber(right.exp, 0) - statNumber(left.exp, 0);
-    if (expDiff !== 0) return expDiff;
-    const killDiff = statNumber(playerStats(right).k, 0) - statNumber(playerStats(left).k, 0);
-    if (killDiff !== 0) return killDiff;
-    return Number(left.id) - Number(right.id);
-  });
-}
-
-async function ratingPayload(account, url) {
-  const type = Number(url.searchParams.get("t") || 2);
-  const page = Math.max(0, Number(url.searchParams.get("p") || 0));
-  const pageSize = 100;
-  const accounts = await allAccountsForStats();
-  const sorted = sortRatingAccounts(accounts, type);
-  const start = page * pageSize;
-  const users = sorted.slice(start, start + pageSize).map((ratedAccount, index) => ratingUser(ratedAccount, start + index + 1));
-  const currentIndex = sorted.findIndex((ratedAccount) => Number(ratedAccount.id) === Number(account.id));
-  const currentAccount = currentIndex >= 0 ? sorted[currentIndex] : account;
-
-  return {
-    result: true,
-    users,
-    musers: String(sorted.length),
-    uinfo: ratingUser(currentAccount, currentIndex >= 0 ? currentIndex + 1 : 1)
-  };
-}
-
-async function yesterdayBestPayload(account) {
-  if (pgPool) {
-    try {
-      await pgSaveChain.catch(() => {});
-      const result = await pgPool.query(`
-        SELECT
-          p.id,
-          p.name,
-          p.level,
-          COALESCE(SUM(CASE WHEN b.killer_player_id = p.id THEN COALESCE(NULLIF(b.event_data->>'expAwarded', '')::int, 0) ELSE 0 END), 0)::int AS exp_today,
-          COUNT(b.id) FILTER (WHERE b.killer_player_id = p.id AND b.victim_player_id IS DISTINCT FROM p.id)::int AS kills,
-          COUNT(b.id) FILTER (WHERE b.killer_player_id = p.id AND b.hit_zone = 32)::int AS heads,
-          COUNT(b.id) FILTER (WHERE b.killer_player_id = p.id AND b.hit_zone = 16)::int AS nuts,
-          COALESCE(SUM(CASE WHEN b.killer_player_id = p.id THEN COALESCE(NULLIF(b.event_data->>'domination', '')::int, 0) ELSE 0 END), 0)::int AS domination
-        FROM players p
-        LEFT JOIN battle_score_events b
-          ON (b.killer_player_id = p.id OR b.victim_player_id = p.id)
-         AND b.created_at >= now() - interval '1 day'
-        GROUP BY p.id, p.name, p.level
-        ORDER BY kills DESC, exp_today DESC, p.level DESC, p.id
-        LIMIT 100
-      `);
-      return {
-        result: true,
-        yb: result.rows.map((row) => {
-          const clan = clanSummaryForPlayer(row.id) || {};
-          return {
-            id: Number(row.id),
-            name: String(row.name || ""),
-            n: String(row.name || ""),
-            un: String(row.name || ""),
-            lvl: Number(row.level || 1),
-            l: Number(row.level || 1),
-            exp: Number(row.exp_today || 0),
-            e: Number(row.exp_today || 0),
-            kill: Number(row.kills || 0),
-            k: Number(row.kills || 0),
-            h: Number(row.heads || 0),
-            f: 0,
-            p: 0,
-            do: Number(row.domination || 0),
-            nu: Number(row.nuts || 0),
-            a: 0,
-            clan_id: Number(clan.cid || 0),
-            ctag: String(clan.t || ""),
-            caid: Number(clan.aid || 0)
-          };
-        })
-      };
-    } catch (error) {
-      console.error("[postgres] ybest load failed", error);
-    }
-  }
-
-  const yb = (await allAccountsForStats()).map((ratedAccount) => {
-    const stats = playerStats(ratedAccount);
-    return ratingUser(ratedAccount, 1, {
-      exp: ratedAccount.exp,
-      kill: stats.k,
-      h: stats.hs,
-      do: stats.do,
-      nu: stats.ns
-    });
-  });
-  if (!yb.some((row) => Number(row.id) === Number(account.id))) yb.push(ratingUser(account));
-  return { result: true, yb };
-}
-
-function ok(extra = {}) {
-  return {
-    result: true,
-    ...extra
-  };
-}
-
-function findShopItem(collection, idField, id) {
-  return collection.find((item) => Number(item[idField] ?? item.id ?? item.w_id) === Number(id));
-}
-
-function itemPrice(item) {
-  return Number(item?.sc?.tPv || 0);
-}
-
-function isWeaponItem(item) {
-  return Number(item?.itype || 0) === 1;
-}
-
-function isValidShopPrice(price) {
-  return Number.isFinite(price) && price > 0;
-}
-
-const SHOP_DURATION = Object.freeze({
-  DAY: 1,
-  WEEK: 2,
-  MONTH: 3,
-  PERMANENT: 4
-});
-const SHOP_DAY_SECONDS = 86460;
-
-function currentUnixSeconds() {
-  return Math.floor(Date.now() / 1000);
-}
-
-function normalizeClanSummary(clan) {
-  if (!clan) return null;
-  const id = Number(clan.cid ?? clan.id ?? clan.clanId ?? 0);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  return {
-    cid: id,
-    id,
-    l: Number(clan.l ?? clan.level ?? 1),
-    fid: Number(clan.fid ?? clan.ownerPlayerId ?? clan.owner_player_id ?? 0),
-    fn: String(clan.fn ?? clan.founderName ?? ""),
-    a: Number(clan.a ?? clan.access ?? 1),
-    alvl: Number(clan.alvl ?? clan.accessLevel ?? 15),
-    mcnt: Number(clan.mcnt ?? clan.memberCount ?? 0),
-    macnt: Number(clan.macnt ?? clan.maxMembers ?? CLAN_DEFAULT_MAX_MEMBERS),
-    e: Number(clan.e ?? clan.exp ?? 0),
-    n: String(clan.n ?? clan.name ?? ""),
-    t: String(clan.t ?? clan.tag ?? ""),
-    tc: String(clan.tc ?? clan.tagColor ?? ""),
-    aid: Number(clan.aid ?? clan.armId ?? 1),
-    h: String(clan.h ?? clan.homepage ?? ""),
-    d: String(clan.d ?? clan.desc ?? ""),
-    vc: Number(clan.vc ?? clan.money ?? 0),
-    ek: Number(clan.ek ?? clan.expKoef ?? 0),
-    ue: Number(clan.ue ?? clan.userExp ?? 0)
-  };
-}
-
-function normalizeStore(rawStore = {}) {
-  const next = {
-    ...rawStore,
-    accounts: rawStore.accounts || {},
-    clans: rawStore.clans || {},
-    playerFriends: Array.isArray(rawStore.playerFriends) ? rawStore.playerFriends : []
-  };
-  const clans = next.clans;
-  clans.byId = clans.byId || {};
-  clans.nextId = Number(clans.nextId || 1);
-  clans.nextEventId = Number(clans.nextEventId || 1);
-  clans.nextTreasuryEventId = Number(clans.nextTreasuryEventId || 1);
-  for (const [id, clan] of Object.entries(clans.byId)) {
-    clans.byId[id] = normalizeClanRecord(clan);
-    clans.nextId = Math.max(clans.nextId, Number(id) + 1);
-  }
-  refreshAllAccountClanSummaries(next);
-  return next;
-}
-
-function ensureClanStore() {
-  store = normalizeStore(store || { accounts: {} });
-  return store.clans;
-}
-
-function normalizeClanRecord(raw = {}) {
-  const id = Number(raw.id ?? raw.cid ?? 0);
-  const members = {};
-  for (const [playerId, member] of Object.entries(raw.members || {})) {
-    members[String(playerId)] = normalizeClanMemberRecord(member, Number(playerId));
-  }
-  const invites = {};
-  for (const [playerId, invite] of Object.entries(raw.invites || {})) {
-    invites[String(playerId)] = {
-      playerId: Number(invite.playerId ?? playerId),
-      createdAt: invite.createdAt || new Date().toISOString()
-    };
-  }
-  const rawTreasuryEvents = Array.isArray(raw.treasuryEvents)
-    ? raw.treasuryEvents
-    : (Array.isArray(raw.etreas) ? raw.etreas : []);
-  const normalized = {
-    id,
-    name: String(raw.name ?? raw.n ?? ""),
-    tag: String(raw.tag ?? raw.t ?? ""),
-    ownerPlayerId: Number(raw.ownerPlayerId ?? raw.fid ?? 0),
-    level: Number(raw.level ?? raw.l ?? 1),
-    exp: Number(raw.exp ?? raw.e ?? 0),
-    money: Number(raw.money ?? raw.vc ?? 0),
-    armId: Number(raw.armId ?? raw.aid ?? 1),
-    tagColor: String(raw.tagColor ?? raw.tc ?? ""),
-    homepage: String(raw.homepage ?? raw.h ?? ""),
-    desc: String(raw.desc ?? raw.description ?? raw.d ?? ""),
-    access: Number(raw.access ?? raw.a ?? 1),
-    accessLevel: Number(raw.accessLevel ?? raw.alvl ?? CLAN_JOIN_LEVEL),
-    maxMembers: Math.min(CLAN_MAX_MEMBERS, Math.max(CLAN_DEFAULT_MAX_MEMBERS, Number(raw.maxMembers ?? raw.macnt ?? CLAN_DEFAULT_MAX_MEMBERS))),
-    deletedAt: raw.deletedAt || null,
-    createdAt: raw.createdAt || new Date().toISOString(),
-    updatedAt: raw.updatedAt || new Date().toISOString(),
-    members,
-    invites,
-    events: Array.isArray(raw.events) ? raw.events.map(normalizeClanEventRecord).filter(Boolean) : [],
-    treasuryEvents: rawTreasuryEvents.map(normalizeClanTreasuryRecord).filter(Boolean),
-    inventory: Array.isArray(raw.inventory) ? raw.inventory : []
-  };
-  ensureClanOwnedArm(normalized, normalized.armId, "current");
-  return normalized;
-}
-
-function normalizeClanMemberRecord(raw = {}, fallbackPlayerId = 0) {
-  return {
-    playerId: Number(raw.playerId ?? raw.uid ?? fallbackPlayerId),
-    memberLevel: Number(raw.memberLevel ?? raw.mlvl ?? 1),
-    money: Number(raw.money ?? raw.m ?? 0),
-    clanExp: Number(raw.clanExp ?? raw.e ?? 0),
-    expKoef: Number(raw.expKoef ?? raw.ek ?? 0),
-    playerExp: Number(raw.playerExp ?? raw.ue ?? 0),
-    joinedAt: raw.joinedAt || raw.date || new Date().toISOString()
-  };
-}
-
-function normalizeClanEventRecord(raw = {}) {
-  const id = Number(raw.id ?? raw.i ?? 0);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  return {
-    id,
-    clanId: Number(raw.clanId ?? raw.cid ?? 0),
-    type: Number(raw.type ?? raw.et ?? 0),
-    creatorPlayerId: Number(raw.creatorPlayerId ?? raw.creatid ?? 0),
-    data: raw.data && typeof raw.data === "object" ? raw.data : {},
-    expiresAt: raw.expiresAt || new Date(Date.now() + 1000).toISOString(),
-    createdAt: raw.createdAt || new Date().toISOString()
-  };
-}
-
-function normalizeClanTreasuryRecord(raw = {}) {
-  const id = Number(raw.id ?? raw.i ?? 0);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  return {
-    id,
-    clanId: Number(raw.clanId ?? raw.cid ?? 0),
-    playerId: Number(raw.playerId ?? raw.uid ?? 0),
-    playerName: String(raw.playerName ?? raw.un ?? ""),
-    money: Number(raw.money ?? raw.vcur ?? 0),
-    type: Number(raw.type ?? raw.t ?? 0),
-    createdAt: raw.createdAt || raw.d || new Date().toISOString()
-  };
-}
-
-function accountById(playerId, targetStore = store) {
-  const account = targetStore.accounts?.[String(Number(playerId))];
-  return account ? normalizeAccount(account) : null;
-}
-
-async function searchPlayersByName(account, rawQuery) {
-  const query = String(rawQuery || "").trim();
-  const normalizedQuery = query.toLowerCase();
-  if (!normalizedQuery) return ok({ names: [] });
-
-  const accounts = await allAccountsForStats();
-  const rows = accounts
-    .filter((candidate) => {
-      const id = Number(candidate.id || 0);
-      if (!Number.isInteger(id) || id <= 0 || id === Number(account.id)) return false;
-      return String(candidate.name || "").trim().toLowerCase() === normalizedQuery;
-    })
-    .slice(0, 1)
-    .map((candidate) => ({ i: String(Number(candidate.id)), n: String(candidate.name || `Player ${candidate.id}`) }));
-
-  console.log(`[social-search] user=${account.id} query=${query} exact=1 results=${rows.length}`);
-  return ok({ names: rows });
-}
-
-function socialPlayerPayload(account) {
-  const normalized = normalizeAccount(account);
-  return {
-    userId: Number(normalized.id),
-    name: String(normalized.name || `Player ${normalized.id}`),
-    level: Number(normalized.level || 1),
-    exp: Number(normalized.exp || 0)
-  };
-}
-
-function normalizeFriendRow(row = {}) {
-  const playerId = Number(row.playerId ?? row.player_id ?? row.p ?? 0);
-  const friendPlayerId = Number(row.friendPlayerId ?? row.friend_player_id ?? row.f ?? 0);
-  if (!Number.isInteger(playerId) || playerId <= 0 || !Number.isInteger(friendPlayerId) || friendPlayerId <= 0) {
-    return null;
-  }
-  return {
-    playerId,
-    friendPlayerId,
-    status: String(row.status || "accepted"),
-    createdAt: row.createdAt || row.created_at || new Date().toISOString()
-  };
-}
-
-function friendStateForRow(row, userId) {
-  if (row.status === "accepted") return 1;
-  if (row.status === "pending" && Number(row.playerId) === Number(userId)) return 2;
-  if (row.status === "pending" && Number(row.friendPlayerId) === Number(userId)) return 3;
-  return 0;
-}
-
-function jsonFriendRowsForUser(userId) {
-  return (store.playerFriends || [])
-    .map(normalizeFriendRow)
-    .filter(Boolean)
-    .filter((row) => Number(row.playerId) === Number(userId) || Number(row.friendPlayerId) === Number(userId));
-}
-
-function socialListFromRows(userId, rows, accountsById) {
-  const byFriend = new Map();
-  for (const row of rows) {
-    const friendId = Number(row.playerId) === Number(userId) ? Number(row.friendPlayerId) : Number(row.playerId);
-    if (!Number.isInteger(friendId) || friendId <= 0 || friendId === Number(userId)) continue;
-
-    const state = friendStateForRow(row, userId);
-    if (!state) continue;
-    const previous = byFriend.get(friendId);
-    if (previous && previous.state === 1) continue;
-    if (previous && state !== 1 && previous.createdAt <= row.createdAt) continue;
-
-    const account = accountsById.get(friendId) || accountById(friendId);
-    if (!account) continue;
-    byFriend.set(friendId, {
-      ...socialPlayerPayload(account),
-      state,
-      relationStatus: row.status
-    });
-  }
-  return Array.from(byFriend.values()).sort((left, right) => String(left.name).localeCompare(String(right.name)));
-}
-
-async function battleSocialList(userId) {
-  const id = Number(userId);
-  if (!Number.isInteger(id) || id <= 0) return { ok: false, error: "invalid_user", status: 400 };
-
-  if (pgPool) {
-    await pgSaveChain.catch(() => {});
-    const friendRows = await pgPool.query(
-      `SELECT player_id, friend_player_id, status, created_at
-       FROM player_friends
-       WHERE player_id = $1 OR friend_player_id = $1
-       ORDER BY created_at`,
-      [id]
-    );
-    const ids = Array.from(new Set(friendRows.rows.flatMap((row) => [Number(row.player_id), Number(row.friend_player_id)]).filter((value) => value && value !== id)));
-    const accountsById = new Map();
-    if (ids.length > 0) {
-      const players = await pgPool.query("SELECT id, name, level, exp FROM players WHERE id = ANY($1::int[])", [ids]);
-      for (const row of players.rows) {
-        accountsById.set(Number(row.id), normalizeAccount({
-          id: Number(row.id),
-          name: row.name,
-          level: Number(row.level || 1),
-          exp: Number(row.exp || 0)
-        }));
-      }
-    }
-    return { ok: true, friends: socialListFromRows(id, friendRows.rows.map(normalizeFriendRow).filter(Boolean), accountsById) };
-  }
-
-  const accountsById = new Map();
-  for (const account of Object.values(store.accounts || {})) {
-    const normalized = normalizeAccount(account);
-    accountsById.set(Number(normalized.id), normalized);
-  }
-  return { ok: true, friends: socialListFromRows(id, jsonFriendRowsForUser(id), accountsById) };
-}
-
-function upsertJsonFriendRow(playerId, friendPlayerId, status) {
-  const rows = (store.playerFriends || []).map(normalizeFriendRow).filter(Boolean);
-  const existing = rows.find((row) => Number(row.playerId) === Number(playerId) && Number(row.friendPlayerId) === Number(friendPlayerId));
-  if (existing) {
-    existing.status = status;
-  } else {
-    rows.push({ playerId: Number(playerId), friendPlayerId: Number(friendPlayerId), status, createdAt: new Date().toISOString() });
-  }
-  store.playerFriends = rows;
-}
-
-function deleteJsonFriendRows(userId, targetId) {
-  store.playerFriends = (store.playerFriends || [])
-    .map(normalizeFriendRow)
-    .filter(Boolean)
-    .filter((row) => !(
-      (Number(row.playerId) === Number(userId) && Number(row.friendPlayerId) === Number(targetId)) ||
-      (Number(row.playerId) === Number(targetId) && Number(row.friendPlayerId) === Number(userId))
-    ));
-}
-
-async function mutateBattleSocial(action, userId, targetId) {
-  const id = Number(userId);
-  const target = Number(targetId);
-  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(target) || target <= 0 || id === target) {
-    return { ok: false, error: "invalid_target", status: 400 };
-  }
-
-  if (pgPool) {
-    return enqueuePostgresMutation(async () => {
-      const client = await pgPool.connect();
-      try {
-        await client.query("BEGIN");
-        const targetExists = await client.query("SELECT id FROM players WHERE id = $1", [target]);
-        if (!targetExists.rows[0]) {
-          await client.query("ROLLBACK");
-          return { ok: false, error: "target_not_found", status: 404 };
-        }
-
-        if (action === "request") {
-          const existing = await client.query(
-            `SELECT player_id, friend_player_id, status
-             FROM player_friends
-             WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)
-             FOR UPDATE`,
-            [id, target]
-          );
-          if (existing.rows.some((row) => row.status === "accepted")) {
-            // Already friends; original client treats this as a no-op after refresh.
-          } else if (existing.rows.some((row) => Number(row.player_id) === target && Number(row.friend_player_id) === id && row.status === "pending")) {
-            await client.query("DELETE FROM player_friends WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)", [id, target]);
-            await client.query(
-              `INSERT INTO player_friends (player_id, friend_player_id, status)
-               VALUES ($1, $2, 'accepted'), ($2, $1, 'accepted')
-               ON CONFLICT (player_id, friend_player_id) DO UPDATE SET status = 'accepted'`,
-              [id, target]
-            );
-          } else {
-            await client.query(
-              `INSERT INTO player_friends (player_id, friend_player_id, status)
-               VALUES ($1, $2, 'pending')
-               ON CONFLICT (player_id, friend_player_id) DO UPDATE SET status = EXCLUDED.status`,
-              [id, target]
-            );
-          }
-        } else if (action === "confirm") {
-          await client.query("DELETE FROM player_friends WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)", [id, target]);
-          await client.query(
-            `INSERT INTO player_friends (player_id, friend_player_id, status)
-             VALUES ($1, $2, 'accepted'), ($2, $1, 'accepted')
-             ON CONFLICT (player_id, friend_player_id) DO UPDATE SET status = 'accepted'`,
-            [id, target]
-          );
-        } else if (action === "decline" || action === "remove") {
-          await client.query("DELETE FROM player_friends WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)", [id, target]);
-        }
-
-        await client.query("COMMIT");
-        return { ok: true };
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
-      }
-    });
-  }
-
-  if (action === "request") {
-    const existing = (store.playerFriends || []).map(normalizeFriendRow).filter(Boolean)
-      .filter((row) => (
-        (Number(row.playerId) === id && Number(row.friendPlayerId) === target) ||
-        (Number(row.playerId) === target && Number(row.friendPlayerId) === id)
-      ));
-    if (existing.some((row) => row.status === "accepted")) {
-      // Already friends; original client treats this as a no-op after refresh.
-    } else if (existing.some((row) => Number(row.playerId) === target && Number(row.friendPlayerId) === id && row.status === "pending")) {
-      deleteJsonFriendRows(id, target);
-      upsertJsonFriendRow(id, target, "accepted");
-      upsertJsonFriendRow(target, id, "accepted");
-    } else {
-      upsertJsonFriendRow(id, target, "pending");
-    }
-  } else if (action === "confirm") {
-    deleteJsonFriendRows(id, target);
-    upsertJsonFriendRow(id, target, "accepted");
-    upsertJsonFriendRow(target, id, "accepted");
-  } else if (action === "decline" || action === "remove") {
-    deleteJsonFriendRows(id, target);
-  }
-  saveStore(store);
-  return { ok: true };
-}
-
-async function battleSocialRequest(body) {
-  const action = String(body.action || "list");
-  const userId = Number(body.userId || body.playerId || 0);
-  if (action === "list") return battleSocialList(userId);
-  if (["request", "confirm", "decline", "remove"].includes(action)) {
-    const result = await mutateBattleSocial(action, userId, Number(body.targetId || body.friendId || 0));
-    if (result.ok === false) return result;
-    const list = await battleSocialList(userId);
-    console.log(`[social] ${action} user=${userId} target=${Number(body.targetId || body.friendId || 0)} friends=${list.friends?.length || 0}`);
-    return list;
-  }
-  return { ok: false, error: "unknown_action", status: 400 };
-}
-
-function clanMemberAccountPayload(member, targetStore = store) {
-  const account = accountById(member.playerId, targetStore);
-  return {
-    uid: Number(member.playerId),
-    ul: Number(account?.level || 1),
-    n: String(account?.name || `Player ${member.playerId}`),
-    mlvl: Number(member.memberLevel || 1),
-    m: Number(member.money || 0),
-    e: Number(member.clanExp || 0),
-    ek: Number(member.expKoef || 0),
-    ue: Number(account?.exp ?? member.playerExp ?? 0),
-    date: formatClanDate(member.joinedAt)
-  };
-}
-
-function clanInvitePayload(invite, targetStore = store) {
-  const account = accountById(invite.playerId, targetStore);
-  return {
-    uid: Number(invite.playerId),
-    ul: Number(account?.level || 1),
-    n: String(account?.name || `Player ${invite.playerId}`),
-    mlvl: 0,
-    m: 0,
-    e: 0,
-    ek: 0,
-    ue: Number(account?.exp || 0),
-    date: formatClanDate(invite.createdAt)
-  };
-}
-
-function formatClanDate(value) {
-  const date = value ? new Date(value) : new Date();
-  if (Number.isNaN(date.getTime())) return String(value || "");
-  return `${date.getDate()}.${date.getMonth() + 1}.${date.getFullYear()} ${date.getHours()}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function clanFounderName(clan, targetStore = store) {
-  return accountById(clan.ownerPlayerId, targetStore)?.name || "";
-}
-
-function clanMemberList(clan, targetStore = store) {
-  return Object.values(clan.members || {})
-    .map((member) => clanMemberAccountPayload(member, targetStore))
-    .sort((left, right) => Number(right.e || 0) - Number(left.e || 0));
-}
-
-function clanInviteList(clan, targetStore = store) {
-  return Object.values(clan.invites || {}).map((invite) => clanInvitePayload(invite, targetStore));
-}
-
-function clanEventPayload(event) {
-  return {
-    i: Number(event.id),
-    cid: Number(event.clanId),
-    et: Number(event.type),
-    creatid: Number(event.creatorPlayerId || 0),
-    exDa: Math.max(currentUnixSeconds(), Math.floor(new Date(event.expiresAt).getTime() / 1000)),
-    d: JSON.stringify(event.data || {})
-  };
-}
-
-function clanTreasuryPayload(event) {
-  return {
-    i: Number(event.id),
-    cid: Number(event.clanId),
-    uid: Number(event.playerId || 0),
-    vcur: Number(event.money || 0),
-    un: String(event.playerName || ""),
-    t: Number(event.type || 0),
-    d: event.createdAt || new Date().toISOString()
-  };
-}
-
-function isActiveTimedItem(item = {}, now = currentUnixSeconds()) {
-  const expiresAt = Number(item.eD ?? item.ed ?? item.expiresAt ?? 0);
-  return expiresAt <= 0 || expiresAt > now;
-}
-
-function clanTreasuryAddResponse(account, clan, eventId) {
-  refreshAccountClan(account);
-  return ok({
-    id: Number(eventId),
-    cid: Number(clan.id),
-    vcur: Number(account.money || 0),
-    vc: Number(clan.money || 0),
-    cinfo: clanPayload(clan, { full: true })
-  });
-}
-
-function activeClanInventoryItems(clan, now = currentUnixSeconds()) {
-  return (clan?.inventory || [])
-    .filter((item) => Number(item?.itype ?? item?.it ?? 0) === 2)
-    .filter((item) => Number(item?.iC || 0) === 1)
-    .filter((item) => isActiveTimedItem(item, now))
-    .map((item) => clone(item));
-}
-
-function clanPayload(clan, options = {}) {
-  const full = Boolean(options.full);
-  const targetStore = options.store || store;
-  const payload = {
-    cid: Number(clan.id),
-    l: Number(clan.level || 1),
-    fid: Number(clan.ownerPlayerId || 0),
-    fn: clanFounderName(clan, targetStore),
-    a: Number(clan.access || 0),
-    alvl: Number(clan.accessLevel || 0),
-    mcnt: Object.keys(clan.members || {}).length,
-    macnt: Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS),
-    e: Number(clan.exp || 0),
-    n: String(clan.name || ""),
-    t: String(clan.tag || ""),
-    tc: String(clan.tagColor || ""),
-    aid: Number(clan.armId || 0),
-    vc: Number(clan.money || 0)
-  };
-  if (full) {
-    payload.h = String(clan.homepage || "");
-    payload.d = String(clan.desc || "");
-    payload.mlist = clanMemberList(clan, targetStore);
-    payload.inv = clanInviteList(clan, targetStore);
-    payload.ev = (clan.events || []).map(clanEventPayload);
-    payload.etreas = (clan.treasuryEvents || []).map(clanTreasuryPayload);
-    payload.inventory = { items: activeClanInventoryItems(clan) };
-  }
-  return payload;
-}
-
-function clanSummaryForPlayer(playerId, targetStore = store) {
-  const clans = targetStore?.clans?.byId || {};
-  const id = String(Number(playerId));
-  for (const clan of Object.values(clans)) {
-    if (clan.deletedAt) continue;
-    const member = clan.members?.[id];
-    if (!member) continue;
-    return normalizeClanSummary({
-      ...clanPayload(clan, { store: targetStore }),
-      h: clan.homepage || "",
-      d: clan.desc || "",
-      ek: member.expKoef || 0,
-      ue: accountById(playerId, targetStore)?.exp || member.playerExp || 0
-    });
-  }
-  return null;
-}
-
-function refreshAllAccountClanSummaries(targetStore = store) {
-  for (const account of Object.values(targetStore.accounts || {})) {
-    account.clan = clanSummaryForPlayer(account.id, targetStore);
-  }
-}
-
-function clanCostsPayload() {
-  return {
-    cc: CLAN_COSTS.create,
-    cr: CLAN_COSTS.requests,
-    ccn: CLAN_COSTS.changeName,
-    cct: CLAN_COSTS.changeTag,
-    cecm: CLAN_COSTS.expandMembers
-  };
-}
-
-function normalizeClanArmId(value) {
-  const id = Number(value);
-  return CLAN_ARM_ID_SET.has(id) ? id : 0;
-}
-
-function isDefaultClanArmId(value) {
-  return CLAN_DEFAULT_ARM_ID_SET.has(Number(value));
-}
-
-function clanArmAssetPath(id) {
-  const armId = normalizeClanArmId(id);
-  return armId ? path.join(CLAN_ARM_ASSET_DIR, `${armId}.png`) : "";
-}
-
-function clanArmAssetVersion(id) {
-  const filePath = clanArmAssetPath(id);
-  if (!filePath) return 0;
-  try {
-    return Math.trunc(fs.statSync(filePath).mtimeMs);
-  } catch {
-    return 0;
-  }
-}
-
-function clanArmImageUrl(id, requestOrigin = null) {
-  const armId = normalizeClanArmId(id) || 1;
-  return `${publicBaseUrl(requestOrigin)}/clan-arm/${armId}.png?v=${clanArmAssetVersion(armId)}`;
-}
-
-function clanArmCost(id) {
-  return normalizeClanArmId(id) ? CLAN_COSTS.changeArm : CLAN_COSTS.expandMember;
-}
-
-function clanArmInventoryKey(id) {
-  return `clan-arm:${normalizeClanArmId(id) || 0}`;
-}
-
-function clanOwnsArm(clan, id) {
-  const armId = normalizeClanArmId(id);
-  if (!clan || !armId) return false;
-  if (Number(clan.armId || 0) === armId) return true;
-  const key = clanArmInventoryKey(armId);
-  return (clan.inventory || []).some((item) => {
-    if (String(item?.itemKey || "") === key) return true;
-    if (Number(item?.itype ?? item?.it ?? 0) !== CLAN_ARM_ITEM_TYPE) return false;
-    return Number(item?.aid ?? item?.armId ?? item?.id ?? 0) === armId;
-  });
-}
-
-function ensureClanOwnedArm(clan, id, source = "unknown") {
-  const armId = normalizeClanArmId(id);
-  if (!clan || !armId) return false;
-  clan.inventory = Array.isArray(clan.inventory) ? clan.inventory : [];
-  const key = clanArmInventoryKey(armId);
-  if (clan.inventory.some((item) => {
-    if (String(item?.itemKey || "") === key) return true;
-    if (Number(item?.itype ?? item?.it ?? 0) !== CLAN_ARM_ITEM_TYPE) return false;
-    return Number(item?.aid ?? item?.armId ?? item?.id ?? 0) === armId;
-  })) return false;
-  clan.inventory.push({
-    itemKey: key,
-    it: CLAN_ARM_ITEM_TYPE,
-    itype: CLAN_ARM_ITEM_TYPE,
-    aid: armId,
-    armId,
-    iC: 1,
-    eD: 0,
-    source,
-    createdAt: new Date().toISOString()
-  });
-  return true;
-}
-
-function clanArmCostForClan(clan, id) {
-  const armId = normalizeClanArmId(id);
-  if (!armId) return clanArmCost(id);
-  return clanOwnsArm(clan, armId) ? 0 : clanArmCost(armId);
-}
-
-function clanArmsPayload(requestOrigin = null, clan = null) {
-  return CLAN_ARM_IDS.map((id) => {
-    const arm = {
-      aid: id,
-      i: clanArmImageUrl(id, requestOrigin),
-      d: isDefaultClanArmId(id) ? 1 : 0
-    };
-    if (!clanOwnsArm(clan, id)) {
-      arm.sc = cost(7000 + id, clanArmCost(id));
-    }
-    return arm;
-  });
-}
-
-function activeClanRecords() {
-  ensureClanStore();
-  return Object.values(store.clans.byId || {}).filter((clan) => !clan.deletedAt);
-}
-
-function clanById(clanId, { includeDeleted = false } = {}) {
-  ensureClanStore();
-  const clan = store.clans.byId[String(Number(clanId))];
-  if (!clan || (!includeDeleted && clan.deletedAt)) return null;
-  return clan;
-}
-
-function playerClanRecord(playerId) {
-  const id = String(Number(playerId));
-  return activeClanRecords().find((clan) => clan.members?.[id]) || null;
-}
-
-function playerInviteClanIds(playerId) {
-  const id = String(Number(playerId));
-  return activeClanRecords()
-    .filter((clan) => clan.invites?.[id])
-    .map((clan) => Number(clan.id));
-}
-
-function nextClanIdValue() {
-  const clans = ensureClanStore();
-  const id = Math.max(1, Number(clans.nextId || 1));
-  clans.nextId = id + 1;
-  return id;
-}
-
-function nextClanEventIdValue() {
-  const clans = ensureClanStore();
-  const id = Math.max(1, Number(clans.nextEventId || 1));
-  clans.nextEventId = id + 1;
-  return id;
-}
-
-function nextClanTreasuryEventIdValue() {
-  const clans = ensureClanStore();
-  const id = Math.max(1, Number(clans.nextTreasuryEventId || 1));
-  clans.nextTreasuryEventId = id + 1;
-  return id;
-}
-
-function clanError(code) {
-  return { result: false, code: Number(code) };
-}
-
-function clanFormValue(url, ...names) {
-  for (const name of names) {
-    if (url.searchParams.has(name)) return String(url.searchParams.get(name) || "");
-  }
-  return "";
-}
-
-function cleanClanName(value) {
-  return String(value || "").trim().slice(0, 64);
-}
-
-function cleanClanTag(value) {
-  return String(value || "").trim().slice(0, 6);
-}
-
-function cleanClanUrl(value) {
-  return String(value || "").trim().slice(0, 256);
-}
-
-function cleanClanDesc(value) {
-  return String(value || "").trim().slice(0, 1024);
-}
-
-function validateClanName(name, currentClanId = 0) {
-  if (!name) return CLAN_ERROR.CLAN_NAME;
-  if (name.length < 3 || name.length > 16) return CLAN_ERROR.CLAN_NAME_LEN;
-  const lower = name.toLowerCase();
-  if (activeClanRecords().some((clan) => Number(clan.id) !== Number(currentClanId) && String(clan.name || "").toLowerCase() === lower)) {
-    return CLAN_ERROR.CLAN_NAME_EXIST;
-  }
-  return 0;
-}
-
-function validateClanTag(tag, currentClanId = 0) {
-  if (!tag) return CLAN_ERROR.CLAN_TAG;
-  if (tag.length < 2 || tag.length > 6) return CLAN_ERROR.CLAN_TAG_LEN;
-  const lower = tag.toLowerCase();
-  if (activeClanRecords().some((clan) => Number(clan.id) !== Number(currentClanId) && String(clan.tag || "").toLowerCase() === lower)) {
-    return CLAN_ERROR.CLAN_TAG_EXIST;
-  }
-  return 0;
-}
-
-function ensureClanAccount(account) {
-  const normalized = normalizeAccount(account);
-  store.accounts[String(normalized.id)] = normalized;
-  return normalized;
-}
-
-function saveClanState() {
-  refreshAllAccountClanSummaries(store);
-  return saveStore(store);
-}
-
-function clanMemberRecordForAccount(account, memberLevel = 1) {
-  return normalizeClanMemberRecord({
-    playerId: Number(account.id),
-    memberLevel,
-    money: 0,
-    clanExp: 0,
-    expKoef: 0,
-    playerExp: Number(account.exp || 0),
-    joinedAt: new Date().toISOString()
-  });
-}
-
-function addClanTreasuryEvent(clan, playerId, money, type) {
-  const account = accountById(playerId);
-  const event = normalizeClanTreasuryRecord({
-    id: nextClanTreasuryEventIdValue(),
-    clanId: clan.id,
-    playerId,
-    playerName: account?.name || "",
-    money,
-    type,
-    createdAt: new Date().toISOString()
-  });
-  clan.treasuryEvents.push(event);
-  clan.treasuryEvents.sort((left, right) => Number(right.id) - Number(left.id));
-  return event;
-}
-
-async function addClanMoneyPostgres(account, clanId, money) {
-  return enqueuePostgresMutation(async () => {
-    let client = null;
-    let committed = false;
-    let eventId = 0;
-    let nextPlayerMoney = Number(account.money || 0);
-    let nextClanMoney = 0;
-    try {
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const playerRow = player.rows[0];
-      if (!playerRow || playerRow.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const clanResult = await client.query("SELECT * FROM clans WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [Number(clanId)]);
-      const clanRow = clanResult.rows[0];
-      const memberResult = await client.query(
-        "SELECT * FROM clan_members WHERE clan_id = $1 AND player_id = $2 FOR UPDATE",
-        [Number(clanId), Number(account.id)]
-      );
-      const memberRow = memberResult.rows[0];
-      if (!clanRow || !memberRow || money <= 0) {
-        await client.query("ROLLBACK");
-        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-      }
-
-      const playerMoney = Number(playerRow.money || 0);
-      if (playerMoney < money) {
-        await client.query("ROLLBACK");
-        return clanError(CLAN_ERROR.MISSING_MONEY);
-      }
-
-      const eventIdResult = await client.query("SELECT COALESCE(MAX(id), 0)::int + 1 AS id FROM clan_treasury_events");
-      eventId = Number(eventIdResult.rows[0]?.id || 1);
-      const createdAt = new Date().toISOString();
-      nextPlayerMoney = playerMoney - money;
-      nextClanMoney = Number(clanRow.money || 0) + money;
-      const nextMemberMoney = Number(memberRow.money || 0) + money;
-      const playerName = String(playerRow.name || account.name || "");
-
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextPlayerMoney]);
-      await client.query("UPDATE clans SET money = $2, updated_at = now() WHERE id = $1", [Number(clanId), nextClanMoney]);
-      await client.query(
-        "UPDATE clan_members SET money = $3 WHERE clan_id = $1 AND player_id = $2",
-        [Number(clanId), Number(account.id), nextMemberMoney]
-      );
-      await client.query(
-        `INSERT INTO clan_treasury_events (id, clan_id, player_id, player_name, money, event_type, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [eventId, Number(clanId), Number(account.id), playerName, money, CLAN_TREASURY_EVENT_TYPE.ADD, createdAt]
-      );
-      await client.query("COMMIT");
-      committed = true;
-
-      const fresh = await loadPostgresAccount(account.id);
-      if (fresh) {
-        fresh.money = nextPlayerMoney;
-        store.accounts[String(fresh.id)] = fresh;
-        account.money = nextPlayerMoney;
-      } else {
-        account.money = nextPlayerMoney;
-        store.accounts[String(account.id)] = normalizeAccount(account);
-      }
-
-      const clan = clanById(clanId, { includeDeleted: true });
-      if (clan) {
-        clan.money = nextClanMoney;
-        clan.updatedAt = createdAt;
-        if (clan.members?.[String(account.id)]) {
-          clan.members[String(account.id)].money = nextMemberMoney;
-        }
-        const event = normalizeClanTreasuryRecord({
-          id: eventId,
-          clanId,
-          playerId: Number(account.id),
-          playerName,
-          money,
-          type: CLAN_TREASURY_EVENT_TYPE.ADD,
-          createdAt
-        });
-        clan.treasuryEvents = (clan.treasuryEvents || []).filter((item) => Number(item.id) !== eventId);
-        clan.treasuryEvents.push(event);
-        clan.treasuryEvents.sort((left, right) => Number(right.id) - Number(left.id));
-        store.clans.nextTreasuryEventId = Math.max(Number(store.clans.nextTreasuryEventId || 1), eventId + 1);
-        refreshAllAccountClanSummaries(store);
-      }
-
-      console.log(`[clan-treasury] add player=${account.id} clan=${clanId} money=${money} playerMoney=${nextPlayerMoney} clanMoney=${nextClanMoney} event=${eventId}`);
-      return clanTreasuryAddResponse(account, clanById(clanId, { includeDeleted: true }) || { id: clanId, money: nextClanMoney }, eventId);
-    } catch (error) {
-      try {
-        if (client && !committed) await client.query("ROLLBACK");
-      } catch {
-        // Keep the original error visible.
-      }
-      if (committed) {
-        console.error("[postgres] clan treasury memory sync failed", error);
-        return clanTreasuryAddResponse(account, clanById(clanId, { includeDeleted: true }) || { id: clanId, money: nextClanMoney }, eventId);
-      }
-      console.error("[postgres] clan treasury add failed", error);
-      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-    } finally {
-      if (client) client.release();
-    }
-  });
-}
-
-function addClanEvent(clan, type, data = {}, creatorPlayerId = 0) {
-  const event = normalizeClanEventRecord({
-    id: nextClanEventIdValue(),
-    clanId: clan.id,
-    type,
-    creatorPlayerId,
-    data,
-    expiresAt: new Date(Date.now() + 1000).toISOString(),
-    createdAt: new Date().toISOString()
-  });
-  clan.events.push(event);
-  return event;
-}
-
-function clanBaseResponse(account, extra = {}) {
-  return ok({
-    time: currentUnixSeconds(),
-    costs: clanCostsPayload(),
-    ui: {
-      i: playerInviteClanIds(account.id),
-      uc: {
-        u: playerInviteClanIds(account.id).length,
-        m: Number(account.clanMaxRequest || 10),
-        ek: Number(account.clan?.ek || 0)
-      }
-    },
-    ...extra
-  });
-}
-
-function clanListPayload(url, account, sourceClans = activeClanRecords()) {
-  const page = Math.max(1, Number(url.searchParams.get("pg") || 1));
-  const pageSize = 100;
-  const lite = Number(url.searchParams.get("lite") || 0) === 1;
-  const sorted = [...sourceClans].sort((left, right) => {
-    const expDiff = Number(right.exp || 0) - Number(left.exp || 0);
-    if (expDiff !== 0) return expDiff;
-    return Number(left.id) - Number(right.id);
-  });
-  const start = (page - 1) * pageSize;
-  const ownClan = playerClanRecord(account.id);
-  const response = clanBaseResponse(account, {
-    pg: page,
-    dtot: Math.max(1, Math.ceil(sorted.length / pageSize)),
-    d: sorted.slice(start, start + pageSize).map((clan) => clanPayload(clan))
-  });
-  if (ownClan && !lite) {
-    response.id = Number(ownClan.id);
-    response.cinfo = clanPayload(ownClan, { full: true });
-  }
-  return response;
-}
-
-function clanExtraPayload(account, clanId) {
-  const clan = clanById(clanId, { includeDeleted: true });
-  if (!clan) return clanBaseResponse(account, { id: 0, cinfo: {} });
-  return clanBaseResponse(account, {
-    id: Number(clan.id),
-    cinfo: clanPayload(clan, { full: true })
-  });
-}
-
-async function createClanPostgres(account, name, tag, armId) {
-  return enqueuePostgresMutation(async () => {
-    let client = null;
-    let committed = false;
-    let clan = null;
-    let nextPlayerMoney = Number(account.money || 0);
-    try {
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const playerResult = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const playerRow = playerResult.rows[0];
-      if (!playerRow || playerRow.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const membershipResult = await client.query(
-        `SELECT 1
-         FROM clan_members cm
-         JOIN clans c ON c.id = cm.clan_id
-         WHERE cm.player_id = $1 AND c.deleted_at IS NULL
-         LIMIT 1`,
-        [Number(account.id)]
-      );
-      if (membershipResult.rows.length) {
-        await client.query("ROLLBACK");
-        return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
-      }
-
-      const duplicateNameResult = await client.query(
-        `SELECT 1 FROM clans WHERE deleted_at IS NULL AND lower(name) = lower($1) LIMIT 1`,
-        [name]
-      );
-      if (duplicateNameResult.rows.length) {
-        await client.query("ROLLBACK");
-        return clanError(CLAN_ERROR.CLAN_NAME_EXIST);
-      }
-
-      const duplicateTagResult = await client.query(
-        `SELECT 1 FROM clans WHERE deleted_at IS NULL AND lower(tag) = lower($1) LIMIT 1`,
-        [tag]
-      );
-      if (duplicateTagResult.rows.length) {
-        await client.query("ROLLBACK");
-        return clanError(CLAN_ERROR.CLAN_TAG_EXIST);
-      }
-
-      const playerMoney = Number(playerRow.money || 0);
-      if (playerMoney < CLAN_COSTS.create) {
-        await client.query("ROLLBACK");
-        return clanError(CLAN_ERROR.MISSING_MONEY);
-      }
-
-      const createdAt = new Date().toISOString();
-      nextPlayerMoney = playerMoney - CLAN_COSTS.create;
-      const nextClanIdResult = await client.query("SELECT COALESCE(MAX(id), 0)::int + 1 AS id FROM clans");
-      const id = Number(nextClanIdResult.rows[0]?.id || 1);
-      await client.query(
-        `INSERT INTO clans (
-          id, name, tag, owner_player_id, level, exp, money, arm_id,
-          tag_color, homepage, description, access, access_level, max_members,
-          deleted_at, created_at, updated_at
-        )
-        VALUES ($1, $2, $3, $4, 1, 0, 0, $5, '', '', '', 1, $6, $7, NULL, $8, $8)`,
-        [id, name, tag, Number(account.id), armId, CLAN_JOIN_LEVEL, CLAN_DEFAULT_MAX_MEMBERS, createdAt]
-      );
-
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextPlayerMoney]);
-      await client.query(
-        `INSERT INTO clan_members (
-          clan_id, player_id, role, member_level, money, clan_exp, exp_koef, player_exp, joined_at
-        )
-        VALUES ($1, $2, 'owner', 2, 0, 0, 0, $3, $4)`,
-        [id, Number(account.id), Number(account.exp || 0), createdAt]
-      );
-
-      await client.query("COMMIT");
-      committed = true;
-
-      account.money = nextPlayerMoney;
-      account.updatedAt = createdAt;
-      const fresh = await loadPostgresAccount(account.id);
-      store.accounts[String(account.id)] = fresh ? { ...fresh, money: nextPlayerMoney } : normalizeAccount(account);
-
-      clan = normalizeClanRecord({
-        id,
-        name,
-        tag,
-        ownerPlayerId: Number(account.id),
-        money: 0,
-        armId,
-        access: 1,
-        accessLevel: CLAN_JOIN_LEVEL,
-        maxMembers: CLAN_DEFAULT_MAX_MEMBERS,
-        members: {
-          [String(account.id)]: clanMemberRecordForAccount(account, 2)
-        },
-        createdAt,
-        updatedAt: createdAt
-      });
-      store.clans.byId[String(id)] = clan;
-      store.clans.nextId = Math.max(Number(store.clans.nextId || 1), id + 1);
-      refreshAllAccountClanSummaries(store);
-      refreshAccountClan(account);
-
-      console.log(`[clan-create] pg player=${account.id} clan=${id} money=${nextPlayerMoney}`);
-      return clanBaseResponse(account, {
-        id,
-        cinfo: clanPayload(clan, { full: true })
-      });
-    } catch (error) {
-      try {
-        if (client && !committed) await client.query("ROLLBACK");
-      } catch {
-        // Keep the original error visible.
-      }
-      console.error("[postgres] clan create failed", error);
-      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-    } finally {
-      if (client) client.release();
-    }
-  });
-}
-async function createClan(account, url) {
-  account = ensureClanAccount(account);
-  const name = cleanClanName(clanFormValue(url, "data[name]", "name"));
-  const tag = cleanClanTag(clanFormValue(url, "data[tag]", "tag"));
-  const armId = normalizeClanArmId(clanFormValue(url, "data[arm_id]", "arm_id") || 1);
-  if (Number(account.level || 1) < CLAN_CREATE_LEVEL) return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
-  if (playerClanRecord(account.id)) return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
-  if (!armId || !isDefaultClanArmId(armId)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const nameError = validateClanName(name);
-  if (nameError) return clanError(nameError);
-  const tagError = validateClanTag(tag);
-  if (tagError) return clanError(tagError);
-  if (Number(account.money || 0) < CLAN_COSTS.create) return clanError(CLAN_ERROR.MISSING_MONEY);
-  if (pgPool) return await createClanPostgres(account, name, tag, armId);
-
-  const createdAt = new Date().toISOString();
-  account.money = Number(account.money || 0) - CLAN_COSTS.create;
-  account.updatedAt = createdAt;
-  const id = nextClanIdValue();
-  const clan = normalizeClanRecord({
-    id,
-    name,
-    tag,
-    ownerPlayerId: Number(account.id),
-    money: 0,
-    armId,
-    access: 1,
-    accessLevel: CLAN_JOIN_LEVEL,
-    maxMembers: CLAN_DEFAULT_MAX_MEMBERS,
-    members: {
-      [String(account.id)]: clanMemberRecordForAccount(account, 2)
-    },
-    createdAt,
-    updatedAt: createdAt
-  });
-  store.clans.byId[String(id)] = clan;
-  await saveClanState();
-  return clanBaseResponse(account, {
-    id,
-    cinfo: clanPayload(clan, { full: true })
-  });
-}
-
-async function joinClan(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (Number(account.level || 1) < CLAN_JOIN_LEVEL) return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
-  if (playerClanRecord(account.id)) return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
-  if (Number(clan.access || 0) === 0 || Number(clan.accessLevel || 0) > Number(account.level || 0)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (Object.keys(clan.members || {}).length >= Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS)) return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
-  if (playerInviteClanIds(account.id).length >= Number(account.clanMaxRequest || 10) && !clan.invites[String(account.id)]) {
-    return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  }
-  clan.invites[String(account.id)] = {
-    playerId: Number(account.id),
-    createdAt: new Date().toISOString()
-  };
-  await saveClanState();
-  console.log(`[clan-invite] join player=${account.id} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
-  return ok({ id: Number(clan.id) });
-}
-
-async function buyClanRequests(account) {
-  account = ensureClanAccount(account);
-  if (Number(account.money || 0) < CLAN_COSTS.requests) return clanError(CLAN_ERROR.MISSING_MONEY);
-  account.money = Number(account.money || 0) - CLAN_COSTS.requests;
-  account.clanMaxRequest = Number(account.clanMaxRequest || 10) + 5;
-  account.updatedAt = new Date().toISOString();
-  await saveClanState();
-  return ok();
-}
-
-function isClanOwner(account, clan) {
-  return Number(clan?.ownerPlayerId || 0) === Number(account?.id || 0);
-}
-
-async function acceptClanInvite(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const userId = Number(url.searchParams.get("uid") || 0);
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const invite = clan.invites[String(userId)];
-  const userAccount = accountById(userId);
-  if (!invite || !userAccount) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const existingClan = playerClanRecord(userId);
-  if (existingClan) {
-    if (clan.invites?.[String(userId)]) {
-      delete clan.invites[String(userId)];
-      clan.updatedAt = new Date().toISOString();
-      await saveClanState();
-    }
-    return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
-  }
-  if (Object.keys(clan.members || {}).length >= Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS)) {
-    return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
-  }
-  let removedInvites = 0;
-  for (const otherClan of activeClanRecords()) {
-    if (!otherClan.invites?.[String(userId)]) continue;
-    delete otherClan.invites[String(userId)];
-    otherClan.updatedAt = new Date().toISOString();
-    removedInvites += 1;
-  }
-  clan.members[String(userId)] = clanMemberRecordForAccount(userAccount, 1);
-  clan.updatedAt = new Date().toISOString();
-  await saveClanState();
-  console.log(`[clan-invite] accept owner=${account.id} player=${userId} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
-  return ok({
-    id: userId,
-    i: clanMemberAccountPayload(clan.members[String(userId)])
-  });
-}
-
-async function rejectClanInvite(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const userId = Number(url.searchParams.get("uid") || 0);
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  delete clan.invites[String(userId)];
-  clan.updatedAt = new Date().toISOString();
-  await saveClanState();
-  console.log(`[clan-invite] reject owner=${account.id} player=${userId} clan=${clan.id} invites=${Object.keys(clan.invites || {}).length}`);
-  return ok({ id: userId });
-}
-
-function removeClanMember(account, url, eventType = CLAN_EVENT_TYPE.DELETE_MEMBER) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const userId = eventType === CLAN_EVENT_TYPE.LEAVE_MEMBER ? Number(account.id) : Number(url.searchParams.get("uid") || 0);
-  if (!clan || !clan.members[String(userId)]) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (eventType !== CLAN_EVENT_TYPE.LEAVE_MEMBER && !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (Number(clan.ownerPlayerId) === Number(userId)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  delete clan.members[String(userId)];
-  addClanEvent(clan, eventType, { uid: userId }, Number(account.id));
-  clan.exp = Object.values(clan.members || {}).reduce((sum, member) => sum + Number(member.clanExp || 0), 0);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok();
-}
-
-function deleteClan(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  addClanEvent(clan, CLAN_EVENT_TYPE.DELETE, {}, Number(account.id));
-  clan.deletedAt = new Date().toISOString();
-  clan.members = {};
-  clan.invites = {};
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok();
-}
-
-function expandClan(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (Number(clan.maxMembers || 0) >= CLAN_MAX_MEMBERS) return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
-  if (Number(clan.money || 0) < CLAN_COSTS.expandMember) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
-  clan.money = Number(clan.money || 0) - CLAN_COSTS.expandMember;
-  clan.maxMembers = Math.min(CLAN_MAX_MEMBERS, Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS) + 1);
-  addClanTreasuryEvent(clan, account.id, -CLAN_COSTS.expandMember, CLAN_TREASURY_EVENT_TYPE.EXPAND_MEMBER);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ cid: Number(clan.id), macnt: Number(clan.maxMembers) });
-}
-
-function addClanMoney(account, url) {
-  account = ensureClanAccount(account);
-  const clanId = Number(url.searchParams.get("cid") || 0);
-  const money = Math.max(0, Number(url.searchParams.get("money") || 0));
-  if (pgPool) return addClanMoneyPostgres(account, clanId, money);
-  const clan = clanById(clanId);
-  if (!clan || !clan.members[String(account.id)] || money <= 0) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (Number(account.money || 0) < money) return clanError(CLAN_ERROR.MISSING_MONEY);
-  account.money = Number(account.money || 0) - money;
-  clan.money = Number(clan.money || 0) + money;
-  clan.members[String(account.id)].money = Number(clan.members[String(account.id)].money || 0) + money;
-  const event = addClanTreasuryEvent(clan, account.id, money, CLAN_TREASURY_EVENT_TYPE.ADD);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  console.log(`[clan-treasury] add player=${account.id} clan=${clan.id} money=${money} playerMoney=${account.money} clanMoney=${clan.money} event=${event.id}`);
-  return clanTreasuryAddResponse(account, clan, event.id);
-}
-
-function changeClanName(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const name = cleanClanName(clanFormValue(url, "data[name]", "name"));
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const error = validateClanName(name, clan.id);
-  if (error) return clanError(error);
-  if (Number(clan.money || 0) < CLAN_COSTS.changeName) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
-  clan.money = Number(clan.money || 0) - CLAN_COSTS.changeName;
-  clan.name = name;
-  addClanTreasuryEvent(clan, account.id, -CLAN_COSTS.changeName, CLAN_TREASURY_EVENT_TYPE.CHANGE_NAME);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ id: Number(clan.id) });
-}
-
-function changeClanTag(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const tag = cleanClanTag(clanFormValue(url, "data[tag]", "tag"));
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const error = validateClanTag(tag, clan.id);
-  if (error) return clanError(error);
-  if (Number(clan.money || 0) < CLAN_COSTS.changeTag) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
-  clan.money = Number(clan.money || 0) - CLAN_COSTS.changeTag;
-  clan.tag = tag;
-  addClanTreasuryEvent(clan, account.id, -CLAN_COSTS.changeTag, CLAN_TREASURY_EVENT_TYPE.CHANGE_TAG);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ id: Number(clan.id) });
-}
-
-function changeClanArm(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const armId = normalizeClanArmId(clanFormValue(url, "data[arm_id]", "arm_id") || 1);
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (!armId) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (Number(clan.armId || 0) === armId) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const price = clanArmCostForClan(clan, armId);
-  if (Number(clan.money || 0) < price) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
-  clan.money = Number(clan.money || 0) - price;
-  clan.armId = armId;
-  ensureClanOwnedArm(clan, armId, price > 0 ? "purchase" : "switch");
-  if (price > 0) addClanTreasuryEvent(clan, account.id, -price, CLAN_TREASURY_EVENT_TYPE.CHANGE_ARM);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  console.log(`[clan-arm] change player=${account.id} clan=${clan.id} arm=${armId} price=${price} money=${clan.money}`);
-  return ok({ id: Number(clan.id) });
-}
-
-function changeClanText(account, url, field) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (field === "homepage") clan.homepage = cleanClanUrl(clanFormValue(url, "data[url]", "url"));
-  if (field === "desc") clan.desc = cleanClanDesc(clanFormValue(url, "data[desc]", "data[description]", "desc", "description"));
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ id: Number(clan.id) });
-}
-
-function changeClanAccess(account, url, field) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  if (field === "access") clan.access = Number(url.searchParams.get("access") || 0) === 1 ? 1 : 0;
-  if (field === "accessLevel") clan.accessLevel = Math.max(0, Number(url.searchParams.get("accesslvl") || 0));
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  console.log(`[clan-access] change player=${account.id} clan=${clan.id} access=${clan.access} accessLevel=${clan.accessLevel}`);
-  return ok({ id: Number(clan.id) });
-}
-
-function changeClanOwner(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const newOwnerId = Number(url.searchParams.get("nid") || 0);
-  if (!clan || !isClanOwner(account, clan) || !clan.members[String(newOwnerId)]) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  clan.ownerPlayerId = newOwnerId;
-  addClanEvent(clan, CLAN_EVENT_TYPE.CHANGE_OWNER, { nuid: newOwnerId }, Number(account.id));
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ cid: Number(clan.id), nid: newOwnerId });
-}
-
-function changeClanKoef(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const value = Number(url.searchParams.get("val") || 0);
-  if (!clan || !clan.members[String(account.id)] || ![0, 25, 50, 75, 100].includes(value)) {
-    return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  }
-  clan.members[String(account.id)].expKoef = value === 100 ? 75 : value;
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ cid: Number(clan.id), id: Number(account.id), val: Number(clan.members[String(account.id)].expKoef) });
-}
-
-function buyClanEnhancer(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
-  const enhancerId = Number(url.searchParams.get("id") || 0);
-  const duration = normalizeShopDuration(url.searchParams.get("dur"));
-  const item = canonicalEnhancersById.get(enhancerId);
-  if (!clan || !isClanOwner(account, clan) || !item || Number(item.iC || 0) !== 1) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const price = shopDurationPrice(item, duration);
-  if (Number(clan.money || 0) < price) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
-  clan.money = Number(clan.money || 0) - price;
-  const seconds = shopDurationSeconds(duration);
-  const expiresAt = seconds > 0 ? currentUnixSeconds() + seconds : 0;
-  const inventoryItem = {
-    ...clone(item),
-    it: 2,
-    itype: 2,
-    iC: 1,
-    eD: expiresAt
-  };
-  const key = `2:${enhancerId}`;
-  clan.inventory = (clan.inventory || []).filter((owned) => String(owned.itemKey || inventoryItemKey(owned)) !== key);
-  clan.inventory.push({ ...inventoryItem, itemKey: key });
-  addClanTreasuryEvent(clan, account.id, -price, CLAN_TREASURY_EVENT_TYPE.BUY_ENHANCER);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok();
-}
-
-function refreshClanEvents(account, url) {
-  const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
-  if (!clan) return ok({ cid: Number(url.searchParams.get("cid") || 0), ev: [] });
-  return ok({ cid: Number(clan.id), ev: (clan.events || []).map(clanEventPayload) });
-}
-
-function deleteClanEvent(account, url) {
-  account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
-  const eventId = Number(url.searchParams.get("eid") || 0);
-  if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  clan.events = (clan.events || []).filter((event) => Number(event.id) !== eventId);
-  clan.updatedAt = new Date().toISOString();
-  saveClanState();
-  return ok({ cid: Number(clan.id), eid: eventId });
-}
-
-async function routeClan(account, url, act, requestOrigin = null) {
-  ensureClanStore();
-  account = ensureClanAccount(account);
-
-  switch (act) {
-    case "g":
-      return clanListPayload(url, account);
-    case "gextra":
-      return clanExtraPayload(account, url.searchParams.get("cid"));
-    case "src": {
-      const value = clanFormValue(url, "v").toLowerCase();
-      const clans = activeClanRecords().filter((clan) => {
-        if (!value) return false;
-        return String(clan.name || "").toLowerCase().includes(value) || String(clan.tag || "").toLowerCase().includes(value);
-      });
-      console.log(`[clan-search] user=${account.id} value=${value} results=${clans.length} clans=${clans.map((clan) => `${clan.id}:aid${clan.armId}:a${clan.access}`).join(",")}`);
-      return clanBaseResponse(account, { d: clans.map((clan) => clanPayload(clan)) });
-    }
-    case "m": {
-      const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
-      return ok({ mlist: clan ? clanMemberList(clan) : [] });
-    }
-    case "inv": {
-      const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
-      return ok({ inv: clan ? clanInviteList(clan) : [] });
-    }
-    case "arms":
-      return ok({ arms: clanArmsPayload(requestOrigin, playerClanRecord(account.id)) });
-    case "create":
-      return await createClan(account, url);
-    case "del":
-      return deleteClan(account, url);
-    case "join":
-      return await joinClan(account, url);
-    case "accept":
-      return await acceptClanInvite(account, url);
-    case "reject":
-      return await rejectClanInvite(account, url);
-    case "buyReq":
-      return await buyClanRequests(account);
-    case "expand":
-      return expandClan(account, url);
-    case "remove":
-      return removeClanMember(account, url, CLAN_EVENT_TYPE.DELETE_MEMBER);
-    case "leave":
-      return removeClanMember(account, url, CLAN_EVENT_TYPE.LEAVE_MEMBER);
-    case "bench":
-      return buyClanEnhancer(account, url);
-    case "cname":
-      return changeClanName(account, url);
-    case "ctag":
-      return changeClanTag(account, url);
-    case "carm":
-      return changeClanArm(account, url);
-    case "curl":
-      return changeClanText(account, url, "homepage");
-    case "cdesc":
-      return changeClanText(account, url, "desc");
-    case "cowner":
-      return changeClanOwner(account, url);
-    case "caccess":
-      return changeClanAccess(account, url, "access");
-    case "caccesslvl":
-      return changeClanAccess(account, url, "accessLevel");
-    case "amoney":
-      return await addClanMoney(account, url);
-    case "ckoef":
-      return changeClanKoef(account, url);
-    case "gevnt":
-      return refreshClanEvents(account, url);
-    case "delevnt":
-      return deleteClanEvent(account, url);
-    default:
-      return clanBaseResponse(account, { d: [] });
-  }
-}
-
-function normalizeShopDuration(value) {
-  const duration = Number(value);
-  return Object.values(SHOP_DURATION).includes(duration) ? duration : SHOP_DURATION.PERMANENT;
-}
-
-function shopDurationSeconds(duration) {
-  switch (normalizeShopDuration(duration)) {
-    case SHOP_DURATION.DAY:
-      return SHOP_DAY_SECONDS;
-    case SHOP_DURATION.WEEK:
-      return SHOP_DAY_SECONDS * 7;
-    case SHOP_DURATION.MONTH:
-      return SHOP_DAY_SECONDS * 30;
-    case SHOP_DURATION.PERMANENT:
-    default:
-      return 0;
-  }
-}
-
-function shopDurationPrice(item, duration) {
-  const sc = item?.sc || {};
-  const keyByDuration = {
-    [SHOP_DURATION.DAY]: "t1v",
-    [SHOP_DURATION.WEEK]: "t7v",
-    [SHOP_DURATION.MONTH]: "t30v",
-    [SHOP_DURATION.PERMANENT]: "tPv"
-  };
-  const value = Number(sc[keyByDuration[normalizeShopDuration(duration)]]);
-  return Number.isFinite(value) ? value : itemPrice(item);
-}
-
-function findOwnedInventoryItem(account, item) {
-  return (account.inventory || []).find(
-    (owned) =>
-      Number(owned.itype) === Number(item.itype) &&
-      Number(owned.id ?? owned.w_id ?? owned.t_id ?? owned.e_id) === Number(item.id ?? item.w_id ?? item.t_id ?? item.e_id)
-  );
-}
-
-function withPurchasedDuration(item, duration, existingItem = null, now = currentUnixSeconds()) {
-  const itemData = clone(item);
-  const seconds = shopDurationSeconds(duration);
-  if (seconds === 0) {
-    itemData.eD = 0;
-    return itemData;
-  }
-
-  const existingExpiry = Number(existingItem?.eD || 0);
-  const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
-  itemData.eD = base + seconds;
-  return itemData;
-}
-
-function hasInventoryItem(account, item) {
-  return account.inventory.some((owned) => Number(owned.itype) === Number(item.itype) && Number(owned.id ?? owned.w_id ?? owned.t_id ?? owned.e_id) === Number(item.id ?? item.w_id ?? item.t_id ?? item.e_id));
-}
-
-function recordPurchase(account, item, price) {
-  if (!pgPool || !item) return;
-  const row = {
-    playerId: account.id,
-    itemKey: inventoryItemKey(item),
-    itemType: Number(item.itype || 0),
-    itemId: inventoryItemId(item),
-    price: Number(price || 0),
-    itemData: clone(item)
-  };
-  pgSaveChain = pgSaveChain
-    .then(() =>
-      pgPool.query(
-        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
-         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
-        [row.playerId, row.itemKey, row.itemType, row.itemId, row.price, JSON.stringify(row.itemData)]
-      )
-    )
-    .catch((error) => {
-      console.error("[postgres] purchase_history write failed", error);
-    });
-}
-
-async function buyItemPostgres(account, item, price) {
-  return enqueuePostgresMutation(async () => {
-    let client = null;
-    try {
-      const itemData = clone(item);
-      const itemType = Number(itemData?.itype || 0);
-      if (isWeaponItem(itemData) && !isValidShopPrice(price)) {
-        console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price}`);
-        return { result: false, err: [1] };
-      }
-
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const row = player.rows[0];
-      if (!row || row.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const money = Number(row.money || 0);
-      if (isWeaponItem(itemData)) {
-        const existing = await client.query(
-          "SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_key = $2 LIMIT 1",
-          [Number(account.id), inventoryItemKey(itemData)]
-        );
-        if (existing.rowCount > 0) {
-          await client.query("ROLLBACK");
-          return ok({ req: "", vcur: money });
-        }
-      }
-
-      if (money < price) {
-        await client.query("ROLLBACK");
-        return { result: false, err: [2] };
-      }
-
-      const nextMoney = money - price;
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
-      await client.query(
-        `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
-         VALUES ($1, $2, $3, $4::jsonb, now())
-         ON CONFLICT (player_id, item_key) DO UPDATE SET
-           item_type = EXCLUDED.item_type,
-           item_data = EXCLUDED.item_data,
-           updated_at = now()`,
-        [Number(account.id), inventoryItemKey(itemData), itemType, JSON.stringify(itemData)]
-      );
-      await client.query(
-        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
-         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
-        [
-          Number(account.id),
-          inventoryItemKey(itemData),
-          itemType,
-          inventoryItemId(itemData),
-          Number(price || 0),
-          JSON.stringify(itemData)
-        ]
-      );
-      await client.query("COMMIT");
-
-      const fresh = await loadPostgresAccount(account.id);
-      if (fresh) {
-        store.accounts[String(fresh.id)] = fresh;
-      }
-
-      console.log(`[buy-item] pg player=${account.id} type=${itemType} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
-      return ok({ req: "", vcur: nextMoney });
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The original error is more useful for diagnostics.
-      }
-      console.error("[postgres] buy item failed", error);
-      return { result: false, err: [1] };
-    } finally {
-      if (client) client.release();
-    }
-  });
-}
-
-async function buyItem(account, item) {
-  if (!item) return { result: false, err: [1] };
-  const price = itemPrice(item);
-  if (isWeaponItem(item) && !isValidShopPrice(price)) {
-    console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price}`);
-    return { result: false, err: [1] };
-  }
-  if (pgPool) return buyItemPostgres(account, item, price);
-  if (isWeaponItem(item) && hasInventoryItem(account, item)) {
-    return ok({ req: "", vcur: account.money });
-  }
-  if (account.money < price) return { result: false, err: [2] };
-  if (!hasInventoryItem(account, item)) {
-    account.inventory.push(clone(item));
-  }
-  const beforeMoney = Number(account.money || 0);
-  account.money -= price;
-  recordPurchase(account, item, price);
-  persist(account);
-  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money}`);
-  return ok({ req: "", vcur: account.money });
-}
-
-async function buyEnhancerPostgres(account, item, duration, price) {
-  return enqueuePostgresMutation(async () => {
-    let client = null;
-    try {
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const row = player.rows[0];
-      if (!row || row.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const money = Number(row.money || 0);
-      if (money < price) {
-        await client.query("ROLLBACK");
-        return { result: false, err: [2] };
-      }
-
-      const itemKey = inventoryItemKey(item);
-      const existing = await client.query(
-        "SELECT item_data FROM player_inventory WHERE player_id = $1 AND item_key = $2 FOR UPDATE",
-        [Number(account.id), itemKey]
-      );
-      const itemData = withPurchasedDuration(item, duration, jsonValue(existing.rows[0]?.item_data, null));
-      const nextMoney = money - price;
-
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
-      await client.query(
-        `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
-         VALUES ($1, $2, $3, $4::jsonb, now())
-         ON CONFLICT (player_id, item_key) DO UPDATE SET
-           item_type = EXCLUDED.item_type,
-           item_data = EXCLUDED.item_data,
-           updated_at = now()`,
-        [Number(account.id), itemKey, Number(itemData?.itype || 0), JSON.stringify(itemData)]
-      );
-      await client.query(
-        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
-         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
-        [
-          Number(account.id),
-          itemKey,
-          Number(itemData?.itype || 0),
-          inventoryItemId(itemData),
-          Number(price || 0),
-          JSON.stringify(itemData)
-        ]
-      );
-
-      await client.query("COMMIT");
-
-      const fresh = await loadPostgresAccount(account.id);
-      if (fresh) {
-        store.accounts[String(fresh.id)] = fresh;
-      }
-
-      return ok({ req: "", vcur: nextMoney });
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The original error is more useful for diagnostics.
-      }
-      console.error("[postgres] buy enhancer failed", error);
-      return { result: false, err: [1] };
-    } finally {
-      if (client) client.release();
-    }
-  });
-}
-
-async function buyEnhancer(account, item, duration) {
-  if (!item) return { result: false, err: [1] };
-  if (Number(item.iC || 0) === 1) return { result: false, err: [1] };
-  const selectedDuration = normalizeShopDuration(duration);
-  const price = shopDurationPrice(item, selectedDuration);
-  if (pgPool) return buyEnhancerPostgres(account, item, selectedDuration, price);
-  if (account.money < price) return { result: false, err: [2] };
-  if (!Array.isArray(account.inventory)) account.inventory = [];
-
-  const existingItem = findOwnedInventoryItem(account, item);
-  const itemData = withPurchasedDuration(item, selectedDuration, existingItem);
-  const itemKey = inventoryItemKey(itemData);
-  const existingIndex = (account.inventory || []).findIndex((owned) => inventoryItemKey(owned) === itemKey);
-  if (existingIndex >= 0) {
-    account.inventory[existingIndex] = itemData;
-  } else {
-    account.inventory.push(itemData);
-  }
-
-  account.money -= price;
-  persist(account);
-  return ok({ req: "", vcur: account.money });
-}
-
-function weaponUpgradePrice(item) {
-  return shopDurationPrice(item, SHOP_DURATION.DAY);
-}
-
-function withWeaponUpgradeDuration(upgrade, existingItem = null, now = currentUnixSeconds()) {
-  const itemData = clone(upgrade);
-  const existingExpiry = Number(existingItem?.eD || 0);
-  const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
-  itemData.eD = base + SHOP_DAY_SECONDS;
-  return itemData;
-}
-
-async function buyWeaponUpgradePostgres(account, upgrade, price) {
-  return enqueuePostgresMutation(async () => {
-    let client = null;
-    try {
-      if (!isValidShopPrice(price)) {
-        console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
-        return { result: false, err: [1] };
-      }
-
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const row = player.rows[0];
-      if (!row || row.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const money = Number(row.money || 0);
-      if (money < price) {
-        await client.query("ROLLBACK");
-        return { result: false, err: [2] };
-      }
-
-      const itemKey = inventoryItemKey(upgrade);
-      const existing = await client.query(
-        "SELECT item_data FROM player_inventory WHERE player_id = $1 AND item_key = $2 FOR UPDATE",
-        [Number(account.id), itemKey]
-      );
-      const existingItem = jsonValue(existing.rows[0]?.item_data, null);
-      if (!existingItem || Number(existingItem?.itype || 0) !== 1) {
-        await client.query("ROLLBACK");
-        return { result: false, err: [1] };
-      }
-
-      const itemData = withWeaponUpgradeDuration(upgrade, existingItem);
-      const nextMoney = money - price;
-
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
-      await client.query(
-        `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
-         VALUES ($1, $2, $3, $4::jsonb, now())
-         ON CONFLICT (player_id, item_key) DO UPDATE SET
-           item_type = EXCLUDED.item_type,
-           item_data = EXCLUDED.item_data,
-           updated_at = now()`,
-        [Number(account.id), itemKey, Number(itemData?.itype || 0), JSON.stringify(itemData)]
-      );
-      await client.query(
-        `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
-         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
-        [
-          Number(account.id),
-          itemKey,
-          Number(itemData?.itype || 0),
-          inventoryItemId(itemData),
-          Number(price || 0),
-          JSON.stringify(itemData)
-        ]
-      );
-
-      await client.query("COMMIT");
-
-      const fresh = await loadPostgresAccount(account.id);
-      if (fresh) {
-        store.accounts[String(fresh.id)] = fresh;
-      }
-
-      console.log(`[buy-weapon-upgrade] pg player=${account.id} key=${itemKey} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
-      return ok({ req: "", vcur: nextMoney });
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The original error is more useful for diagnostics.
-      }
-      console.error("[postgres] buy weapon upgrade failed", error);
-      return { result: false, err: [1] };
-    } finally {
-      if (client) client.release();
-    }
-  });
-}
-
-async function buyWeaponUpgrade(account, upgrade) {
-  if (!upgrade) return { result: false, err: [1] };
-  const price = weaponUpgradePrice(upgrade);
-  if (!isValidShopPrice(price)) {
-    console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
-    return { result: false, err: [1] };
-  }
-  if (pgPool) return buyWeaponUpgradePostgres(account, upgrade, price);
-  if (account.money < price) return { result: false, err: [2] };
-  if (!Array.isArray(account.inventory)) account.inventory = [];
-
-  const itemKey = inventoryItemKey(upgrade);
-  const existingIndex = account.inventory.findIndex((owned) => inventoryItemKey(owned) === itemKey && Number(owned?.itype || 0) === 1);
-  if (existingIndex < 0) return { result: false, err: [1] };
-
-  const itemData = withWeaponUpgradeDuration(upgrade, account.inventory[existingIndex]);
-  account.inventory[existingIndex] = itemData;
-  account.money -= price;
-  recordPurchase(account, itemData, price);
-  persist(account);
-  console.log(`[buy-weapon-upgrade] json player=${account.id} key=${itemKey} item=${inventoryItemId(itemData)} price=${price} before=${account.money + price} after=${account.money}`);
-  return ok({ req: "", vcur: account.money });
-}
-
-function requestedViewSelection(url, baseView = {}) {
-  const view = { ...baseView };
-  for (const key of viewWearKeys) {
-    if (url.searchParams.has(key)) view[key] = Number(url.searchParams.get(key) || 0);
-  }
-  return view;
-}
-
-function viewSelectionSummary(view = {}) {
-  return viewWearKeys.map((key) => `${key}:${Number(view?.[key] || 0)}`).join(",");
-}
-
-async function saveViewPostgres(account, requestedView, saveVersion) {
-  return enqueuePostgresMutation(async () => {
-    if (!isLatestViewSelectionSaveVersion(account.id, saveVersion)) {
-      console.log(`[save] sview skip stale id=${account.id} version=${saveVersion} req=${viewSelectionSummary(requestedView)}`);
-      return ok();
-    }
-
-    let client = null;
-    try {
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const row = player.rows[0];
-      if (!row || row.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      if (!isLatestViewSelectionSaveVersion(account.id, saveVersion)) {
-        await client.query("ROLLBACK");
-        console.log(`[save] sview skip stale id=${account.id} version=${saveVersion} req=${viewSelectionSummary(requestedView)}`);
-        return ok();
-      }
-
-      const inventoryRows = await client.query(
-        "SELECT item_data FROM player_inventory WHERE player_id = $1 ORDER BY created_at, item_key FOR UPDATE",
-        [Number(account.id)]
-      );
-      const inventory = inventoryRows.rows.map((itemRow) => jsonValue(itemRow.item_data, {}));
-      const current = accountFromPostgresRow(row, inventory);
-      const normalized = normalizeViewInventory(requestedView, current.inventory || []);
-      const now = new Date().toISOString();
-
-      await client.query(
-        "UPDATE players SET view = $2::jsonb, updated_at = $3 WHERE id = $1",
-        [Number(account.id), JSON.stringify(normalized.view), now]
-      );
-      await client.query(
-        `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
-         VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
-         ON CONFLICT (player_id) DO UPDATE SET
-           view = EXCLUDED.view,
-           updated_at = now()`,
-        [Number(account.id), JSON.stringify(normalized.view), JSON.stringify(current.weap || {}), JSON.stringify(current.taun || {})]
-      );
-
-      for (const item of normalized.inventory || []) {
-        const itemKey = inventoryItemKey(item);
-        if (!itemKey) continue;
-        await client.query(
-          `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
-           VALUES ($1, $2, $3, $4::jsonb, now())
-           ON CONFLICT (player_id, item_key) DO UPDATE SET
-             item_type = EXCLUDED.item_type,
-             item_data = EXCLUDED.item_data,
-             updated_at = now()`,
-          [Number(account.id), itemKey, Number(item?.itype || 0), JSON.stringify(item)]
-        );
-      }
-
-      await client.query("COMMIT");
-
-      const fresh = await loadPostgresAccount(account.id);
-      const saved = fresh || { ...current, view: normalized.view, inventory: normalized.inventory };
-      store.accounts[String(saved.id)] = saved;
-      console.log(`[save] sview ok id=${saved.id} version=${saveVersion} req=${viewSelectionSummary(requestedView)} saved=${viewSelectionSummary(saved.view)}`);
-      return ok({ view: clone(saved.view) });
-    } catch (error) {
-      try {
-        await client?.query("ROLLBACK");
-      } catch {
-        // The original error is more useful for diagnostics.
-      }
-      console.error("[postgres] save view failed", error);
-      return { result: false, err: [1] };
-    } finally {
-      if (client) client.release();
-    }
-  });
-}
-
-async function saveView(account, url) {
-  const requestedView = requestedViewSelection(url, account.view || {});
-  const saveVersion = nextViewSelectionSaveVersion(account.id);
-
-  if (pgPool) {
-    return saveViewPostgres(account, requestedView, saveVersion);
-  }
-
-  if (!isLatestViewSelectionSaveVersion(account.id, saveVersion)) {
-    console.log(`[save] sview skip stale id=${account.id} version=${saveVersion} req=${viewSelectionSummary(requestedView)}`);
-    return ok();
-  }
-
-  const normalized = normalizeViewInventory(requestedView, account.inventory || []);
-  account.view = normalized.view;
-  account.inventory = normalized.inventory;
-  persist(account);
-  console.log(`[save] sview ok id=${account.id} version=${saveVersion} req=${viewSelectionSummary(requestedView)} saved=${viewSelectionSummary(account.view)}`);
-  return ok({ view: clone(account.view) });
-}
-
-function requestedWeaponSelection(url, baseSelection = {}) {
-  const selection = { ...baseSelection };
-  for (let i = 1; i <= 7; i += 1) {
-    if (url.searchParams.has(`i${i}`)) selection[`id${i}`] = Number(url.searchParams.get(`i${i}`) || 0);
-  }
-  return selection;
-}
-
-function weaponSelectionSummary(selection = {}) {
+function profileWeaponSelectionSummary(weap = {}) {
   return Array.from({ length: 7 }, (_, index) => {
     const slot = index + 1;
-    return `${slot}:${Number(selection?.[`id${slot}`] || 0)}`;
+    return `${slot}:${numberOr(weap?.[`id${slot}`], 0)}`;
   }).join(",");
 }
 
-async function saveWeaponsPostgres(account, requestedSelection, saveVersion) {
-  return enqueuePostgresMutation(async () => {
-    if (!isLatestWeaponSelectionSaveVersion(account.id, saveVersion)) {
-      console.log(`[save] sweap skip stale id=${account.id} version=${saveVersion} req=${weaponSelectionSummary(requestedSelection)}`);
-      return ok();
-    }
-
-    let client = null;
-    try {
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const row = player.rows[0];
-      if (!row || row.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      if (!isLatestWeaponSelectionSaveVersion(account.id, saveVersion)) {
-        await client.query("ROLLBACK");
-        console.log(`[save] sweap skip stale id=${account.id} version=${saveVersion} req=${weaponSelectionSummary(requestedSelection)}`);
-        return ok();
-      }
-
-      const inventoryRows = await client.query(
-        "SELECT item_data FROM player_inventory WHERE player_id = $1 ORDER BY created_at, item_key FOR UPDATE",
-        [Number(account.id)]
-      );
-      const inventory = inventoryRows.rows.map((itemRow) => jsonValue(itemRow.item_data, {}));
-      const current = accountFromPostgresRow(row, inventory);
-      const normalized = normalizeLoadoutInventory(requestedSelection, current.inventory || []);
-      const now = new Date().toISOString();
-
-      await client.query(
-        "UPDATE players SET weap = $2::jsonb, updated_at = $3 WHERE id = $1",
-        [Number(account.id), JSON.stringify(normalized.weap), now]
-      );
-      await client.query(
-        `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
-         VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
-         ON CONFLICT (player_id) DO UPDATE SET
-           weap = EXCLUDED.weap,
-           updated_at = now()`,
-        [Number(account.id), JSON.stringify(current.view || {}), JSON.stringify(normalized.weap), JSON.stringify(current.taun || {})]
-      );
-
-      for (const item of normalized.inventory || []) {
-        const itemKey = inventoryItemKey(item);
-        if (!itemKey) continue;
-        await client.query(
-          `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
-           VALUES ($1, $2, $3, $4::jsonb, now())
-           ON CONFLICT (player_id, item_key) DO UPDATE SET
-             item_type = EXCLUDED.item_type,
-             item_data = EXCLUDED.item_data,
-             updated_at = now()`,
-          [Number(account.id), itemKey, Number(item?.itype || 0), JSON.stringify(item)]
-        );
-      }
-
-      await client.query("COMMIT");
-
-      const fresh = await loadPostgresAccount(account.id);
-      const saved = fresh || { ...current, weap: normalized.weap, inventory: normalized.inventory };
-      store.accounts[String(saved.id)] = saved;
-      console.log(`[save] sweap ok id=${saved.id} version=${saveVersion} req=${weaponSelectionSummary(requestedSelection)} saved=${weaponSelectionSummary(saved.weap)}`);
-      return ok({ weap: clone(saved.weap) });
-    } catch (error) {
-      try {
-        await client?.query("ROLLBACK");
-      } catch {
-        // The original error is more useful for diagnostics.
-      }
-      console.error("[postgres] save weapons failed", error);
-      return { result: false, err: [1] };
-    } finally {
-      if (client) client.release();
-    }
-  });
+function selectedWeaponLoadoutSummary(profile) {
+  const selected = selectedWeapons(profile) || [];
+  if (!selected.length) return "none";
+  return selected
+    .map((item) => `${weaponSlot(item)}:${itemId(item)}:${stringOr(item.sn ?? item.sname, "")}`)
+    .join(",");
 }
 
-async function saveWeapons(account, url) {
-  const requestedSelection = requestedWeaponSelection(url, account.weap || {});
-  const saveVersion = nextWeaponSelectionSaveVersion(account.id);
-
-  if (pgPool) {
-    return saveWeaponsPostgres(account, requestedSelection, saveVersion);
+function weaponSlotsForProfile(profile) {
+  const selected = selectedWeapons(profile) || DEFAULT_LOADOUT_WEAPONS;
+  const bySlot = new Map();
+  for (const item of selected) {
+    const slot = weaponSlot(item);
+    if (!bySlot.has(slot)) bySlot.set(slot, item);
   }
-
-  if (!isLatestWeaponSelectionSaveVersion(account.id, saveVersion)) {
-    console.log(`[save] sweap skip stale id=${account.id} version=${saveVersion} req=${weaponSelectionSummary(requestedSelection)}`);
-    return ok();
+  for (const fallback of DEFAULT_LOADOUT_WEAPONS) {
+    const slot = weaponSlot(fallback);
+    if (!bySlot.has(slot)) bySlot.set(slot, fallback);
   }
-
-  const normalized = normalizeLoadoutInventory(requestedSelection, account.inventory || []);
-  account.weap = normalized.weap;
-  account.inventory = normalized.inventory;
-  persist(account);
-  console.log(`[save] sweap ok id=${account.id} version=${saveVersion} req=${weaponSelectionSummary(requestedSelection)} saved=${weaponSelectionSummary(account.weap)}`);
-  return ok({ weap: clone(account.weap) });
+  return Array.from(bySlot.entries()).sort(([left], [right]) => left - right);
 }
 
-function saveTaunts(account, url) {
-  for (let i = 1; i <= 3; i += 1) {
-    if (url.searchParams.has(`i${i}`)) account.taun[`i${i - 1}`] = Number(url.searchParams.get(`i${i}`) || 0);
+function selectedWears(profile) {
+  if (!profile) return [];
+  const byId = new Map();
+  for (const item of profile.catalogWears || []) {
+    const id = itemId(item);
+    if (id > 0) byId.set(id, item);
   }
-  persist(account);
-  return ok();
+  for (const item of (profile.inventory || []).filter((entry) => Number(entry.itype) === 3)) {
+    const id = itemId(item);
+    if (id <= 0) continue;
+    const catalogItem = byId.get(id) || {};
+    byId.set(id, {
+      ...catalogItem,
+      ...item,
+      name: item.name ?? catalogItem.name,
+      desc: item.desc ?? catalogItem.desc,
+      desca: item.desca ?? item.descAdditional ?? item.da ?? catalogItem.desca ?? catalogItem.descAdditional ?? catalogItem.da,
+      descAdditional: item.descAdditional ?? item.desca ?? item.da ?? catalogItem.descAdditional ?? catalogItem.desca ?? catalogItem.da,
+    });
+  }
+  const selected = [];
+  for (const [viewKey, wearType] of WEAR_VIEW_KEYS) {
+    const selectedId = numberOr(profile.view?.[viewKey], 0);
+    const item = selectedId > 0 ? byId.get(selectedId) : null;
+    if (item) selected.push({ item, wearType });
+  }
+  return selected;
 }
 
-async function changeName(account, url) {
-  const { act: action } = normalizedAjaxRoute(url);
-  const initialSetRequested = action === "cname" && url.searchParams.get("set") === "1";
-  const paidSetRequested = action === "cpname";
-  const setRequested = initialSetRequested || paidSetRequested;
-  const requestedName = String(
-    url.searchParams.get("ve") ||
-    url.searchParams.get("v") ||
-    url.searchParams.get("name") ||
-    url.searchParams.get("un") ||
-    account.name
-  ).trim();
-  const name = requestedName.slice(0, 16);
-  if (action === "searcname") {
-    return searchPlayersByName(account, requestedName);
-  }
-  const invalidLength = requestedName.length < 3 || requestedName.length > 16;
-  const accounts = await allAccountsForStats();
-  const nameExists = accounts.some((candidate) =>
-    Number(candidate.id) !== Number(account.id) &&
-    String(candidate.name || "").trim().toLowerCase() === requestedName.toLowerCase()
-  );
-  if (!setRequested && action === "cname") {
-    if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
-    if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
-    return ok({ names: [] });
-  }
-  if (initialSetRequested && !account.namePending) return { result: false, names: [], err: [{ n: 1 }] };
-  if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
-  if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
-  account.name = name;
-  if (initialSetRequested) account.namePending = false;
-  persist(account);
-  refreshAllAccountClanSummaries(store);
-  saveStore(store);
-  return ok({
-    names: [],
-    name: account.name,
-    un: account.name,
-    info: {
-      u_id: account.id,
-      un: account.name,
-      lvl: account.level,
-      vcur: account.money,
-      exp: {
-        cur: account.exp,
-        min: account.expMin,
-        max: account.expMax
-      }
-    }
-  });
+function selectedWearSummary(profile) {
+  const selected = selectedWears(profile);
+  if (!selected.length) return "none";
+  return selected
+    .map(({ item, wearType }) => `${wearType}:${itemId(item) || 0}:${stringOr(item.sn ?? item.sname, "")}`)
+    .join(",");
 }
 
-async function buyAbilityPostgres(account, url) {
-  const id = Number(url.searchParams.get("id") || 0);
-  return enqueuePostgresMutation(async () => {
-    let client = null;
-    try {
-      client = await pgPool.connect();
-      await client.query("BEGIN");
-
-      const player = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const row = player.rows[0];
-      if (!row || row.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const ownedAbilities = await client.query("SELECT ability_id, ability_level FROM player_abilities WHERE player_id = $1", [Number(account.id)]);
-      const abilities = ownedAbilities.rows.map((abilityRow) => ({
-        i: Number(abilityRow.ability_id),
-        l: Number(abilityRow.ability_level)
-      }));
-      const next = abilityCatalog.find(
-        (ability) => Number(ability.i) === id && !abilities.some((owned) => Number(owned.i) === id && Number(owned.l) >= Number(ability.l))
-      );
-      if (!next) {
-        await client.query("ROLLBACK");
-        return ok({ req: "" });
-      }
-
-      const price = itemPrice(next);
-      const money = Number(row.money || 0);
-      if (money < price) {
-        await client.query("ROLLBACK");
-        return { result: false, err: [2] };
-      }
-
-      const nextMoney = money - price;
-      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
-      await client.query("DELETE FROM player_abilities WHERE player_id = $1 AND ability_id = $2", [Number(account.id), id]);
-      await client.query(
-        `INSERT INTO player_abilities (player_id, ability_id, ability_level, updated_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (player_id, ability_id) DO UPDATE SET
-           ability_level = EXCLUDED.ability_level,
-           updated_at = now()`,
-        [Number(account.id), Number(next.i), Number(next.l)]
-      );
-
-      await client.query("COMMIT");
-
-      const fresh = await loadPostgresAccount(account.id);
-      if (fresh) {
-        store.accounts[String(fresh.id)] = fresh;
-      }
-
-      return ok({ req: "", vcur: nextMoney });
-    } catch (error) {
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // The original error is more useful for diagnostics.
-      }
-      console.error("[postgres] buy ability failed", error);
-      return { result: false, err: [1] };
-    } finally {
-      if (client) client.release();
-    }
-  });
+function tauntItemId(item = {}) {
+  return numberOr(item.t_id ?? item.id, 0);
 }
 
-async function buyAbility(account, url) {
-  if (pgPool) return buyAbilityPostgres(account, url);
-  const id = Number(url.searchParams.get("id") || 0);
-  const next = abilityCatalog.find((ability) => Number(ability.i) === id && !account.abilities.some((owned) => Number(owned.i) === id && Number(owned.l) >= Number(ability.l)));
-  if (!next) return ok({ req: "" });
-  const price = itemPrice(next);
-  if (account.money < price) return { result: false, err: [2] };
-  account.money -= price;
-  account.abilities = account.abilities.filter((owned) => Number(owned.i) !== id);
-  account.abilities.push({ i: next.i, l: next.l });
-  persist(account);
-  return ok({ req: "" });
+function tauntExpiresAt(item = {}) {
+  return numberOr(item.eD ?? item.ed ?? item.expiresAt, 0);
 }
 
-async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
-  const { page, act } = normalizedAjaxRoute(url);
-  let account = resolvedAccount || accountFrom(url);
-  if (!account) {
-    return { result: false, error: "1" };
-  }
-  if (!resolvedAccount && !isEquipmentSelectionSaveRequest(url)) account = await refreshAccountFromPostgres(account);
+function isInventoryTauntActive(item = {}, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const expiresAt = tauntExpiresAt(item);
+  return expiresAt <= 0 || expiresAt > nowSeconds;
+}
 
-  if (page === "auth" && act === "g") {
-    return ok({ user_id: String(account.id), key: account.key });
-  }
-
-  if (page === "account") {
-    if (act === "login") return ok({ auth: { id: account.id, key: account.key } });
-    if (act === "searcname") return searchPlayersByName(account, url.searchParams.get("v"));
-    if (act === "cname" || act === "cpname") return changeName(account, url);
+function selectedTaunts(profile) {
+  if (!profile) return [];
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const owned = new Set();
+  for (const item of profile.inventory || []) {
+    if (Number(item.itype) !== 4) continue;
+    if (!isInventoryTauntActive(item, nowSeconds)) continue;
+    const tauntId = tauntItemId(item);
+    if (tauntId > 0) owned.add(tauntId);
   }
 
-  if (page === "pl") {
-    if (act === "i") {
-      const objectLoadout = usesProfileObjectLoadout(account, url);
-      return advancedStatsPayload(await profileAccountForView(account, url), { objectLoadout });
-    }
-    if (act === "inv") return inventoryPayload(account);
-    if (act === "map") return mapsPayload();
-    if (act === "ach") return achievementsPayload(account);
-    if (act === "abil") return abilitiesPayload(account);
-    if (act === "sview") return saveView(account, url);
-    if (act === "sweap") return saveWeapons(account, url);
-    if (act === "staunt") return saveTaunts(account, url);
-    if (["uid", "cev", "tmap"].includes(act)) return ok();
-  }
-
-  if (page === "shop") {
-    if (act === "items") {
-      logShopItemsPayload(account, act);
-      return shopPayload();
-    }
-    if (act === "assemb") return ok({ assemblage: clone(shopAssemblages) });
-    if (["wear", "weap", "weapinf", "act"].includes(act)) {
-      logShopItemsPayload(account, act);
-      return shopPayload();
+  const selected = [];
+  for (let slot = 0; slot < 3; slot += 1) {
+    const tauntId = numberOr(profile.taun?.[`i${slot}`], 0);
+    if (tauntId > 0 && (tauntId === 1 || owned.has(tauntId))) {
+      selected.push({ slot, tauntId });
     }
   }
-
-  if (page === "buy") {
-    const id = Number(url.searchParams.get("id") || url.searchParams.get("i") || 0);
-    if (act === "bweap") return await buyItem(account, findShopItem(shopWeapons, "w_id", id));
-    if (act === "bweapupg") return await buyWeaponUpgrade(account, shopWeaponUpgradesById.get(id));
-    if (act === "bwear") return await buyItem(account, findShopItem(shopWears, "w_id", id));
-    if (act === "btaunt") return await buyItem(account, findShopItem(shopTaunts, "t_id", id));
-    if (act === "benh") return await buyEnhancer(account, findShopItem(shopEnhancers, "e_id", id), url.searchParams.get("dur"));
-    if (act === "babil") return await buyAbility(account, url);
-    if (act === "bmap") return ok({ req: "" });
-    return { result: false, err: [1] };
-  }
-
-  if (page === "stats") {
-    if (act === "league") return await leaguePayload(account);
-    if (act === "ybest") return await yesterdayBestPayload(account);
-    if (act === "rat") return await ratingPayload(account, url);
-    if (act === "reset") return ok({ req: "" });
-  }
-
-  if (page === "clan") {
-    return await routeClan(account, url, act, requestOrigin);
-  }
-
-  return ok();
+  return selected;
 }
 
-function requestPublicOrigin(req, url) {
-  const forwardedHost = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()
-    : "";
-  const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
-  if (!host) return url.origin;
-  const forwardedProto = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
-    : "";
-  const proto = forwardedProto || url.protocol.replace(/:$/, "") || "http";
-  return `${proto}://${host}`;
+function selectedTauntSummary(profile) {
+  const selected = selectedTaunts(profile);
+  if (!selected.length) return "none";
+  return selected.map(({ slot, tauntId }) => `${slot}:${tauntId}`).join(",");
 }
 
-function securityHeaders() {
+function enhancerTypeId(item = {}) {
+  return numberOr(item.e_id ?? item.eid ?? item.id, 0);
+}
+
+function enhancerExpiresAt(item = {}) {
+  return numberOr(item.eD ?? item.ed ?? item.expiresAt, 0);
+}
+
+function isInventoryEnhancerActive(item = {}, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const expiresAt = enhancerExpiresAt(item);
+  return expiresAt <= 0 || expiresAt > nowSeconds;
+}
+
+function selectedEnhancers(profile) {
+  if (!profile) return [];
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const byType = new Map();
+  for (const item of profile.inventory || []) {
+    if (Number(item.itype) !== 2) continue;
+    const enhancerType = enhancerTypeId(item);
+    if (!PASSIVE_BATTLE_ENHANCER_IDS.has(enhancerType)) continue;
+    if (!isInventoryEnhancerActive(item, nowSeconds)) continue;
+    if (!byType.has(enhancerType)) byType.set(enhancerType, item);
+  }
+  return Array.from(byType.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([enhancerType, item]) => ({ enhancerType, item }));
+}
+
+function selectedEnhancerSummary(profile) {
+  const selected = selectedEnhancers(profile);
+  if (!selected.length) return "none";
+  return selected
+    .map(({ enhancerType, item }) => `${enhancerType}:${itemId(item) || 0}:${stringOr(item.sn ?? item.sname ?? item.name, "")}:eD=${enhancerExpiresAt(item)}`)
+    .join(",");
+}
+
+function weaponCanonicalKey(item = {}) {
+  return stringOr(item.sn ?? item.sname, "").toLowerCase();
+}
+
+function weaponImpactDefinition(item = {}) {
+  const id = itemId(item);
+  const key = weaponCanonicalKey(item);
+  const base = IMPACT_DOT_BY_WEAPON_ID.get(id) || IMPACT_DOT_BY_WEAPON_KEY.get(key) || null;
+  if (!isActiveWorkshopWeaponUpgrade(item)) return base;
+
+  const workshopType = String(item.workshopImpactType || "").toLowerCase();
+  const type = ({
+    fire: IMPACT_TYPE.FIRE,
+    blood: IMPACT_TYPE.BLOOD,
+    poison: IMPACT_TYPE.POISON,
+    frost: IMPACT_TYPE.FROST,
+  })[workshopType] ?? base?.type ?? IMPACT_TYPE.NONE;
+  if (type === IMPACT_TYPE.NONE) return base;
+
+  const source = base || { type, min: 3, max: 5, ticks: IMPACT_DOT_DEFAULT_TICKS };
+  const damageMultiplier = 1 + Math.max(0, numberOr(item.workshopImpactDamagePercent, 0)) / 100;
   return {
-    "x-content-type-options": "nosniff",
-    "x-frame-options": "DENY",
-    "referrer-policy": "no-referrer",
-    "permissions-policy": "camera=(), microphone=(), geolocation=()",
-    "cross-origin-resource-policy": "same-site"
+    ...source,
+    type,
+    min: Math.max(1, Math.round(numberOr(source.min, 3) * damageMultiplier)),
+    max: Math.max(1, Math.round(numberOr(source.max, source.min ?? 5) * damageMultiplier)),
+    ticks: Math.max(1, numberOr(source.ticks, IMPACT_DOT_DEFAULT_TICKS) + Math.max(0, numberOr(item.workshopImpactTicksBonus, 0))),
   };
 }
 
-function jsonAsciiEscape(body) {
-  return body.replace(/[\u007f-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+function weaponImpactType(item = {}) {
+  return weaponImpactDefinition(item)?.type ?? IMPACT_TYPE.NONE;
 }
 
-function sendJson(res, payload, status = 200, headers = {}, options = {}) {
-  const json = JSON.stringify(payload);
-  const body = options.ascii ? jsonAsciiEscape(json) : json;
-  res.writeHead(status, {
-    ...securityHeaders(),
-    "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
-    "access-control-allow-origin": "*",
-    "content-length": String(Buffer.byteLength(body)),
-    ...headers
-  });
-  res.end(body);
+function impactTypeName(impactType) {
+  if (impactType === IMPACT_TYPE.FIRE) return "Fire";
+  if (impactType === IMPACT_TYPE.BLOOD) return "Blood";
+  if (impactType === IMPACT_TYPE.POISON) return "Poison";
+  if (impactType === IMPACT_TYPE.FROST) return "Frost";
+  return "None";
 }
 
-function sendHtml(res, html, status = 200, headers = {}) {
-  res.writeHead(status, {
-    ...securityHeaders(),
-    "content-type": "text/html; charset=utf-8",
-    "cache-control": "no-store",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
-    "content-length": String(Buffer.byteLength(html)),
-    ...headers
-  });
-  res.end(html);
+function wearBonusKey(selectedWear) {
+  const item = selectedWear?.item || {};
+  const wearType = numberOr(item.wt, selectedWear?.wearType ?? 0);
+  const systemName = stringOr(item.sn ?? item.sname, "").toLowerCase();
+  return `${wearType}:${systemName}`;
 }
 
-async function createAccountPage(url, requestOrigin = null) {
-  const code = url.searchParams.get("code") || "";
-  const name = cleanName(url.searchParams.get("name") || "");
-  if (code && !safeTokenEquals(code, CREATE_CODE)) {
-    return {
-      status: 403,
-      html: "<h1>\u041a\u043e\u0434 \u043d\u0435\u0432\u0435\u0440\u043d\u044b\u0439</h1><p>\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043a\u043e\u0434 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430.</p>"
-    };
+// Generated 1:1 from the active client TextAsset wear_*_desca entries.
+// The final spread below deliberately makes this UTF-8 client table authoritative.
+const CLIENT_WEAR_BONUS_TEXTS = require("./wear-bonus-texts.json");
+/* Historical malformed literals retained only as a migration reference; never evaluated.
+  ...CLIENT_WEAR_BONUS_TEXTS,
+  // "Прохладник" (Стужа) keeps its own armor bonus even when the full set is incomplete.
+  // Recovered from the active client TextAsset: wear_Shirts_santa2_desca = "Броня +17".
+  "4:santa2": "Броня +17",
+  "6:boot02": "+3% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+3% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakolimpic": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\nР—Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ +3%",
+  "6:tacticalb01": "+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b05": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b02": "Р’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b06": "+2% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ\n+1% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\nР’С‹С€Рµ СЃСЂРµРґРЅРµРіРѕ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv2b03": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё РїРµСЂРµРґРІРёР¶РµРЅРёСЏ",
+  "6:sneakv2b04": "+3% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё",
+  "6:infernal": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё",
+  "6:franky": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+4% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ",
+  "6:sneakv2b10": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\n+3% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ",
+  "6:anarch": "Р‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°\n+5% Рє СЃРєРѕСЂРѕСЃС‚Рё",
+  "6:avenger": "+3% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:zadira": "+4% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+1% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:prizrak": "+1% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+3% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:sneakv201": "+5% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+8% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:business": "+5% Р·Р°С‰РёС‚Р° РѕС‚ СЃРЅР°Р№РїРµСЂРѕРє\n+3% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РґСЂРѕР±РѕРІРёРєРѕРІ\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:stalker": "+10% Р·Р°С‰РёС‚Р° РѕС‚ СЂР°РєРµС‚РЅРёС†\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РѕРіРЅРµРјРµС‚РѕРІ\n+2% Рє СЃРєРѕСЂРѕСЃС‚Рё\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:thanos": "+5% Р·Р°С‰РёС‚Р° РѕС‚ РїСѓР»РµРјРµС‚РѕРІ\n+5% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+10% Р·Р°С‰РёС‚Р° РѕС‚ РіСЂР°РЅР°С‚РѕРјРµС‚РѕРІ\nР‘РѕР»СЊС€РѕР№ Р±РѕРЅСѓСЃ Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  "6:slip99": "+2% Р·Р°С‰РёС‚Р° РѕС‚ Р°РІС‚РѕРјР°С‚РѕРІ\n+4% Р·Р°С‰РёС‚Р° РѕС‚ РїРёСЃС‚РѕР»РµС‚РѕРІ\n+2% Р·Р°С‰РёС‚Р° РѕС‚ РѕСЂСѓР¶РёСЏ Р±Р»РёР¶РЅРµРіРѕ Р±РѕСЏ\n+40% Рє РїСЂС‹Р¶РєСѓ РїРѕСЃР»Рµ РІС‹СЃС‚СЂРµР»Р° РёР· РґСЂРѕР±РѕРІРёРєР°",
+  // The active-client UTF-8 table is authoritative. This final spread also prevents
+  // legacy mojibake overrides above from masking valid item bonuses.
+  ...CLIENT_WEAR_BONUS_TEXTS,
+*/
+const RESTORED_WEAR_BONUS_TEXTS = new Map(Object.entries(CLIENT_WEAR_BONUS_TEXTS));
+
+const SHOTGUN_JUMP_PERCENT_BY_BOOT = new Map(Object.entries({
+  "6:sneak02": 5,      // Р¤РѕСЂРµСЃС‚
+  "6:slip01": 5,       // РўР°СЂР°РєР°РЅСЊСЏ СЃРјРµСЂС‚СЊ
+  "6:boot01": 5,       // Р‘РµСЂС†С‹
+  "6:sneakv202": 10,   // РЁРЅСѓСЂ
+  "6:sneakv203": 10,   // РџСЂС‹РіСѓРЅ
+  "6:sneakolimpic": 15, // Р›РµРіРєРѕСЃС‚СѓРї
+  "6:skeleton": 15,    // РЎРјРµСЂС‚РѕС…РѕРґС‹
+  "6:santa": 15,       // РЎР°РЅРёСЂР°Р№РґРµСЂС‹
+  "6:bear": 15,        // РњРµРґРІРµРґРѕР»Р°РїС‹
+  "6:tacticalb01": 15, // Р”РµР»СЊС‚РѕРІРёРєРё
+  "6:tactical01": 15,  // РђСЂРјРµР№С†С‹
+  "6:tactical02": 15,  // РЎРІРµСЂС…РїСЂРѕС…РѕРґРёРјРµС†
+  "6:sneakv2b06": 16,  // РљРёСЃР»РѕС…РѕРґС‹
+  "6:sneakv2b10": 16,  // Р›Р°Р№РјР°Р±СѓС‚СЃС‹
+  "6:santa2": 16,      // РўСЂРµСЃРєСѓРЅС‹
+  "6:sneakv2b05": 17,  // РљСЂРѕСЃС‹
+  "6:mummy": 17,       // РџРµСЃРєРѕС…РѕРґС‹
+  "6:infernal": 17,    // РҐРѕРґСЏС‰РёРµ РїРѕ СѓРіР»СЏРј
+  "6:franky": 17,      // Р•РґРёРЅРµРЅРёРµ СЃ РїРѕС‡РІРѕР№
+  "6:boot02": 17,      // РўР°РЅР¶РµСЂС‹
+  "6:anarch": 20,      // РљРµРґРѕРЅС‹
+  "6:avenger": 20,     // РЎРёРЅСЊР”РёРєР°С‚С‹
+  "6:slip99": 40,      // РЁР»РµРїР°РЅС‹
+}));
+
+function restoredWearBonusText(selectedWear) {
+  const fallback = RESTORED_WEAR_BONUS_TEXTS.get(wearBonusKey(selectedWear));
+  if (!fallback) return "";
+  const item = selectedWear?.item || {};
+  const existing = stringOr(item.desca ?? item.descAdditional ?? item.da, "");
+  return existing.trim() ? "" : fallback;
+}
+
+function wearWithRestoredBonusText(selectedWear) {
+  const fallback = restoredWearBonusText(selectedWear);
+  if (!fallback) return selectedWear?.item || {};
+  return { ...(selectedWear?.item || {}), desca: fallback, descAdditional: fallback };
+}
+
+function shotgunJumpPercentForWear(selectedWear) {
+  return numberOr(SHOTGUN_JUMP_PERCENT_BY_BOOT.get(wearBonusKey(selectedWear)), 0);
+}
+
+function abilityLevel(profile, abilityId) {
+  let level = 0;
+  for (const ability of profile?.abilities || []) {
+    if (Number(ability?.i) === Number(abilityId)) level = Math.max(level, numberOr(ability?.l, 0));
   }
+  return Math.max(0, Math.min(5, level));
+}
 
-  if (safeTokenEquals(code, CREATE_CODE) && name) {
-    let account;
-    try {
-      account = await createNewAccount(name);
-    } catch (error) {
-      console.error("[game-link] create failed", error);
-      return {
-        status: 500,
-        html: "<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d</h1><p>\u0417\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u0430\u0437\u0443 \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043b\u043e\u0433 API.</p>"
-      };
+function addProtectionBonuses(target, source = {}) {
+  for (const [key, value] of Object.entries(source)) {
+    target[key] = numberOr(target[key], 0) + numberOr(value, 0);
+  }
+}
+
+function addProtectionBonus(target, key, amount) {
+  if (!key) return;
+  target[key] = numberOr(target[key], 0) + numberOr(amount, 0);
+}
+
+const WEAR_PROTECTION_TERMS = [
+  { key: "automatic", pattern: /автомат/ },
+  { key: "machinegun", pattern: /пулем/ },
+  { key: "pistol", pattern: /пистолет/ },
+  { key: "shotgun", pattern: /дробов/ },
+  { key: "sniper", pattern: /снайпер|анаконд/ },
+  { key: "rocket", pattern: /ракет|троллебуз/ },
+  { key: "grenade", pattern: /гранатом|гранатин/ },
+  { key: "snow", pattern: /ледом|снегом/ },
+  { key: "flamer", pattern: /огнем|поджига/ },
+  { key: "melee", pattern: /ближнего\s+боя|ручн|лезви/ },
+];
+
+const ALL_WEAR_PROTECTION_KEYS = WEAR_PROTECTION_TERMS.map((term) => term.key);
+const ALL_DAMAGE_RANGES = ["short", "medium", "long"];
+const WEAR_DAMAGE_TERMS = [
+  { types: [4], pattern: /автомат/ },
+  { types: [6], pattern: /пулем/ },
+  { types: [3], pattern: /пистолет/ },
+  { types: [7], pattern: /дробов/ },
+  { types: [10], pattern: /снайпер|анаконд/ },
+  { types: [8], pattern: /ракет|троллебуз/ },
+  { types: [9, 15], pattern: /гранатом|гранатин/ },
+  { types: [11], pattern: /ледом|снегом/ },
+  { types: [5], pattern: /огнем/ },
+  { types: [1, 2], pattern: /ближнего\s+боя|ручн|лезви/ },
+];
+
+function protectionKeyFromText(text) {
+  const normalized = stringOr(text, "").toLowerCase();
+  return WEAR_PROTECTION_TERMS.find((term) => term.pattern.test(normalized))?.key || "";
+}
+
+function protectionKeysFromText(text) {
+  const normalized = stringOr(text, "").toLowerCase();
+  if (/всех\s+типов\s+(?:оруж|оруд)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
+  const keys = WEAR_PROTECTION_TERMS
+    .filter((term) => term.pattern.test(normalized))
+    .map((term) => term.key);
+  return Array.from(new Set(keys));
+}
+
+function damageTypesFromText(text) {
+  const normalized = stringOr(text, "").toLowerCase();
+  const types = new Set();
+  for (const term of WEAR_DAMAGE_TERMS) {
+    if (!term.pattern.test(normalized)) continue;
+    for (const type of term.types) types.add(type);
+  }
+  return Array.from(types);
+}
+
+function damageRangeFromText(text) {
+  const normalized = stringOr(text, "").toLowerCase();
+  if (/ближн/.test(normalized)) return "short";
+  if (/средн|сред\./.test(normalized)) return "medium";
+  if (/дальн/.test(normalized)) return "long";
+  return "";
+}
+
+function addWearProtectionBonuses(modifiers, keys, amount, range = "") {
+  const value = numberOr(amount, 0);
+  if (value === 0 || !keys.length) return;
+  if (range) {
+    if (!modifiers.rangeProtections) modifiers.rangeProtections = { short: {}, medium: {}, long: {} };
+    if (!modifiers.rangeProtections[range]) modifiers.rangeProtections[range] = {};
+    for (const key of keys) addProtectionBonus(modifiers.rangeProtections[range], key, value);
+    return;
+  }
+  for (const key of keys) addProtectionBonus(modifiers.protections, key, value);
+}
+
+function applyWearProtectionBonuses(modifiers, text) {
+  let rangeContext = "";
+  let protectionList = false;
+  for (const rawLine of stringOr(text, "").toLowerCase().split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      protectionList = false;
+      continue;
     }
-    const session = sessionPayload(account, requestOrigin);
-    console.log(`[game-link] create player=${account.id} name=${account.name} link=${session.loginLink}`);
-    return {
-      status: 200,
-      html: `<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0441\u043e\u0437\u0434\u0430\u043d</h1>
-<p>\u041d\u0438\u043a: <b>${escapeHtml(account.name)}</b></p>
-<p>\u0421\u0442\u0430\u0440\u0442: \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${account.level}, \u043c\u043e\u043d\u0435\u0442\u044b ${account.money}, \u043e\u043f\u044b\u0442 ${account.exp}</p>
-<p>\u0418\u0433\u0440\u043e\u0432\u0430\u044f \u0441\u0441\u044b\u043b\u043a\u0430:</p>
-<p><code>${escapeHtml(session.loginLink)}</code></p>
-<p>SessionAuth:</p>
-<p><code>${escapeHtml(session.sessionAuth)}</code></p>
-<p>\u0412 \u043a\u043b\u0438\u0435\u043d\u0442\u0435 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0432\u0445\u043e\u0434 \u0447\u0435\u0440\u0435\u0437 \u043f\u043e\u043b\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443, \u0432\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u044d\u0442\u0443 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 "\u0412\u043e\u0439\u0442\u0438".</p>`
-    };
-  }
 
-  return {
-    status: 200,
-    html: `<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430 Contra City</h1>
-<form method="GET" action="/create">
-  <label>\u041a\u043e\u0434<br><input name="code" value="${escapeHtml(code)}" style="width:320px"></label><br><br>
-  <label>\u041d\u0438\u043a<br><input name="name" value="ContraCity" maxlength="24" style="width:320px"></label><br><br>
-  <button type="submit">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0430\u043a\u043a\u0430\u0443\u043d\u0442</button>
-</form>`
+    const lineRange = damageRangeFromText(line);
+    if (/защит/.test(line) && lineRange) rangeContext = lineRange;
+    if (/защит.*от\s*:/.test(line)) {
+      protectionList = true;
+      continue;
+    }
+
+    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*защит[аы]?\s+от\s+(.+)/);
+    if (prefixMatch) {
+      addWearProtectionBonuses(modifiers, protectionKeysFromText(prefixMatch[2]), prefixMatch[1], lineRange);
+      continue;
+    }
+
+    const suffixMatch = line.match(/защит[аы]?\s+от\s+(.+?)\s*([+-]?\d+)\s*%/);
+    if (suffixMatch) {
+      addWearProtectionBonuses(modifiers, protectionKeysFromText(suffixMatch[1]), suffixMatch[2], lineRange);
+      continue;
+    }
+
+    if (protectionList) {
+      const listMatch = line.match(/(.+?)\s*([+-]?\d+)\s*%/);
+      if (listMatch) {
+        addWearProtectionBonuses(modifiers, protectionKeysFromText(listMatch[1]), listMatch[2], rangeContext);
+      }
+    }
+  }
+}
+
+function addWearDamageBonuses(modifiers, types, ranges, amount) {
+  const value = numberOr(amount, 0);
+  if (value <= 0 || !types.length || !ranges.length) return;
+  for (const range of ranges) {
+    modifiers.damageBonuses.push({ types, range, amount: value });
+  }
+}
+
+function applyWearDamageBonuses(modifiers, text) {
+  let rangeContext = "";
+  let protectionList = false;
+  for (const rawLine of stringOr(text, "").toLowerCase().split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      protectionList = false;
+      continue;
+    }
+    if (/защит.*от\s*:/.test(line)) {
+      protectionList = true;
+      continue;
+    }
+    if (/защит/.test(line)) continue;
+    if (protectionList && !/урон/.test(line)) continue;
+    if (/урон/.test(line)) protectionList = false;
+
+    const lineRange = damageRangeFromText(line);
+    if (/урон\s+на\s+/.test(line) && lineRange) rangeContext = lineRange;
+
+    const amountMatch = line.match(/\+(\d+)\s*%?/);
+    if (!amountMatch) continue;
+
+    const types = damageTypesFromText(line);
+    if (!types.length) continue;
+
+    const ranges = lineRange ? [lineRange] : (rangeContext ? [rangeContext] : ALL_DAMAGE_RANGES);
+    addWearDamageBonuses(modifiers, types, ranges, amountMatch[1]);
+  }
+}
+
+function shotgunJumpBonusFromText(text) {
+  const normalized = stringOr(text, "").toLowerCase();
+  if (!/(прыж|jump)/.test(normalized) || !/(дробов|shotgun)/.test(normalized)) return 0;
+  if (/огром|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
+  if (/выше\s+средн|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
+  if (/мал|небольш|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
+  if (/больш|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
+  return SHOTGUN_RECOIL_JUMP_BONUS;
+}
+
+function applyJumpPercentBonuses(modifiers, text) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?прыж/g)) {
+    modifiers.jumpPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*to\s+jump/g)) {
+    modifiers.jumpPercent += numberOr(match[1], 0);
+  }
+}
+
+function formatProtectionBonuses(protections = {}) {
+  const entries = Object.entries(protections)
+    .filter(([, value]) => numberOr(value, 0) !== 0)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return entries.length ? entries.map(([key, value]) => `${key}:${value}`).join(",") : "none";
+}
+
+function formatRangeProtectionBonuses(rangeProtections = {}) {
+  const entries = [];
+  for (const range of ALL_DAMAGE_RANGES) {
+    for (const [key, value] of Object.entries(rangeProtections?.[range] || {})) {
+      if (numberOr(value, 0) !== 0) entries.push(`${range}.${key}:${value}`);
+    }
+  }
+  return entries.length ? entries.sort().join(",") : "none";
+}
+
+function formatDamageBonuses(bonuses = []) {
+  const entries = bonuses
+    .map((bonus) => `${bonus.range}:${(bonus.types || []).join("+")}:${numberOr(bonus.amount, 0)}`)
+    .filter((entry) => !entry.endsWith(":0"))
+    .sort();
+  return entries.length ? entries.join(",") : "none";
+}
+
+function applyWearTextBonuses(modifiers, item = {}, options = {}) {
+  const text = decodeLegacyBonusText(item.desca ?? item.descAdditional ?? item.da).toLowerCase();
+  if (!text) return;
+
+  applyWearProtectionBonuses(modifiers, text);
+  applyWearDamageBonuses(modifiers, text);
+  applyJumpPercentBonuses(modifiers, text);
+
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?здоров(?:ью|ья|ье)?/g)) {
+    modifiers.healthPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/здоров(?:ье|ью|ья)?[ \t]*\+(\d+)[ \t]*%/g)) {
+    modifiers.healthPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/жизн[ьи][ \t]*\+(\d+)[ \t]*%/g)) {
+    modifiers.healthPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?жизн[ьи]/g)) {
+    modifiers.healthPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/\+(\d+)\s*к\s*здоров(?:ью|ья|ье)?/g)) {
+    modifiers.healthFlat += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*скорости/g)) {
+    modifiers.speedPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*брон[еия]/g)) {
+    modifiers.armorPercent += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/\+(\d+)\s*к\s*броне/g)) {
+    modifiers.armorFlat += numberOr(match[1], 0);
+  }
+  for (const match of text.matchAll(/брон[яе][ \t]*\+(\d+)/g)) {
+    modifiers.armorFlat += numberOr(match[1], 0);
+  }
+  if (!options.suppressShotgunJump) {
+    modifiers.shotgunJumpBonus += shotgunJumpBonusFromText(text);
+  }
+}
+
+function gameplayModifiersForProfile(profile = null) {
+  const modifiers = {
+    healthFlat: 0,
+    healthPercent: 0,
+    healthFloor: 0,
+    armorFlat: 0,
+    armorPercent: 0,
+    damageReductionPercent: 0,
+    speedPercent: 0,
+    clientSpeedBonus: 0,
+    clientSpeedFloor: 0,
+    jumpFlat: 0,
+    jumpPercent: 0,
+    jumpFloor: 0,
+    shotgunJumpBonus: 0,
+    weaponSpeedPercent: 0,
+    weaponRapidityPercent: 0,
+    weaponCritPercent: 0,
+    weaponHeadDamagePercent: 0,
+    weaponAccuracyFlat: 0,
+    weaponAmmoPercent: 0,
+    weaponMinDamageFlat: 0,
+    weaponMaxDamageFlat: 0,
+    damageBonuses: [],
+    protections: {},
+    rangeProtections: { short: {}, medium: {}, long: {} },
+    completedSets: [],
   };
-}
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function tryServeAssetBundle(req, res, url) {
-  const rawPath = decodeURIComponent(url.pathname || "/").replace(/^\/+/, "");
-  if (!rawPath.toLowerCase().startsWith("assetbundles/") && !rawPath.toLowerCase().endsWith(".unity3d")) {
-    return false;
+  if (APPLY_TRAINING_ABILITY_BONUSES) {
+    for (const [abilityIdText, bonus] of Object.entries(ABILITY_BONUS_LEVELS)) {
+    const level = abilityLevel(profile, Number(abilityIdText));
+    if (level <= 0) continue;
+    const index = level - 1;
+    modifiers.healthFlat += numberOr(bonus.healthFlat?.[index], 0);
+    modifiers.armorFlat += numberOr(bonus.armorFlat?.[index], 0);
+    modifiers.damageReductionPercent += numberOr(bonus.damageReductionPercent?.[index], 0);
+    modifiers.speedPercent += numberOr(bonus.speedPercent?.[index], 0);
+    modifiers.weaponSpeedPercent += numberOr(bonus.weaponSpeedPercent?.[index], 0);
+    modifiers.weaponRapidityPercent += numberOr(bonus.weaponRapidityPercent?.[index], 0);
+    modifiers.weaponCritPercent += numberOr(bonus.weaponCritPercent?.[index], 0);
+    modifiers.weaponHeadDamagePercent += numberOr(bonus.weaponHeadDamagePercent?.[index], 0);
+    modifiers.weaponAccuracyFlat += numberOr(bonus.weaponAccuracyFlat?.[index], 0);
+    modifiers.weaponAmmoPercent += numberOr(bonus.weaponAmmoPercent?.[index], 0);
+    modifiers.weaponMinDamageFlat += numberOr(bonus.weaponMinDamageFlat?.[index], 0);
+      modifiers.weaponMaxDamageFlat += numberOr(bonus.weaponMaxDamageFlat?.[index], 0);
+    }
   }
 
-  const fileName = path.basename(rawPath);
-  if (!fileName || fileName.includes("..") || !fileName.toLowerCase().endsWith(".unity3d")) {
-    sendJson(res, { ok: false, error: "invalid_asset_bundle" }, 400);
-    return true;
-  }
-
-  if (!ASSET_BUNDLE_NAMES.has(fileName.toLowerCase())) {
-    sendJson(res, { ok: false, error: "asset_bundle_not_allowed", file: fileName }, 404);
-    return true;
-  }
-
-  const filePath = path.join(ASSET_BUNDLE_DIR, fileName);
-  if (!fs.existsSync(filePath)) {
-    sendJson(res, { ok: false, error: "asset_bundle_not_found", file: fileName }, 404);
-    return true;
-  }
-
-  const stat = fs.statSync(filePath);
-  res.writeHead(200, {
-    "content-type": "application/octet-stream",
-    "content-length": String(stat.size),
-    "cache-control": "no-store, no-cache, must-revalidate",
-    "pragma": "no-cache",
-    "expires": "0"
-  });
-  fs.createReadStream(filePath).pipe(res);
-  return true;
-}
-
-function readJsonBody(req, limitBytes = 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > limitBytes) {
-        reject(new Error("body_too_large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
+  const selectedWearList = selectedWears(profile);
+  for (const selectedWear of selectedWearList) {
+    const shotgunJumpPercent = shotgunJumpPercentForWear(selectedWear);
+    applyWearTextBonuses(modifiers, wearWithRestoredBonusText(selectedWear), {
+      suppressShotgunJump: shotgunJumpPercent > 0,
     });
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8").trim();
-      if (!raw) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error("invalid_json"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-function readRawBody(req, limitBytes = 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > limitBytes) {
-        reject(new Error("body_too_large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
-
-function parseMultipartForm(raw, contentType) {
-  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || "");
-  const boundary = match?.[1] || match?.[2] || "";
-  if (!boundary) return new URLSearchParams();
-  const text = raw.toString("utf8");
-  const result = new URLSearchParams();
-  for (const part of text.split(`--${boundary}`)) {
-    if (!part || part === "--" || part === "--\r\n") continue;
-    const headerEnd = part.indexOf("\r\n\r\n");
-    if (headerEnd < 0) continue;
-    const headers = part.slice(0, headerEnd);
-    const nameMatch = /name="([^"]+)"/i.exec(headers);
-    if (!nameMatch) continue;
-    let value = part.slice(headerEnd + 4);
-    value = value.replace(/\r\n--$/, "").replace(/\r\n$/, "");
-    result.set(nameMatch[1], value);
+    modifiers.jumpPercent += shotgunJumpPercent;
   }
+
+  const selectedWearKeys = new Set(selectedWearList.map(wearBonusKey));
+  for (const definition of RESTORED_SET_BONUS_DEFINITIONS) {
+    if (!definition.required.every((key) => selectedWearKeys.has(key))) continue;
+    modifiers.completedSets.push(definition.id);
+    if (definition.bonusText) applyWearTextBonuses(modifiers, { desca: definition.bonusText });
+    modifiers.healthFlat += numberOr(definition.healthFlat, 0);
+    modifiers.healthPercent += numberOr(definition.healthPercent, 0);
+    modifiers.healthFloor = Math.max(modifiers.healthFloor, numberOr(definition.healthFloor, 0));
+    modifiers.speedPercent += numberOr(definition.speedPercent, 0);
+    modifiers.clientSpeedBonus += numberOr(definition.clientSpeedBonus, 0);
+    modifiers.clientSpeedFloor = Math.max(modifiers.clientSpeedFloor, numberOr(definition.clientSpeedFloor, 0));
+    modifiers.jumpFlat += numberOr(definition.jumpFlat, 0);
+    modifiers.jumpFloor = Math.max(modifiers.jumpFloor, numberOr(definition.jumpFloor, 0));
+    modifiers.shotgunJumpBonus += numberOr(definition.shotgunJumpBonus, 0);
+    modifiers.weaponSpeedPercent += numberOr(definition.weaponSpeedPercent, 0);
+    modifiers.weaponRapidityPercent += numberOr(definition.weaponRapidityPercent, 0);
+    modifiers.weaponCritPercent += numberOr(definition.weaponCritPercent, 0);
+    modifiers.weaponAmmoPercent += numberOr(definition.weaponAmmoPercent, 0);
+    modifiers.weaponMinDamageFlat += numberOr(definition.weaponMinDamageFlat, 0);
+    modifiers.weaponMaxDamageFlat += numberOr(definition.weaponMaxDamageFlat, 0);
+    modifiers.damageBonuses.push(...(definition.damageBonuses || []));
+    addProtectionBonuses(modifiers.protections, definition.protections);
+    for (const range of ALL_DAMAGE_RANGES) {
+      addProtectionBonuses(modifiers.rangeProtections[range], definition.rangeProtections?.[range]);
+    }
+  }
+
+  for (const item of selectedWeapons(profile) || []) {
+    const override = WEAPON_STAT_OVERRIDES[weaponCanonicalKey(item)] || {};
+    const weapon = { ...item, ...override };
+    modifiers.jumpFlat += numberOr(weapon.jumpFlat, 0);
+    modifiers.shotgunJumpBonus += numberOr(weapon.shotgunJumpBonus, 0);
+    modifiers.jumpFloor = Math.max(modifiers.jumpFloor, numberOr(weapon.jumpFloor, 0));
+  }
+
+  return modifiers;
+}
+
+function applyWeaponGameplayBonuses(item, profile = null) {
+  const modifiers = gameplayModifiersForProfile(profile);
+  const result = { ...item };
+  const weaponType = numberOr(result.wt, 0);
+
+  for (const bonus of modifiers.damageBonuses) {
+    if (!bonus.types.includes(weaponType)) continue;
+    const amount = numberOr(bonus.amount, 0);
+    if (bonus.range === "short") {
+      result.smindam = numberOr(result.smindam, 0) + amount;
+      result.smaxdam = numberOr(result.smaxdam, 0) + amount;
+    } else if (bonus.range === "medium") {
+      result.mmindam = numberOr(result.mmindam, 0) + amount;
+      result.mmaxdam = numberOr(result.mmaxdam, 0) + amount;
+    } else if (bonus.range === "long") {
+      result.lmindam = numberOr(result.lmindam, 0) + amount;
+      result.lmaxdam = numberOr(result.lmaxdam, 0) + amount;
+    }
+  }
+
+  const minDamageFlat = numberOr(modifiers.weaponMinDamageFlat, 0);
+  const maxDamageFlat = numberOr(modifiers.weaponMaxDamageFlat, 0);
+  if (minDamageFlat !== 0) {
+    result.smindam = numberOr(result.smindam, 0) + minDamageFlat;
+    result.mmindam = numberOr(result.mmindam, 0) + minDamageFlat;
+    result.lmindam = numberOr(result.lmindam, 0) + minDamageFlat;
+  }
+  if (maxDamageFlat !== 0) {
+    result.smaxdam = numberOr(result.smaxdam, 0) + maxDamageFlat;
+    result.mmaxdam = numberOr(result.mmaxdam, 0) + maxDamageFlat;
+    result.lmaxdam = numberOr(result.lmaxdam, 0) + maxDamageFlat;
+  }
+
+  const ammoPercent = numberOr(modifiers.weaponAmmoPercent, 0);
+  if (ammoPercent > 0 && !isColdArmsWeaponType(weaponType)) {
+    result.ammo_tot = Math.max(
+      numberOr(result.ammo_tot, 0),
+      Math.round(numberOr(result.ammo_tot, result.ammo ?? 0) * (1 + ammoPercent / 100))
+    );
+  }
+
+  const critPercent = numberOr(modifiers.weaponCritPercent, 0);
+  if (critPercent > 0) {
+    result.krit = numberOr(result.krit, 0) + critPercent;
+  }
+
+  const accuracyFlat = numberOr(modifiers.weaponAccuracyFlat, 0);
+  if (accuracyFlat > 0) {
+    result.dev = clientSafeWeaponDeviation(
+      Math.round(numberOr(result.dev, 0) - accuracyFlat),
+      weaponType
+    );
+  }
+
+  const movementSpeedPercentBonus = numberOr(modifiers.speedPercent, 0);
+  const weaponSpeedPercentBonus = numberOr(modifiers.weaponSpeedPercent, 0);
+  const totalSpeedPercentBonus = movementSpeedPercentBonus + weaponSpeedPercentBonus;
+  if (totalSpeedPercentBonus !== 0) {
+    result.wsp = Math.round(weaponSpeedPercent(result) + totalSpeedPercentBonus);
+  }
+
   return result;
 }
 
-async function mergeAjaxBodyParams(req, url) {
-  if (req.method !== "POST") return url;
-  const raw = await readRawBody(req, 512 * 1024);
-  if (!raw.length) return url;
-  const contentType = String(req.headers["content-type"] || "");
-  let params = new URLSearchParams();
-  if (contentType.includes("multipart/form-data")) {
-    params = parseMultipartForm(raw, contentType);
-  } else if (contentType.includes("application/x-www-form-urlencoded")) {
-    params = new URLSearchParams(raw.toString("utf8"));
-  } else {
-    params = new URLSearchParams(raw.toString("utf8"));
-  }
-  for (const [key, value] of params.entries()) {
-    url.searchParams.set(key, value);
-  }
-  return url;
+function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null) {
+  const base = { ...fallback, ...(item || {}), ws: slot };
+  const override = WEAPON_STAT_OVERRIDES[weaponCanonicalKey(base)];
+  const mergedBase = override
+    ? { ...base, ...override, ws: slot, w_id: numberOr(override.w_id, base.w_id ?? base.id), id: numberOr(override.id, base.id ?? base.w_id) }
+    : base;
+  // The API persists the complete upgraded weapon payload. While eD is active,
+  // those exact fields win over canonical base stats once and are not regenerated.
+  const merged = isActiveWorkshopWeaponUpgrade(base)
+    ? {
+        ...mergedBase,
+        ...base,
+        ws: slot,
+        w_id: numberOr(mergedBase.w_id, base.w_id ?? base.id),
+        id: numberOr(mergedBase.id, base.id ?? base.w_id),
+      }
+    : mergedBase;
+  return normalizeMeleeWeaponStats(applyWeaponGameplayBonuses(merged, profile));
 }
 
-function tryServeClanArm(req, res, url) {
-  if (!url.pathname.startsWith("/clan-arm/") || !url.pathname.endsWith(".png")) return false;
-  const armId = normalizeClanArmId(url.pathname.match(/\/clan-arm\/(\d+)\.png$/)?.[1]);
-  const filePath = clanArmAssetPath(armId);
-  if (!filePath || !fs.existsSync(filePath)) {
-    res.writeHead(404, {
-      "content-type": "text/plain; charset=utf-8",
-      "cache-control": "no-store"
-    });
-    res.end("clan arm not found");
-    return true;
+function playerRuntimeStats(profile = null) {
+  const modifiers = gameplayModifiersForProfile(profile);
+  const baseHealth = Number(process.env.DEFAULT_PLAYER_HEALTH || 100);
+  const baseEnergy = Math.max(0, numberOr(process.env.DEFAULT_PLAYER_ENERGY, 0));
+  const baseSpeed10 = Number(process.env.DEFAULT_PLAYER_SPEED10 || 100);
+  const baseJump = Number(process.env.DEFAULT_PLAYER_JUMP || 15);
+  const calculatedHealth = Math.round((baseHealth + modifiers.healthFlat) * (1 + modifiers.healthPercent / 100));
+  const maxHealth = Math.max(1, calculatedHealth, numberOr(modifiers.healthFloor, 0));
+  const maxEnergy = Math.min(MAX_PLAYER_ENERGY, Math.max(0, Math.round((baseEnergy + modifiers.armorFlat) * (1 + modifiers.armorPercent / 100))));
+  const baseClientSpeed = Math.max(1, Math.floor(baseSpeed10 / 10));
+  // ActorInfo[95] is integer client speed; exact movement percents are emitted through weapon [79][78].
+  const rawClientSpeed = baseClientSpeed + modifiers.clientSpeedBonus;
+  const roundedClientSpeed = Math.round(rawClientSpeed);
+  const clientSpeed = Math.max(1, roundedClientSpeed, numberOr(modifiers.clientSpeedFloor, 0));
+  const speed10 = clientSpeed * 10;
+  const jumpBeforePercent = Math.max(1, baseJump + modifiers.jumpFlat + modifiers.shotgunJumpBonus);
+  const jumpWithPercent = Math.round(jumpBeforePercent * (1 + modifiers.jumpPercent / 100));
+  const rawJump = Math.max(
+    1,
+    jumpWithPercent,
+    numberOr(modifiers.jumpFloor, 0)
+  );
+  const jump = Math.min(MAX_PLAYER_JUMP, rawJump);
+  return { maxHealth, maxEnergy, speed10, clientSpeed, jump, jumpCap: MAX_PLAYER_JUMP, modifiers };
+}
+
+function sessionRuntimeStats(session = null) {
+  return playerRuntimeStats(session?.loadedProfile || null);
+}
+
+function makeWeaponDictionaryRaw(profile = null, slotLimit = JOIN_LOADOUT_SLOT_LIMIT, options = {}) {
+  const allSlots = weaponSlotsForProfile(profile);
+  const normalizedLimit = Math.max(1, Math.min(7, Number(slotLimit || JOIN_LOADOUT_SLOT_LIMIT)));
+  const joinSlots = allSlots.slice(0, normalizedLimit);
+  if (options.logCompact !== false && joinSlots.length < allSlots.length) {
+    console.log(`[loadout] compact join slots=${joinSlots.map(([slot]) => slot).join(",")} of=${allSlots.length} limit=${normalizedLimit}`);
   }
-  const png = fs.readFileSync(filePath);
-  res.writeHead(200, {
-    "content-type": "image/png",
-    "content-length": String(png.length),
-    "cache-control": "no-store"
+
+  return rawTypedDictionary(0x69, 0x68, joinSlots.map(([slot, item]) => ({
+    keyBody: i32(slot - 1),
+    valueBody: weaponBodyFromItem(item, slot - 1, profile, options),
+  })));
+}
+
+function makeWearDictionaryRaw(profile = null) {
+  const selected = selectedWears(profile);
+  if (!selected.length) return null;
+  return rawTypedDictionary(0x69, 0x68, selected.map(({ item, wearType }, index) => ({
+    keyBody: i32(itemId(item) || index),
+    valueBody: rawHashtableBody([
+      { key: rawByte(99), value: rawString(stringOr(item.sn ?? item.sname, "")) },
+      { key: rawByte(98), value: rawInt(numberOr(item.wt, wearType)) },
+    ]),
+  })));
+}
+
+function makeEnhancerDictionaryRaw(profile = null) {
+  const selected = selectedEnhancers(profile);
+  if (!selected.length) return null;
+  // CombatPlayer.ContainsEnhancer() only checks ActorInfo[108] dictionary keys.
+  return rawTypedDictionary(0x62, 0x68, selected.map(({ enhancerType }) => ({
+    keyBody: Buffer.from([enhancerType & 0xff]),
+    valueBody: rawHashtableBody([]),
+  })));
+}
+
+function makeTauntDictionaryRaw(profile = null) {
+  const selected = selectedTaunts(profile);
+  if (!selected.length) return null;
+  // CombatPlayer.Init() casts ActorInfo[106] to Dictionary<int, int>.
+  return rawTypedDictionary(0x69, 0x69, selected.map(({ slot, tauntId }) => ({
+    keyBody: i32(slot),
+    valueBody: i32(tauntId),
+  })));
+}
+
+function makeWeaponRuntimeState(profile = null) {
+  const states = new Map();
+  for (const [slot, item] of weaponSlotsForProfile(profile)) {
+    const fallback = defaultWeaponForSlot(slot);
+    const merged = mergedWeaponForSlot(item, fallback, slot, profile);
+    const maxLoadedAmmo = weaponMaxLoadedAmmo(merged, fallback);
+    const maxAmmoReserve = weaponMaxAmmoReserve(merged, fallback);
+    const rapidity = weaponRapidityForProfile(merged, fallback, profile);
+    const reloadTimeMs = numberOr(merged.rt, fallback.rt ?? 0);
+    const impact = weaponImpactDefinition(merged);
+    states.set(slot, {
+      slot,
+      index: slot - 1,
+      weaponId: numberOr(merged.w_id ?? merged.id, fallback.w_id ?? fallback.id),
+      type: numberOr(merged.wt, fallback.wt),
+      workshopExpiresAt: isActiveWorkshopWeaponUpgrade(merged) ? numberOr(merged.eD, 0) : 0,
+      rapidity,
+      shotIntervalMs: shotIntervalMsFromRapidity(rapidity),
+      nextShotAt: 0,
+      weaponMode: WEAPON_MODE.READY,
+      modeStartedAt: 0,
+      changeDurationMs: WEAPON_CHANGE_DURATION_MS,
+      changeUntil: 0,
+      launchDurationMs: launchDurationMsForSystemName(normalizeSystemName(merged.sn ?? merged.sname, fallback.sn)),
+      shotStartedAt: 0,
+      launchStartedAt: 0,
+      meleeDelayedShotUntil: 0,
+      meleeDelayedShotUsed: false,
+      meleeDistance: isColdArmsWeaponType(merged.wt) ? numberOr(merged.rad, MELEE_DEFAULT_DISTANCE) : 0,
+      meleeAngle: isColdArmsWeaponType(merged.wt) ? numberOr(merged.ang, MELEE_DEFAULT_ANGLE) : 0,
+      activeProjectileShots: new Map(),
+      reloadTimeMs,
+      reloadDurationMs: reloadDurationMsFromRaw(reloadTimeMs),
+      reloadTimer: null,
+      reloadSeq: 0,
+      reloading: false,
+      reloadStartedAt: 0,
+      reloadReadyAt: 0,
+      reloadFullUntil: 0,
+      maxLoadedAmmo,
+      maxAmmoReserve,
+      loadedAmmo: maxLoadedAmmo,
+      ammoReserve: Math.max(0, maxAmmoReserve - maxLoadedAmmo),
+      systemName: normalizeSystemName(merged.sn ?? merged.sname, fallback.sn),
+      impact,
+      impactType: impact?.type ?? IMPACT_TYPE.NONE,
+      crit: numberOr(merged.krit, fallback.krit),
+      deviation: clientSafeWeaponDeviation(merged.dev ?? fallback.dev, numberOr(merged.wt, fallback.wt)),
+      shortDamage: [numberOr(merged.smindam, fallback.smindam), numberOr(merged.smaxdam, fallback.smaxdam)],
+      mediumDamage: [numberOr(merged.mmindam, fallback.mmindam), numberOr(merged.mmaxdam, fallback.mmaxdam)],
+      longDamage: [numberOr(merged.lmindam, fallback.lmindam), numberOr(merged.lmaxdam, fallback.lmaxdam)],
+    });
+  }
+  return states;
+}
+
+function makeDefaultWeaponDictionaryRaw() {
+  return rawTypedDictionary(0x69, 0x68, DEFAULT_LOADOUT_WEAPONS.map((item, index) => ({
+    keyBody: i32(index),
+    valueBody: makeDefaultWeaponBody(index),
+  })));
+}
+
+function makeActorInfoRaw(profile = null, options = {}) {
+  const stats = playerRuntimeStats(profile);
+  const entries = [
+    { key: rawByte(100), value: rawInt(stats.maxHealth) },
+    { key: rawByte(99), value: rawInt(stats.maxEnergy) },
+    { key: rawByte(95), value: rawInt(stats.speed10) },
+    { key: rawByte(94), value: makeWeaponDictionaryRaw(profile, options.weaponSlotLimit ?? JOIN_LOADOUT_SLOT_LIMIT, options) },
+    { key: rawByte(92), value: rawInt(stats.jump) },
+    { key: rawByte(76), value: rawInt(numberOr(profile?.level, Number(process.env.DEFAULT_PLAYER_LEVEL || 1))) },
+    { key: rawByte(36), value: rawBool(process.env.DEFAULT_PLAYER_PREMIUM === "1") },
+  ];
+
+  if (options.includeActorOptionalFields !== false) {
+    const clanId = numberOr(profile?.clan?.cid ?? profile?.clan?.id, 0);
+    const clanArmId = numberOr(profile?.clan?.aid ?? profile?.clan?.armId, 0);
+    const clanTag = stringOr(profile?.clan?.t ?? profile?.clan?.tag, "");
+    if (clanId > 0) entries.push({ key: rawByte(8), value: rawInt(clanId) });
+    entries.push(
+      { key: rawByte(6), value: rawString(clanTag) },
+      { key: rawByte(5), value: rawInt(clanArmId) },
+    );
+  }
+
+  if (options.includeWears !== false && INCLUDE_JOIN_WEARS) {
+    const wears = makeWearDictionaryRaw(profile);
+    if (wears) entries.push({ key: rawByte(30), value: wears });
+  }
+
+  if (options.includeTaunts !== false) {
+    const taunts = makeTauntDictionaryRaw(profile);
+    if (taunts) entries.push({ key: rawByte(106), value: taunts });
+  }
+
+  if (options.includeEnhancers !== false && INCLUDE_BATTLE_ENHANCERS) {
+    const enhancers = makeEnhancerDictionaryRaw(profile);
+    if (enhancers) entries.push({ key: rawByte(108), value: enhancers });
+  }
+
+  return rawHashtable(entries);
+}
+
+function getRawValue(parsedHashtable, wantedKey) {
+  if (!parsedHashtable || !parsedHashtable.value || !parsedHashtable.value.entries) return null;
+  for (const entry of parsedHashtable.value.entries) {
+    if (entry.key.value === wantedKey || String(entry.key.value) === String(wantedKey)) {
+      return entry.value.raw;
+    }
+  }
+  return null;
+}
+
+const RAW_OMIT = Symbol("raw-omit");
+
+function hashtableBodyWithReplacements(parsedHashtable, replacements = new Map()) {
+  const entries = [];
+  const used = new Set();
+  for (const entry of parsedHashtable?.value?.entries || []) {
+    const keyValue = entry.key.value;
+    if (replacements.has(keyValue)) {
+      const rawValue = replacements.get(keyValue);
+      if (rawValue !== RAW_OMIT) {
+        entries.push({ key: entry.key.raw, value: rawValue });
+      }
+      used.add(keyValue);
+    } else {
+      entries.push({ key: entry.key.raw, value: entry.value.raw });
+    }
+  }
+  for (const [keyValue, rawValue] of replacements.entries()) {
+    if (used.has(keyValue)) continue;
+    if (rawValue === RAW_OMIT) continue;
+    entries.push({ key: rawByte(keyValue), value: rawValue });
+  }
+  return rawHashtableBody(entries);
+}
+
+function hashtableRawWithReplacements(parsedHashtable, replacements = new Map()) {
+  return rawHashtableFromBody(hashtableBodyWithReplacements(parsedHashtable, replacements));
+}
+
+function actorCredentials(incomingActor) {
+  const authId = Number(htGet(incomingActor, 241)?.value || process.env.DEFAULT_PLAYER_ID || 1);
+  const authKey = String(htGet(incomingActor, 240)?.value || process.env.DEFAULT_PLAYER_KEY || "contra-revive-key");
+  return { authId, authKey };
+}
+
+function profileCacheKeyForActor(incomingActor) {
+  const { authId, authKey } = actorCredentials(incomingActor);
+  return `${authId}:${authKey}`;
+}
+
+function cachedPlayerProfile(incomingActor) {
+  const cached = profileCache.get(profileCacheKeyForActor(incomingActor));
+  if (cached?.profile && Date.now() - cached.loadedAt < PROFILE_CACHE_TTL_MS) {
+    return cached.profile;
+  }
+  return null;
+}
+
+function fallbackPlayerProfile(incomingActor) {
+  const { authId, authKey } = actorCredentials(incomingActor);
+  return {
+    isFallback: true,
+    authId,
+    authKey,
+    name: stringOr(htGet(incomingActor, 242)?.value, process.env.DEFAULT_PLAYER_NAME || "ContraCity"),
+    level: Number(process.env.DEFAULT_PLAYER_LEVEL || 1),
+    view: {},
+    weap: {},
+    taun: {},
+    inventory: [],
+    abilities: [],
+    clan: null,
+    defaultWeapons: [],
+    catalogWeapons: [],
+    catalogWears: [],
+  };
+}
+
+function isFallbackBattleProfile(profile) {
+  return !profile || profile.isFallback === true;
+}
+
+function warmPlayerProfile(incomingActor, reason = "warm") {
+  const cached = cachedPlayerProfile(incomingActor);
+  if (cached) return Promise.resolve(cached);
+
+  const { authId } = actorCredentials(incomingActor);
+  const cacheKey = profileCacheKeyForActor(incomingActor);
+  if (profileLoads.has(cacheKey)) return profileLoads.get(cacheKey);
+
+  console.log(`[profile] warm start id=${authId} reason=${reason}`);
+  const promise = loadPlayerProfile(incomingActor)
+    .catch((error) => {
+      console.log(`[profile] warm failed id=${authId} reason=${reason} ${error.message}`);
+      return fallbackPlayerProfile(incomingActor);
+    })
+    .finally(() => profileLoads.delete(cacheKey));
+  profileLoads.set(cacheKey, promise);
+  return promise;
+}
+
+async function profileForJoin(incomingActor, options = {}) {
+  const cached = cachedPlayerProfile(incomingActor);
+  if (cached && !options.forceRefresh) return { profile: cached, source: "cache" };
+
+  const loading = options.forceRefresh
+    ? loadPlayerProfile(incomingActor, { forceRefresh: true }).catch((error) => {
+        const { authId } = actorCredentials(incomingActor);
+        console.log(`[profile] refresh failed id=${authId} reason=room-join ${error.message}`);
+        return cached || fallbackPlayerProfile(incomingActor);
+      })
+    : warmPlayerProfile(incomingActor, "room-join");
+  const joinWaitMs = options.forceRefresh && !ALLOW_FALLBACK_JOIN_PROFILE
+    ? JOIN_PROFILE_MAX_WAIT_MS
+    : (options.forceRefresh ? Math.max(PROFILE_JOIN_WAIT_MS, JOIN_SELF_PROFILE_WAIT_MS) : PROFILE_JOIN_WAIT_MS);
+  if (joinWaitMs > 0) {
+    const loaded = await Promise.race([
+      loading.then((profile) => (isFallbackBattleProfile(profile) ? null : { profile, source: "loaded" })),
+      new Promise((resolve) => setTimeout(() => resolve(null), joinWaitMs)),
+    ]);
+    if (loaded?.profile) return loaded;
+  }
+
+  if (cached) return { profile: cached, source: "cache", pendingProfile: loading };
+  return { profile: fallbackPlayerProfile(incomingActor), source: "fallback", pendingProfile: loading };
+}
+
+function applyLateProfile(session, profile, incomingActor = null) {
+  if (isFallbackBattleProfile(profile)) return;
+  session.loadedProfile = profile;
+  session.playerId = profile.authId;
+  session.playerAuthKey = profile.authKey || session.playerAuthKey || "";
+  session.playerName = profile.name;
+  session.weaponStates = makeWeaponRuntimeState(profile);
+  if (incomingActor) {
+    updateActorWireData(session, incomingActor, profile, session.lastChannel || 0);
+  }
+  removeDuplicatePlayerSessionsFromAllRooms(session, "late-profile-duplicate");
+  const stats = playerRuntimeStats(profile);
+  if (!session.spawned) {
+    session.health = stats.maxHealth;
+    session.energy = stats.maxEnergy;
+  }
+  console.log(`[profile] late ready actor=${session.actorId} id=${profile.authId} name=${profile.name} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} taunts=${selectedTaunts(profile).length} tauntSlots=${selectedTauntSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} armorPct=${stats.modifiers.armorPercent} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)} wearDmg=${formatDamageBonuses(stats.modifiers.damageBonuses)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
+}
+
+async function fetchApiJson(path) {
+  if (!API_BASE_URL || typeof fetch !== "function") return null;
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers: { accept: "application/json" } });
+  if (!response.ok) throw new Error(`status=${response.status}`);
+  return response.json();
+}
+
+async function postApiJson(path, body) {
+  if (!API_BASE_URL || typeof fetch !== "function") return null;
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
+    },
+    body: JSON.stringify(body || {}),
   });
-  res.end(png);
+  if (!response.ok) throw new Error(`status=${response.status}`);
+  return response.json();
+}
+
+async function loadShopCatalog(query, options = {}) {
+  if (!options.forceRefresh && (shopCatalogCache.weapons.length || shopCatalogCache.wears.length) && Date.now() - shopCatalogCache.loadedAt < CATALOG_CACHE_TTL_MS) {
+    return shopCatalogCache;
+  }
+
+  const payload = await fetchApiJson(`/ajax.php?page=shop&act=items&${query}`);
+  const weapons = Array.isArray(payload?.weap?.items) ? payload.weap.items : [];
+  const wears = Array.isArray(payload?.wear?.items) ? payload.wear.items : [];
+  shopCatalogCache = { loadedAt: Date.now(), weapons, wears };
+  return shopCatalogCache;
+}
+
+async function loadPlayerProfile(incomingActor, options = {}) {
+  const { authId, authKey } = actorCredentials(incomingActor);
+  const cacheKey = `${authId}:${authKey}`;
+  const cached = profileCache.get(cacheKey);
+  if (!options.forceRefresh && cached && Date.now() - cached.loadedAt < PROFILE_CACHE_TTL_MS) {
+    return cached.profile;
+  }
+
+  const query = `ccid=${encodeURIComponent(authId)}&cckey=${encodeURIComponent(authKey)}`;
+  try {
+    const [profilePayload, inventoryPayload, abilitiesPayload, shopCatalog] = await Promise.all([
+      fetchApiJson(`/ajax.php?page=pl&act=i&${query}`),
+      fetchApiJson(`/ajax.php?page=pl&act=inv&${query}`),
+      fetchApiJson(`/ajax.php?page=pl&act=abil&${query}`).catch((error) => {
+        console.log(`[profile] abilities failed id=${authId} ${error.message}`);
+        return { u: [] };
+      }),
+      loadShopCatalog(query, { forceRefresh: options.forceRefresh }).catch((error) => {
+        console.log(`[profile] catalog failed id=${authId} ${error.message}`);
+        return { weapons: [], wears: [] };
+      }),
+    ]);
+
+    const info = profilePayload?.info || {};
+    const clanPayload = profilePayload?.cl || null;
+    const clan = clanPayload
+      ? {
+          cid: numberOr(clanPayload.cid ?? clanPayload.clan_id, 0),
+          aid: numberOr(clanPayload.aid ?? clanPayload.caid, 0),
+          t: stringOr(clanPayload.t ?? clanPayload.ctag, ""),
+          ek: numberOr(clanPayload.ek, 0),
+        }
+      : null;
+    const personalInventory = parseJsonArray(inventoryPayload?.data?.items);
+    const clanInventory = Array.isArray(profilePayload?.clinv) ? profilePayload.clinv : [];
+    const profile = {
+      authId: numberOr(info.u_id, authId),
+      authKey,
+      name: stringOr(info.un, process.env.DEFAULT_PLAYER_NAME || "ContraCity"),
+      level: numberOr(info.lvl, Number(process.env.DEFAULT_PLAYER_LEVEL || 1)),
+      view: profilePayload?.view || {},
+      weap: profilePayload?.weap || {},
+      taun: profilePayload?.taun || {},
+      inventory: [...personalInventory, ...clanInventory],
+      abilities: Array.isArray(abilitiesPayload?.u) ? abilitiesPayload.u : [],
+      defaultWeapons: parseJsonArray(inventoryPayload?.data?.dw),
+      catalogWeapons: shopCatalog.weapons,
+      catalogWears: shopCatalog.wears,
+      clan,
+    };
+    profileCache.set(cacheKey, { loadedAt: Date.now(), profile });
+    const stats = playerRuntimeStats(profile);
+    console.log(`[profile] loaded id=${profile.authId} name=${profile.name} weap=${profileWeaponSelectionSummary(profile.weap)} loadout=${selectedWeaponLoadoutSummary(profile)} weapons=${selectedWeapons(profile)?.length || 0} weaponUpgrades=${selectedWeaponUpgradeSummary(profile)} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} taunts=${selectedTaunts(profile).length} tauntSlots=${selectedTauntSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} abilities=${profile.abilities.length} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} armorPct=${stats.modifiers.armorPercent} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)} wearDmg=${formatDamageBonuses(stats.modifiers.damageBonuses)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
+    return profile;
+  } catch (error) {
+    console.log(`[profile] failed id=${authId} ${error.message}`);
+    return fallbackPlayerProfile(incomingActor);
+  }
+}
+
+function makeActorDataRaw(incomingActor, profile = null, options = {}) {
+  const credentials = actorCredentials(incomingActor);
+  const authId = numberOr(profile?.authId, credentials.authId);
+  const name = stringOr(profile?.name ?? htGet(incomingActor, 242)?.value, process.env.DEFAULT_PLAYER_NAME || "ContraCity");
+  const team = Number(htGet(incomingActor, 239)?.value ?? -1);
+  const entries = [
+    { key: rawByte(242), value: rawString(name) },
+    { key: rawByte(241), value: rawInt(authId) },
+    { key: rawByte(239), value: rawShort(Number.isFinite(team) ? team : -1) },
+    { key: rawByte(96), value: makeActorInfoRaw(profile, options) },
+  ];
+
+  if (INCLUDE_JOIN_ACTOR_ECHO_FIELDS) {
+    const authKey = getRawValue(incomingActor, 240);
+    if (authKey) entries.push({ key: rawByte(240), value: authKey });
+
+    const uniqueId = getRawValue(incomingActor, 32);
+    if (uniqueId) entries.push({ key: rawByte(32), value: uniqueId });
+
+    const serverLogic = getRawValue(incomingActor, 31);
+    if (serverLogic) entries.push({ key: rawByte(31), value: serverLogic });
+  }
+
+  return rawHashtable(entries);
+}
+
+function actorRawForPeer(session) {
+  return session?.peerActorRaw || session?.actorRaw || rawHashtable([]);
+}
+
+function actorJoinPacketBytes(actorId, actorRaw, channel = 0) {
+  const payload = rawEvent(105, [
+    { key: 254, value: rawInt(actorId) },
+    { key: 245, value: actorRaw || rawHashtable([]) },
+  ]);
+  return 12 + makeReliable(0, payload, channel).length;
+}
+
+function actorListJoinResponsePacketBytes(actorId, actorRaw, roomRaw, channel = 0) {
+  const actorList = rawHashtable([{
+    key: rawInt(actorId),
+    value: actorRaw || rawHashtable([]),
+  }]);
+  const payload = rawOperationResponse(255, [
+    { key: 254, value: rawInt(actorId) },
+    { key: 249, value: actorList },
+    { key: 248, value: roomRaw || rawHashtable([]) },
+  ]);
+  return 12 + makeReliable(0, payload, channel).length;
+}
+
+function mandatoryLoadoutActorCandidates(incomingActor, profile) {
+  const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
+  return [
+    { label: "full", options: { weaponSlotLimit: maxSlots, logCompact: false } },
+    { label: "no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false } },
+    { label: "no-weapon-extra-no-actor-optional", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+    { label: "no-wears", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false } },
+    { label: "no-wears-no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false } },
+    { label: "no-wears-no-weapon-extra-no-enhancers", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false, includeEnhancers: false } },
+    { label: "required-actor", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeEnhancers: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+    { label: "required-actor-no-taunts", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeEnhancers: false, includeTaunts: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+    { label: "required-actor-no-taunts-6slots", options: { weaponSlotLimit: Math.min(6, maxSlots), logCompact: false, includeWears: false, includeEnhancers: false, includeTaunts: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+  ].map((candidate) => ({
+    label: candidate.label,
+    slotLimit: candidate.options.weaponSlotLimit,
+    raw: makeActorDataRaw(incomingActor, profile, candidate.options),
+  }));
+}
+
+function actorProfileHasWears(label, wearCount) {
+  const profileLabel = String(label || "");
+  return wearCount > 0 && !profileLabel.startsWith("no-wears") && !profileLabel.startsWith("required-actor");
+}
+
+function actorProfileHasEnhancers(label, enhancerCount) {
+  const profileLabel = String(label || "");
+  return enhancerCount > 0 && INCLUDE_BATTLE_ENHANCERS && !profileLabel.includes("no-enhancers") && !profileLabel.startsWith("required-actor");
+}
+
+function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null, mode = "event") {
+  const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
+  const wearCount = selectedWears(profile).length;
+  const wearList = selectedWearSummary(profile);
+  const enhancerCount = selectedEnhancers(profile).length;
+  const enhancerList = selectedEnhancerSummary(profile);
+  let fallback = null;
+  for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile)) {
+    const eventBytes = actorJoinPacketBytes(actorId, candidate.raw, channel);
+    const joinBytes = actorListJoinResponsePacketBytes(actorId, candidate.raw, roomRaw, channel);
+    const bytes = mode === "join" ? joinBytes : eventBytes;
+    const result = { ...candidate, bytes, eventBytes, joinBytes };
+    fallback = result;
+    if (!ACTOR_JOIN_MAX_PACKET_BYTES || bytes <= ACTOR_JOIN_MAX_PACKET_BYTES) {
+      if (candidate.label !== "full") {
+        const hasWears = actorProfileHasWears(candidate.label, wearCount);
+        const hasEnhancers = actorProfileHasEnhancers(candidate.label, enhancerCount);
+        console.log(`[loadout] ${mode} actor compact actor=${actorId} profile=${candidate.label} slots=${candidate.slotLimit}/${maxSlots} wears=${wearCount} hasWears=${hasWears ? "yes" : "no"} wearList=${wearList} enhancers=${enhancerCount} hasEnhancers=${hasEnhancers ? "yes" : "no"} enhancerList=${enhancerList} bytes=${bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${eventBytes} join=${joinBytes}`);
+      }
+      return result;
+    }
+  }
+  if (fallback && ACTOR_JOIN_MAX_PACKET_BYTES) {
+    const hasWears = actorProfileHasWears(fallback.label, wearCount);
+    const hasEnhancers = actorProfileHasEnhancers(fallback.label, enhancerCount);
+    console.log(`[warn] ${mode} actor payload over budget actor=${actorId} profile=${fallback.label} slots=${fallback.slotLimit}/${maxSlots} wears=${wearCount} hasWears=${hasWears ? "yes" : "no"} wearList=${wearList} enhancers=${enhancerCount} hasEnhancers=${hasEnhancers ? "yes" : "no"} enhancerList=${enhancerList} bytes=${fallback.bytes}/${ACTOR_JOIN_MAX_PACKET_BYTES} event=${fallback.eventBytes} join=${fallback.joinBytes}`);
+  }
+  return fallback || { raw: rawHashtable([]), label: "empty", slotLimit: 0, bytes: actorJoinPacketBytes(actorId, rawHashtable([]), channel) };
+}
+
+function updateActorWireData(session, incomingActor, profile, channel = 0) {
+  session.actorJoinParam = incomingActor;
+  session.actorRaw = makeActorDataRaw(incomingActor, profile, {
+    weaponSlotLimit: FULL_LOADOUT_SLOT_LIMIT,
+  });
+  const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event");
+  const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join");
+  session.peerActorRaw = peerActor.raw;
+  session.peerActorLoadoutSlots = peerActor.slotLimit;
+  session.peerActorRawBytes = peerActor.bytes;
+  session.peerActorProfile = peerActor.label;
+  session.joinActorRaw = joinActor.raw;
+  session.joinActorLoadoutSlots = joinActor.slotLimit;
+  session.joinActorRawBytes = joinActor.bytes;
+  session.joinActorProfile = joinActor.label;
+  session.actorWireSourceProfile = profile;
+  session.actorWearCount = selectedWears(profile).length;
+  session.actorWearSummary = selectedWearSummary(profile);
+  session.actorTauntCount = selectedTaunts(profile).length;
+  session.actorTauntSummary = selectedTauntSummary(profile);
+  session.actorEnhancerCount = selectedEnhancers(profile).length;
+  session.actorEnhancerSummary = selectedEnhancerSummary(profile);
+  session.peerActorHasWears = actorProfileHasWears(peerActor.label, session.actorWearCount);
+  session.joinActorHasWears = actorProfileHasWears(joinActor.label, session.actorWearCount);
+  session.peerActorHasEnhancers = actorProfileHasEnhancers(peerActor.label, session.actorEnhancerCount);
+  session.joinActorHasEnhancers = actorProfileHasEnhancers(joinActor.label, session.actorEnhancerCount);
+}
+
+function refreshActorWireDataForRoomActorList(playerSession) {
+  if (!playerSession?.actorJoinParam || !playerSession.loadedProfile || isFallbackBattleProfile(playerSession.loadedProfile)) {
+    return false;
+  }
+  if (playerSession.actorWireSourceProfile === playerSession.loadedProfile && playerSession.joinActorRaw) {
+    return false;
+  }
+  updateActorWireData(playerSession, playerSession.actorJoinParam, playerSession.loadedProfile, playerSession.lastChannel || 0);
+  console.log(`[state] actor-wire refresh actor=${playerSession.actorId} reason=room-actor-list wears=${playerSession.actorWearCount || 0} wearList=${playerSession.actorWearSummary || "none"} taunts=${playerSession.actorTauntCount || 0} tauntSlots=${playerSession.actorTauntSummary || "none"} enhancers=${playerSession.actorEnhancerCount || 0} enhancerList=${playerSession.actorEnhancerSummary || "none"} joinProfile=${playerSession.joinActorProfile || "n/a"} joinHasWears=${playerSession.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${playerSession.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${playerSession.joinActorRawBytes || 0} peerProfile=${playerSession.peerActorProfile || "n/a"} peerHasWears=${playerSession.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${playerSession.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${playerSession.peerActorRawBytes || 0}`);
   return true;
 }
 
-function asBattleJson(value) {
-  if (value && typeof value === "object") return value;
-  return {};
+function isZombieModeValue(mode) {
+  return Number(mode) === MAP_MODE_ZOMBIE;
 }
 
-function hasOwn(value, key) {
-  return Object.prototype.hasOwnProperty.call(value || {}, key);
+function isZombieRoom(room) {
+  return isZombieModeValue(room?.mode);
 }
 
-function eventNumber(event, details, key, fallback = 0) {
-  return statNumber(event?.[key] ?? details?.[key], fallback);
+function isZombiePlayerSession(session) {
+  return isZombieModeValue(roomMode(session)) && Number(session?.team) === ZOMBIE_TEAM;
 }
 
-function battleEventPlayerName(event, details, playerId, fallbackName = "") {
-  const id = Number(playerId || 0);
-  const currentId = Number(event?.playerId || 0);
-  const killerId = Number(event?.killerPlayerId || details?.killerPlayerId || 0);
-  const victimId = Number(event?.victimPlayerId || details?.victimPlayerId || 0);
-  const playerData = asBattleJson(event?.playerData);
-  const candidates = [
-    id === currentId ? event?.playerName : "",
-    id === killerId ? (event?.killerPlayerName || details?.killerPlayerName) : "",
-    id === victimId ? (event?.victimPlayerName || details?.victimPlayerName) : "",
-    id === currentId ? (playerData.name || playerData.n || playerData.un) : "",
-    fallbackName
+function zombieMaxHealthForType(zombieType) {
+  if (Number(zombieType) === ZOMBIE_TYPE.BOSS) return ZOMBIE_BOSS_MAX_HEALTH;
+  if (Number(zombieType) === ZOMBIE_TYPE.REGULAR) return ZOMBIE_REGULAR_MAX_HEALTH;
+  return 0;
+}
+
+function sessionMaxHealth(session, stats = null) {
+  const resolvedStats = stats || sessionRuntimeStats(session);
+  if (isZombiePlayerSession(session)) {
+    return zombieMaxHealthForType(session.zombieType) || resolvedStats.maxHealth;
+  }
+  return resolvedStats.maxHealth;
+}
+
+function randomIntInclusive(min, max) {
+  const lo = Math.ceil(Math.min(Number(min), Number(max)));
+  const hi = Math.floor(Math.max(Number(min), Number(max)));
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return 0;
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
+
+function isZombieRoundPausedSession(session) {
+  return isZombieRoom(session?.room) && zombieModeForRoom(session.room) === ZOMBIE_MODE.PAUSE;
+}
+
+function zombieModeForRoom(room) {
+  if (!isZombieRoom(room)) return 0;
+  const mode = Number(room.zombieMode || 0);
+  return mode > 0 ? mode : ZOMBIE_MODE.WAIT_FOR_PLAYERS;
+}
+
+function makeZombieModeStateRaw(mode) {
+  return rawHashtable([
+    { key: rawByte(51), value: rawByte(mode) },
+  ]);
+}
+
+function makeGameStateRaw(session) {
+  const entries = [
+    { key: rawByte(88), value: makeScoreRaw(session) },
+    { key: rawByte(77), value: rawBool(isStandardRoundPaused(session.room)) },
+    { key: rawByte(95), value: rawLong(session.room.startedAt) },
   ];
-  const name = candidates.map((value) => String(value || "").trim()).find(Boolean);
-  return cleanName(name || `Player ${id || 1}`);
-}
 
-function battleEventPlayerKey(event, details, playerId, account = null) {
-  const id = Number(playerId || 0);
-  if (account && Number(account.id) === id) return account.key;
-  const currentId = Number(event?.playerId || 0);
-  if (id === currentId) {
-    const key = String(event?.playerAuthKey || event?.playerKey || event?.cckey || "").trim();
-    if (key) return key.slice(0, 128);
-  }
-  const detailsKey = String(details?.playerAuthKey || details?.playerKey || "").trim();
-  return (detailsKey || `battle-player-${id}`).slice(0, 128);
-}
-
-async function upsertBattleEventPlayer(client, event, details, playerId, account = null) {
-  const id = Number(playerId || 0);
-  if (!Number.isInteger(id) || id <= 0) return;
-
-  const isAccount = account && Number(account.id) === id;
-  const name = battleEventPlayerName(event, details, id, isAccount ? account.name : "");
-  const cckey = battleEventPlayerKey(event, details, id, isAccount ? account : null);
-  const level = isAccount ? statNumber(account.level, START_LEVEL) : statNumber(event.playerLevel ?? details.playerLevel, START_LEVEL);
-  const exp = isAccount ? statNumber(account.exp, START_EXP) : statNumber(event.playerExp ?? details.playerExp, START_EXP);
-  const expState = levelStateForExp(exp, level);
-  const money = isAccount ? statNumber(account.money, START_MONEY) : 0;
-
-  await client.query(
-    `INSERT INTO players (id, cckey, name, full_name, level, exp, exp_min, exp_max, money, view, weap, taun, stats)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
-     ON CONFLICT (id) DO UPDATE SET
-       cckey = CASE
-         WHEN players.cckey LIKE 'battle-player-%' AND EXCLUDED.cckey NOT LIKE 'battle-player-%' THEN EXCLUDED.cckey
-         ELSE players.cckey
-       END,
-       name = CASE
-         WHEN players.name LIKE 'Player %' AND EXCLUDED.name <> '' THEN EXCLUDED.name
-         ELSE players.name
-       END,
-       full_name = CASE
-         WHEN players.full_name LIKE 'Player %' AND EXCLUDED.full_name <> '' THEN EXCLUDED.full_name
-         ELSE players.full_name
-       END,
-       level = GREATEST(players.level, EXCLUDED.level),
-       exp = GREATEST(players.exp, EXCLUDED.exp),
-       exp_min = GREATEST(players.exp_min, EXCLUDED.exp_min),
-       exp_max = GREATEST(players.exp_max, EXCLUDED.exp_max),
-       updated_at = now()`,
-    [id, cckey, name, name, expState.level, expState.exp, expState.expMin, expState.expMax, money]
-  );
-}
-
-async function incrementPlayerStats(client, playerId, delta, maxValues = {}) {
-  const id = Number(playerId || 0);
-  if (!Number.isInteger(id) || id <= 0) return;
-
-  const row = await client.query("SELECT stats FROM players WHERE id = $1 FOR UPDATE", [id]);
-  if (!row.rows[0]) return;
-
-  const nextStats = normalizePlayerStats(jsonValue(row.rows[0].stats, {}));
-  for (const [key, value] of Object.entries(delta || {})) {
-    if (!playerStatKeys.includes(key)) continue;
-    nextStats[key] = statNumber(nextStats[key], 0) + statNumber(value, 0);
-  }
-  for (const [key, value] of Object.entries(maxValues || {})) {
-    if (!playerStatKeys.includes(key)) continue;
-    nextStats[key] = Math.max(statNumber(nextStats[key], 0), statNumber(value, 0));
+  if (isZombieRoom(session.room)) {
+    entries.push({ key: rawByte(51), value: makeZombieModeStateRaw(zombieModeForRoom(session.room)) });
   }
 
-  await client.query(
-    "UPDATE players SET stats = $2::jsonb, updated_at = now() WHERE id = $1",
-    [id, JSON.stringify(nextStats)]
-  );
+  const controlPoints = makeControlPointsRaw(session.room);
+  if (controlPoints) entries.push({ key: rawByte(78), value: controlPoints });
+  const flags = makeFlagsRaw(session.room);
+  if (flags) entries.push({ key: rawByte(79), value: flags });
+
+  if (INCLUDE_PEERS_IN_GAMESTATE) {
+    entries.unshift({ key: rawByte(99), value: makeRoomActorListRaw(session.room, session) });
+  }
+
+  const items = makeRoomItemsRaw(session.room);
+  if (items) {
+    entries.push({ key: rawByte(80), value: items });
+  }
+
+  if (INCLUDE_ACTOR_IN_GAMESTATE) {
+    entries.unshift(
+      { key: rawByte(98), value: session.actorRaw || rawHashtable([]) },
+      { key: rawByte(97), value: rawInt(session.actorId) },
+    );
+  }
+
+  return rawHashtable(entries);
 }
 
-async function incrementWeaponStats(client, playerId, event, details, delta) {
-  const id = Number(playerId || 0);
-  const weaponId = Number(event.weaponId ?? details.weaponId ?? event.weaponType ?? details.weaponType ?? 0);
-  if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(weaponId) || weaponId <= 0) return;
+function isCtfRoom(room) { return Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG && Boolean(CTF_MAPS[mapKey(room?.map)]?.length); }
+function makeFlagState(mapName) { return new Map((CTF_MAPS[mapKey(mapName)] || []).map((p) => [p.team, {...p, bearer:-1, state:0}])); }
+function makeFlagRaw(flag) { return rawHashtable([{key:rawByte(64),value:rawShort(flag.team)},{key:rawByte(65),value:makeTransformRaw(flag)},{key:rawByte(62),value:rawInt(flag.state)},{key:rawByte(63),value:rawInt(flag.bearer)}]); }
+function makeFlagsRaw(room) { return isCtfRoom(room) ? rawHashtable(Array.from(room.flags.values()).map((f)=>({key:rawShort(f.team),value:makeFlagRaw(f)}))) : null; }
+function makeFlagEvent(type, flag) { return rawEvent(89,[{key:254,value:rawInt(0)},{key:245,value:rawHashtable([{key:rawByte(85),value:rawShort(type)},{key:rawByte(84),value:makeFlagRaw(flag)}])}]); }
+function ctfDistance(a,b) { return a && b ? Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z) : Infinity; }
+function ctfHomePoint(room, team) {
+  return (CTF_MAPS[mapKey(room?.map)] || []).find((point) => Number(point.team) === Number(team)) || null;
+}
+function ctfPlayerAtBase(session, team) {
+  const home = ctfHomePoint(session?.room, team);
+  if (!home || !session?.lastTransform) return false;
+  // Active FlagPoint checks the local player against FlagPoint + (0,3,0), radius 8.
+  return ctfDistance(session.lastTransform, { x: home.x, y: home.y + 3, z: home.z }) < 8;
+}
+function tryDeliverCtfFlag(session, channel, source = "move") {
+  const room = session?.room;
+  if (!isCtfRoom(room) || !session.spawned || session.dead || isRoundPausedSession(session)) return false;
+  const home = room.flags.get(session.team);
+  if (!home || home.bearer >= 0 || home.state !== 0 || !ctfPlayerAtBase(session, session.team)) return false;
+  const carried = Array.from(room.flags.values()).find((flag) => flag.team !== session.team && flag.bearer === session.actorId);
+  if (!carried) return false;
+  const carriedHome = ctfHomePoint(room, carried.team);
+  if (!carriedHome) return false;
 
-  const weaponType = Number(event.weaponType ?? details.weaponType ?? 0);
-  const systemName = String(event.weaponSystemName || details.weaponSystemName || details.systemName || "").slice(0, 120);
-  const kills = statNumber(delta.kills, 0);
-  const headshots = statNumber(delta.headshots, 0);
-  const nuts = statNumber(delta.nuts, 0);
-  const shots = statNumber(delta.shots, 0);
-  const hits = statNumber(delta.hits, 0);
-
-  if (!kills && !headshots && !nuts && !shots && !hits) return;
-
-  await client.query(
-    `INSERT INTO player_weapon_stats (player_id, weapon_id, weapon_type, system_name, kills, headshots, nuts, shots, hits, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
-     ON CONFLICT (player_id, weapon_id) DO UPDATE SET
-       weapon_type = CASE WHEN EXCLUDED.weapon_type <> 0 THEN EXCLUDED.weapon_type ELSE player_weapon_stats.weapon_type END,
-       system_name = CASE WHEN EXCLUDED.system_name <> '' THEN EXCLUDED.system_name ELSE player_weapon_stats.system_name END,
-       kills = player_weapon_stats.kills + EXCLUDED.kills,
-       headshots = player_weapon_stats.headshots + EXCLUDED.headshots,
-       nuts = player_weapon_stats.nuts + EXCLUDED.nuts,
-       shots = player_weapon_stats.shots + EXCLUDED.shots,
-       hits = player_weapon_stats.hits + EXCLUDED.hits,
-       updated_at = now()`,
-    [id, Math.trunc(weaponId), statNumber(weaponType, 0), systemName, kills, headshots, nuts, shots, hits]
-  );
+  Object.assign(carried, carriedHome, { bearer: -1, state: 0 });
+  session.points = numberOr(session.points, 0) + 1;
+  sendReliableToWholeRoom(room, makeFlagEvent(1, carried), channel, { requireGameState: false });
+  sendReliableToWholeRoom(room, makeScoreUpdateEvent(session), channel, { requireGameState: false });
+  console.log(`[flag] delivered actor=${session.actorId} flagTeam=${carried.team} score=${teamScorePoints(session, session.team)} source=${source} pos=${fmtPoint(session.lastTransform)}`);
+  maybeFinishStandardRound(room, "flag-deliver", channel, session);
+  return true;
+}
+function updateCtfOnMove(session, channel) {
+  const room=session.room; if(!isCtfRoom(room)||!session.spawned||session.dead) return;
+  if (tryDeliverCtfFlag(session, channel, "move")) return;
+  for(const flag of room.flags.values()) {
+    if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
+      if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); sendReliableToWholeRoom(room,makeFlagEvent(3,flag),channel,{requireGameState:false}); console.log(`[flag] returned actor=${session.actorId} flagTeam=${flag.team}`); }
+      else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; sendReliableToWholeRoom(room,makeFlagEvent(0,flag),channel,{requireGameState:false}); console.log(`[flag] captured actor=${session.actorId} flagTeam=${flag.team} pos=${fmtPoint(session.lastTransform)}`); }
+    }
+  }
+}
+function resetCtfFlag(room, flag, type, channel) {
+  const home=(CTF_MAPS[mapKey(room.map)]||[]).find((item)=>item.team===flag.team); if(!home)return;
+  Object.assign(flag,home,{bearer:-1,state:0}); sendReliableToWholeRoom(room,makeFlagEvent(type,flag),channel,{requireGameState:false});
+}
+function dropCtfFlagsForSession(session, type=2, channel=0) {
+  const room=session?.room; if(!isCtfRoom(room))return;
+  for(const flag of room.flags.values()) if(flag.bearer===session.actorId) { flag.bearer=-1; flag.state=2; Object.assign(flag,session.lastTransform||flag); sendReliableToWholeRoom(room,makeFlagEvent(type,flag),channel,{requireGameState:false}); console.log(`[flag] dropped actor=${session.actorId} flagTeam=${flag.team} reason=${type}`); }
 }
 
-async function recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details) {
-  if (type === "shot") {
-    const shots = eventNumber(event, details, "shots", 0);
-    const hits = eventNumber(event, details, "hits", 0);
-    await incrementPlayerStats(client, playerId, { sh: shots, hi: hits });
-    await incrementWeaponStats(client, playerId, event, details, { shots, hits });
+function isControlPointsRoom(room) {
+  return Number(room?.mode) === MAP_MODE_CONTROL_POINTS && Boolean(CONTROL_POINT_MAPS[mapKey(room?.map)]?.length);
+}
+
+function makeControlPointsRaw(room) {
+  if (!isControlPointsRoom(room) || !room.controlPoints?.size) return null;
+  return rawHashtable(Array.from(room.controlPoints.values()).map((point) => ({
+    key: rawShort(point.id),
+    value: rawHashtable([
+      { key: rawByte(61), value: rawShort(point.id) },
+      { key: rawByte(59), value: rawInt(point.state) },
+      { key: rawByte(58), value: rawByte(point.progress) },
+      { key: rawByte(60), value: rawShort(point.team) },
+    ]),
+  })));
+}
+
+function makeControlPointEvent(point) {
+  return rawEvent(88, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([{ key: rawByte(82), value: rawHashtable([
+      { key: rawByte(61), value: rawShort(point.id) },
+      { key: rawByte(59), value: rawInt(point.state) },
+      { key: rawByte(58), value: rawByte(point.progress) },
+      { key: rawByte(60), value: rawShort(point.team) },
+    ]) }]) },
+  ]);
+}
+
+function makeControlPointState(mapName) {
+  return new Map((CONTROL_POINT_MAPS[mapKey(mapName)] || []).map((definition) => [definition.id, {
+    ...definition, state: 0, progress: 0, team: -1, occupants: new Set(), nextScoreAt: 0,
+  }]));
+}
+
+function makeControlPointScoreState() {
+  return { 1: 0, 2: 0 };
+}
+
+function controlPointContains(point, transform) {
+  if (!point || !transform) return false;
+  return Math.hypot(transform.x - point.x, transform.z - point.z) <= 6 && Math.abs(transform.y - point.y) <= 7.2;
+}
+
+function updateControlPointOccupancyFromMove(session) {
+  const room = session?.room;
+  if (!isControlPointsRoom(room) || !session.spawned || session.dead || isRoundPausedSession(session)) return;
+  for (const point of room.controlPoints.values()) {
+    const inside = controlPointContains(point, session.lastTransform);
+    const present = point.occupants.has(session.actorId);
+    if (inside === present) continue;
+    if (inside) point.occupants.add(session.actorId);
+    else point.occupants.delete(session.actorId);
+    console.log(`[control] ${inside ? "enter" : "exit"} actor=${session.actorId} point=${point.id} team=${session.team} source=move pos=${fmtPoint(session.lastTransform)}`);
+  }
+}
+
+function updateControlPoint(room, point, channel) {
+  const teams = new Set();
+  for (const actorId of Array.from(point.occupants)) {
+    const player = room.players.get(actorId);
+    if (!player || !player.spawned || player.dead || isRoundPausedSession(player) || !controlPointContains(point, player.lastTransform)) {
+      point.occupants.delete(actorId);
+      continue;
+    }
+    if (player.team === 1 || player.team === 2) teams.add(player.team);
+  }
+
+  const before = `${point.state}/${point.progress}/${point.team}`;
+  const wasCaptured = point.state === 2;
+  let captureTeam = 0;
+
+  if (teams.size === 0) {
+    if (point.state === 1 && point.progress > 0) {
+      point.progress = Math.max(0, point.progress - CONTROL_POINT_CAPTURE_STEP);
+      if (point.progress === 0) {
+        point.state = 0;
+        point.team = -1;
+      }
+    }
+  } else if (teams.size === 1) {
+    captureTeam = Array.from(teams)[0];
+    if (point.team !== captureTeam) {
+      if (point.team > 0 && point.progress > 0) {
+        point.state = 1;
+        point.progress = Math.max(0, point.progress - CONTROL_POINT_CAPTURE_STEP);
+        point.nextScoreAt = 0;
+        if (point.progress === 0) {
+          point.state = 0;
+          point.team = -1;
+        }
+      } else {
+        point.team = captureTeam;
+        point.state = 1;
+        point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP);
+      }
+    } else if (point.state !== 2) {
+      point.state = 1;
+      point.progress = Math.min(100, point.progress + CONTROL_POINT_CAPTURE_STEP);
+    }
+  }
+
+  if (point.progress >= 100) {
+    point.progress = 100;
+    point.state = 2;
+  }
+
+  const stateChanged = before !== `${point.state}/${point.progress}/${point.team}`;
+  if (stateChanged) {
+    const event = makeControlPointEvent(point);
+    sendReliableToWholeRoom(room, event, channel, { requireGameState: false });
+    console.log(`[control] state point=${point.id} state=${point.state} progress=${point.progress} team=${point.team} occupants=${Array.from(point.occupants).join(",") || "none"}`);
+  }
+
+  if (!wasCaptured && point.state === 2) {
+    for (const actorId of point.occupants) {
+      const player = room.players.get(actorId);
+      if (!player || player.team !== point.team) continue;
+      player.points = numberOr(player.points, 0) + 1;
+    }
+    room.controlPointScores ||= makeControlPointScoreState();
+    room.controlPointScores[point.team] = numberOr(room.controlPointScores[point.team], 0) + 1;
+    point.nextScoreAt = Date.now() + CONTROL_POINT_SCORE_INTERVAL_MS;
+    const source = Array.from(room.players.values()).find((player) => player?.team === point.team)
+      || Array.from(room.players.values())[0];
+    if (source) {
+      sendReliableToWholeRoom(room, makeScoreUpdateEvent(source), channel, { requireGameState: false });
+    }
+    console.log(`[control] captured point=${point.id} team=${point.team} score=${source ? teamScorePoints(source, point.team) : 0}`);
+    maybeFinishStandardRound(room, "control-point", channel);
+    return true;
+  }
+
+  if (point.state === 2 && (point.team === 1 || point.team === 2) && room.standardRoundState === "active") {
+    const now = Date.now();
+    if (!point.nextScoreAt) point.nextScoreAt = now + CONTROL_POINT_SCORE_INTERVAL_MS;
+    if (now >= point.nextScoreAt) {
+      const elapsedIntervals = Math.max(1, Math.floor((now - point.nextScoreAt) / CONTROL_POINT_SCORE_INTERVAL_MS) + 1);
+      room.controlPointScores ||= makeControlPointScoreState();
+      room.controlPointScores[point.team] = numberOr(room.controlPointScores[point.team], 0) + elapsedIntervals;
+      point.nextScoreAt += elapsedIntervals * CONTROL_POINT_SCORE_INTERVAL_MS;
+      const source = Array.from(room.players.values())[0];
+      if (source) {
+        sendReliableToWholeRoom(room, makeScoreUpdateEvent(source), channel, { requireGameState: false });
+        console.log(`[control] score point=${point.id} team=${point.team} add=${elapsedIntervals} total=${teamScorePoints(source, point.team)}`);
+      }
+      maybeFinishStandardRound(room, "control-point-hold", channel);
+      return true;
+    }
+  }
+
+  return stateChanged;
+}
+
+function startControlPointTicker(room, channel = 0) {
+  if (!isControlPointsRoom(room) || room.controlPointTimer) return;
+  room.controlPointTimer = setInterval(() => {
+    if (!isControlPointsRoom(room)) return;
+    for (const point of room.controlPoints.values()) updateControlPoint(room, point, channel);
+  }, CONTROL_POINT_CAPTURE_TICK_MS);
+}
+
+function stopControlPointTicker(room) {
+  if (room?.controlPointTimer) clearInterval(room.controlPointTimer);
+  if (room) room.controlPointTimer = null;
+}
+
+function resetControlPointsForRound(room, channel = 0) {
+  if (!isControlPointsRoom(room)) return;
+  room.controlPointScores = makeControlPointScoreState();
+  for (const point of room.controlPoints.values()) {
+    point.state = 0;
+    point.progress = 0;
+    point.team = -1;
+    point.nextScoreAt = 0;
+    point.occupants.clear();
+    sendReliableToWholeRoom(room, makeControlPointEvent(point), channel, { requireGameState: false });
+  }
+}
+
+function makeTransformRaw(point) {
+  const yaw = numberOr(point.rotY, 0);
+  const pitch = numberOr(point.rotX, 0);
+  return rawHashtable([
+    { key: rawByte(1), value: rawFloat(point.x) },
+    { key: rawByte(2), value: rawFloat(point.y) },
+    { key: rawByte(3), value: rawFloat(point.z) },
+    // Smooth interpolation consumes Speed.x/y as pitch/yaw; spawn and some snapshots consume Rotation.y.
+    { key: rawByte(4), value: rawFloat(pitch) },
+    { key: rawByte(5), value: rawFloat(yaw) },
+    { key: rawByte(6), value: rawFloat(0) },
+    { key: rawByte(7), value: rawFloat(yaw) },
+    { key: rawByte(8), value: rawLong(photonNow()) },
+  ]);
+}
+
+function mapPickupDefinitions(mapName) {
+  if (!ENABLE_MAP_PICKUPS) return [];
+  return MAP_PICKUP_POINTS[mapKey(mapName)] || [];
+}
+
+function makeRoomItemState(mapName) {
+  const items = new Map();
+  for (const item of mapPickupDefinitions(mapName)) {
+    items.set(Number(item.id), {
+      ...item,
+      subType: item.subType,
+      picked: false,
+      nextRespawnAt: 0,
+    });
+  }
+  return items;
+}
+
+function ensureRoomItems(room) {
+  if (!room.items) room.items = makeRoomItemState(room.map);
+  return room.items;
+}
+
+function makeItemRaw(item, overrides = {}) {
+  const value = overrides.value ?? item.value;
+  const subType = overrides.subType ?? item.subType;
+  const entries = [
+    { key: rawByte(75), value: rawInt(item.id) },
+    { key: rawByte(73), value: rawByte(item.type) },
+    { key: rawByte(71), value: makeTransformRaw(item) },
+    { key: rawByte(70), value: rawInt(value) },
+  ];
+  if (subType !== undefined && subType !== null) {
+    entries.push({ key: rawByte(72), value: rawShort(subType) });
+  }
+  return rawHashtable(entries);
+}
+
+function describeSpawnItemPayload(itemsOrEntries, limit = 3) {
+  const items = (Array.isArray(itemsOrEntries) ? itemsOrEntries : [])
+    .map((entry) => entry?.item || entry)
+    .filter(Boolean);
+  if (!items.length) return "";
+  const sample = items.slice(0, limit)
+    .map((item) => `${item.id}:${item.type}/${item.subType ?? 0}@${fmtPoint(item)}`)
+    .join("|");
+  return ` spawnData=${sample}${items.length > limit ? `+${items.length - limit}` : ""}`;
+}
+
+function makeRoomItemsRaw(room) {
+  if (!ENABLE_MAP_PICKUPS || !MAP_PICKUPS_IN_GAMESTATE || !room) return null;
+  const items = ensureRoomItems(room);
+  const active = Array.from(items.values()).filter((item) => !item.picked);
+  if (!active.length) return null;
+  return rawHashtable(active.map((item) => ({
+    key: rawInt(item.id),
+    value: makeItemRaw(item),
+  })));
+}
+
+function buildSpawnItemEvent(item) {
+  return rawEvent(94, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: makeItemRaw(item) },
+  ]);
+}
+
+function buildRemoveItemEvent(item) {
+  return rawEvent(93, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: makeItemRaw(item, { value: 0 }) },
+  ]);
+}
+
+function ensureSessionVisibleItemIds(session) {
+  if (!session) return new Set();
+  if (!(session?.visibleItemIds instanceof Set)) {
+    session.visibleItemIds = new Set();
+  }
+  return session.visibleItemIds;
+}
+
+function markSessionItemVisible(session, itemId) {
+  if (!session || !Number.isFinite(Number(itemId))) return;
+  ensureSessionVisibleItemIds(session).add(Number(itemId));
+}
+
+function markSessionItemHidden(session, itemId) {
+  if (!session?.visibleItemIds || !Number.isFinite(Number(itemId))) return;
+  session.visibleItemIds.delete(Number(itemId));
+}
+
+function markActiveRoomItemsVisible(session) {
+  if (!ENABLE_MAP_PICKUPS || !session?.room) return;
+  const visible = ensureSessionVisibleItemIds(session);
+  for (const item of ensureRoomItems(session.room).values()) {
+    if (item.picked) visible.delete(Number(item.id));
+    else visible.add(Number(item.id));
+  }
+}
+
+function markRoomItemHiddenForAll(room, itemId) {
+  if (!room?.players?.size) return;
+  for (const playerSession of room.players.values()) {
+    markSessionItemHidden(playerSession, itemId);
+  }
+}
+
+function sessionHasVisibleRoomItem(session, item) {
+  if (!session?.gameStateRequested || !item) return false;
+  return ensureSessionVisibleItemIds(session).has(Number(item.id));
+}
+
+function activeRoomPickupEventsForSession(session) {
+  if (!ENABLE_MAP_PICKUPS || !session?.room || !session.gameStateRequested || !session.spawned || session.dead) return [];
+  const visible = ensureSessionVisibleItemIds(session);
+  const events = [];
+  for (const item of ensureRoomItems(session.room).values()) {
+    const id = Number(item.id);
+    if (item.picked) {
+      visible.delete(id);
+      continue;
+    }
+    if (visible.has(id)) continue;
+    events.push({ item, event: buildSpawnItemEvent(item) });
+  }
+  return events;
+}
+
+function ensurePickupSpawnRepairTimerSet(session) {
+  if (!session) return null;
+  if (!(session.pickupSpawnRepairTimers instanceof Set)) {
+    session.pickupSpawnRepairTimers = new Set();
+  }
+  return session.pickupSpawnRepairTimers;
+}
+
+function clearPickupSpawnRepairTimers(session) {
+  if (!(session?.pickupSpawnRepairTimers instanceof Set)) return;
+  for (const timer of session.pickupSpawnRepairTimers) {
+    clearTimeout(timer);
+  }
+  session.pickupSpawnRepairTimers.clear();
+}
+
+function activeRoomItemsByIds(room, itemIds) {
+  if (!room || !Array.isArray(itemIds) || !itemIds.length) return [];
+  const items = ensureRoomItems(room);
+  const active = [];
+  for (const rawId of itemIds) {
+    const id = Number(rawId);
+    if (!Number.isFinite(id)) continue;
+    const item = items.get(id);
+    if (item && !item.picked) active.push(item);
+  }
+  return active;
+}
+
+function pickupSpawnRepairPayloads(items) {
+  const payloads = [];
+  for (const item of items) {
+    payloads.push(buildRemoveItemEvent(item), buildSpawnItemEvent(item));
+  }
+  return payloads;
+}
+
+function queuePickupSpawnRepair(session, itemIds, channel = 0, reason = "item-spawn") {
+  if (!PICKUP_SPAWN_REPAIR_DELAYS_MS.length || !session?.room || !Array.isArray(itemIds) || !itemIds.length) return;
+  const ids = Array.from(new Set(itemIds.map((id) => Number(id)).filter(Number.isFinite)));
+  if (!ids.length) return;
+
+  const actorId = session.actorId;
+  const room = session.room;
+  const spawnSeq = Number(session.spawnSeq || 0);
+  const timerSet = ensurePickupSpawnRepairTimerSet(session);
+  if (!timerSet) return;
+
+  for (const delayMs of PICKUP_SPAWN_REPAIR_DELAYS_MS) {
+    const waitMs = Math.max(0, Number(delayMs) || 0);
+    const timer = setTimeout(() => {
+      timerSet.delete(timer);
+      if (session.actorId !== actorId || session.room !== room || room.players?.get(actorId) !== session) return;
+      if (Number(session.spawnSeq || 0) !== spawnSeq) return;
+      if (!session.spawned || session.dead || !session.gameStateRequested) return;
+
+      const activeItems = activeRoomItemsByIds(room, ids);
+      if (!activeItems.length) return;
+      if (sendReliablePayloadsToSession(session, pickupSpawnRepairPayloads(activeItems), channel)) {
+        for (const item of activeItems) {
+          markSessionItemVisible(session, item.id);
+        }
+        console.log(`[sync] item-spawn-repair actor=${actorId} items=${activeItems.length} delay=${waitMs}ms reason=${reason}${describeSpawnItemPayload(activeItems)}`);
+      }
+    }, waitMs);
+    timerSet.add(timer);
+    if (typeof timer.unref === "function") timer.unref();
+  }
+}
+
+function sendActiveRoomPickupsToSession(session, channel = 0, reason = "post-spawn") {
+  const entries = activeRoomPickupEventsForSession(session);
+  if (!entries.length) return 0;
+  const items = entries.map((entry) => entry.item);
+  if (!sendReliablePayloadsToSession(session, pickupSpawnRepairPayloads(items), channel)) return 0;
+  for (const entry of entries) {
+    markSessionItemVisible(session, entry.item.id);
+  }
+  queuePickupSpawnRepair(session, entries.map((entry) => entry.item.id), channel, reason);
+  console.log(`[sync] item-spawn actor=${session.actorId} items=${entries.length} reason=${reason}${describeSpawnItemPayload(entries)}`);
+  return entries.length;
+}
+
+function queuePostSpawnPickupSync(session, reason = "post-spawn") {
+  if (!ENABLE_MAP_PICKUPS || !session?.room) return;
+  session.pendingPickupSync = {
+    reason,
+    afterMoveCount: Math.max(2, (Number(session.moveCount) || 0) + 1),
+  };
+}
+
+function appendActiveRoomPickupEvents(session, commands, channel = 0, reason = "post-spawn-response") {
+  if (!Array.isArray(commands)) return 0;
+  const entries = activeRoomPickupEventsForSession(session);
+  if (!entries.length) return 0;
+  const items = entries.map((entry) => entry.item);
+  for (const payload of pickupSpawnRepairPayloads(items)) {
+    commands.push(...makeReliableCommandsForPayload(session, payload, channel));
+  }
+  for (const item of items) {
+    markSessionItemVisible(session, item.id);
+  }
+  queuePickupSpawnRepair(session, entries.map((entry) => entry.item.id), channel, reason);
+  console.log(`[sync] item-spawn actor=${session.actorId} items=${entries.length} reason=${reason}${describeSpawnItemPayload(entries)}`);
+  return entries.length;
+}
+
+function maybeAppendPostSpawnPickupSync(session, commands, channel = 0) {
+  const pending = session?.pendingPickupSync;
+  if (!pending || !ENABLE_MAP_PICKUPS) return;
+  if (!session.spawned || session.dead || !session.gameStateRequested) return;
+  if ((Number(session.moveCount) || 0) < Number(pending.afterMoveCount || 0)) return;
+  appendActiveRoomPickupEvents(session, commands, channel, pending.reason || "post-spawn-response");
+  session.pendingPickupSync = null;
+}
+
+function sendReliablePayloadsToSession(targetSession, payloads, channel = 0) {
+  if (!targetSession?.socket || !targetSession?.rinfo || !Array.isArray(payloads)) return false;
+  const reliablePayloads = payloads.filter(Boolean);
+  if (!reliablePayloads.length) return false;
+  const targetChannel = reliableChannelForSession(targetSession, channel);
+  const commands = reliablePayloads.flatMap((payload) => makeReliableCommandsForPayload(targetSession, payload, targetChannel));
+  try {
+    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
+  } catch (error) {
+    console.log(`[warn] peer-send failed actor=${targetSession.actorId || "?"} cmds=${commands.length} reason=${error.message}`);
+    return false;
+  }
+  return true;
+}
+
+function sendReliableToSession(targetSession, payload, channel = 0) {
+  return sendReliablePayloadsToSession(targetSession, [payload], channel);
+}
+
+function makeSessionReliableCommand(session, payload, channel = 0) {
+  const targetChannel = reliableChannelForSession(session, channel);
+  const commands = makeReliableCommandsForPayload(session, payload, targetChannel);
+  return {
+    channel: targetChannel,
+    seq: reliableCommandSeq(commands[0]),
+    seqs: reliableCommandSeqSummary(commands),
+    command: commands[0],
+    commands,
+  };
+}
+
+function reliableCommandCommands(reliableCommand) {
+  return Array.isArray(reliableCommand?.commands)
+    ? reliableCommand.commands.filter(Boolean)
+    : (reliableCommand?.command ? [reliableCommand.command] : []);
+}
+
+function sendReliableCommandToSession(targetSession, reliableCommand) {
+  const commands = reliableCommandCommands(reliableCommand);
+  if (!targetSession?.socket || !targetSession?.rinfo || !commands.length) return false;
+  try {
+    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
+  } catch (error) {
+    console.log(`[warn] peer-send failed actor=${targetSession.actorId || "?"} seq=${reliableCommand.seqs ?? reliableCommand.seq ?? "?"} reason=${error.message}`);
+    return false;
+  }
+  return true;
+}
+
+function makeSessionUnreliableCommand(session, payload, channel = 0, options = {}) {
+  const targetChannel = reliableChannelForSession(session, channel, options);
+  const lastReliableSeq = currentReliableSeqForSession(session, targetChannel);
+  const unreliableSeq = nextUnreliableSeqForSession(session, targetChannel);
+  return {
+    channel: targetChannel,
+    seq: unreliableSeq,
+    reliableSeq: lastReliableSeq,
+    command: makeUnreliable(lastReliableSeq, unreliableSeq, payload, targetChannel),
+  };
+}
+
+function sendUnreliableToSession(targetSession, payload, channel = 0, options = {}) {
+  if (!targetSession?.socket || !targetSession?.rinfo || !payload) return false;
+  const command = makeSessionUnreliableCommand(targetSession, payload, channel, options);
+  try {
+    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, [command.command]);
+  } catch (error) {
+    console.log(`[warn] peer-send-unreliable failed actor=${targetSession.actorId || "?"} seq=${command.seq ?? "?"} reason=${error.message}`);
+    return false;
+  }
+  return true;
+}
+
+function sendSpectatorUnreliableToSession(targetSession, payload) {
+  return sendUnreliableToSession(targetSession, payload, SPECTATOR_LIVE_CHANNEL, { forceChannel: true });
+}
+
+function canReceiveLivePeerEvent(playerSession) {
+  if (!playerSession?.gameStateRequested) return false;
+  if (playerSession.waitingSelfSpawnMove) return false;
+  return Boolean(playerSession.moveSeen);
+}
+
+function canReceiveSpectatorUnreliableLive(playerSession) {
+  if (!SPECTATOR_LIVE_UNRELIABLE) return false;
+  if (!playerSession?.gameStateRequested) return false;
+  if (playerSession.waitingSelfSpawnMove) return false;
+  return !playerSession.moveSeen;
+}
+
+function broadcastLiveToRoom(sourceSession, payload, channel = 0, options = {}) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !payload) return { total: 0, reliable: 0, spectator: 0, spectatorChannel: SPECTATOR_LIVE_CHANNEL };
+  const allowSpectator = options.allowSpectator !== false;
+  let reliable = 0;
+  let spectator = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession) continue;
+    if (canReceiveLivePeerEvent(playerSession)) {
+      if (sendReliableToSession(playerSession, payload, channel)) reliable += 1;
+    } else if (allowSpectator && canReceiveSpectatorUnreliableLive(playerSession)) {
+      if (sendSpectatorUnreliableToSession(playerSession, payload)) spectator += 1;
+    }
+  }
+  return { total: reliable + spectator, reliable, spectator, spectatorChannel: SPECTATOR_LIVE_CHANNEL };
+}
+
+function broadcastMoveToRoom(sourceSession, payload, channel = 0) {
+  if (MOVE_BROADCAST_UNRELIABLE) {
+    const room = sourceSession?.room;
+    if (!room?.players?.size || !payload) return { total: 0, reliable: 0, unreliable: 0, spectator: 0, spectatorChannel: SPECTATOR_LIVE_CHANNEL };
+    let unreliable = 0;
+    let spectator = 0;
+    for (const playerSession of room.players.values()) {
+      if (!playerSession || playerSession === sourceSession) continue;
+      if (canReceiveLivePeerEvent(playerSession)) {
+        if (sendUnreliableToSession(playerSession, payload, channel)) unreliable += 1;
+      } else if (SPECTATOR_MOVE_UNRELIABLE && canReceiveSpectatorUnreliableLive(playerSession)) {
+        if (sendSpectatorUnreliableToSession(playerSession, payload)) spectator += 1;
+      }
+    }
+    return { total: unreliable + spectator, reliable: 0, unreliable, spectator, spectatorChannel: SPECTATOR_LIVE_CHANNEL };
+  }
+  return broadcastLiveToRoom(sourceSession, payload, channel, {
+    allowSpectator: SPECTATOR_MOVE_UNRELIABLE,
+  });
+}
+
+function broadcastReliableToRoom(sourceSession, payload, channel = 0, reason = "sync", options = {}) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !payload) return 0;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession) continue;
+    if (options.requireGameState !== false && !playerSession.gameStateRequested) continue;
+    if (options.requireLiveReady && !canReceiveLivePeerEvent(playerSession)) continue;
+    if (options.requireMoveSeen && !playerSession.moveSeen) continue;
+    if (options.skipKnownActor && sessionHasActorData(playerSession, sourceSession.actorId)) continue;
+    if (sendReliableToSession(playerSession, payload, channel)) {
+      sent += 1;
+      if (options.markActorKnown) markActorKnown(playerSession, sourceSession.actorId);
+      if (options.markActorAnnounced) markActorAnnounced(playerSession, sourceSession.actorId);
+      if (options.markItemVisibleId !== undefined) markSessionItemVisible(playerSession, options.markItemVisibleId);
+      if (options.markItemHiddenId !== undefined) markSessionItemHidden(playerSession, options.markItemHiddenId);
+    }
+  }
+  if (sent > 0 && reason) {
+    console.log(`[sync] ${reason} actor=${sourceSession.actorId} peers=${sent}`);
+  }
+  return sent;
+}
+
+function sendReliableToWholeRoom(room, payload, channel = 0, options = {}) {
+  if (!room?.players?.size || !payload) return 0;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession) continue;
+    if (options.requireGameState !== false && !playerSession.gameStateRequested) continue;
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function maybeAppendRespawnItems(session, commands, channel) {
+  if (!ENABLE_MAP_PICKUPS || !session?.room?.items || ITEM_RESPAWN_MS <= 0) return;
+  const now = Date.now();
+  for (const item of session.room.items.values()) {
+    if (!item.picked || !item.nextRespawnAt || now < item.nextRespawnAt) continue;
+    item.picked = false;
+    item.nextRespawnAt = 0;
+    markRoomItemHiddenForAll(session.room, item.id);
+    const spawnItemEvent = buildSpawnItemEvent(item);
+    commands.push(...makeReliableCommandsForPayload(session, spawnItemEvent, channel));
+    markSessionItemVisible(session, item.id);
+    queuePickupSpawnRepair(session, [item.id], channel, "item-respawn");
+    broadcastReliableToRoom(session, spawnItemEvent, channel, "item-respawn", {
+      requireLiveReady: false,
+      markItemVisibleId: item.id,
+    });
+    console.log(`[event] item-respawn id=${item.id} type=${item.type} subType=${item.subType ?? 0} value=${item.value} pos=${fmtPoint(item)}`);
+  }
+}
+
+function distanceSquared(left, right) {
+  const dx = Number(left.x) - Number(right.x);
+  const dy = Number(left.y) - Number(right.y);
+  const dz = Number(left.z) - Number(right.z);
+  return dx * dx + dy * dy + dz * dz;
+}
+
+function reserveCapForState(state) {
+  return Math.max(0, numberOr(state?.maxAmmoReserve, 0) - numberOr(state?.loadedAmmo, 0));
+}
+
+function ammoPickupStates(session) {
+  return Array.from(session?.weaponStates?.values?.() || [])
+    .filter((state) => state && !isColdArmsWeaponType(state.type) && reserveCapForState(state) > 0);
+}
+
+function pickupPercent(item) {
+  return Number(item?.subType) === 1 ? SMALL_PICKUP_PERCENT : FULL_PICKUP_PERCENT;
+}
+
+function ammoStateCanBenefitFromPickup(state) {
+  if (!state || isColdArmsWeaponType(state.type)) return false;
+  return numberOr(state.ammoReserve, 0) < reserveCapForState(state);
+}
+
+function itemCanBenefitSession(session, item) {
+  // PlayerManager.PickItem() removes the object client-side, so only send it when it changes a resource.
+  if (isZombieRoundPausedSession(session)) return false;
+  if (!session?.spawned || session.dead) return false;
+  if (isZombiePlayerSession(session)) return false;
+  if (item.type === ITEM_TYPES.HEALTH) {
+    const stats = sessionRuntimeStats(session);
+    const maxHealth = sessionMaxHealth(session, stats);
+    return numberOr(session.health, maxHealth) < maxHealth;
+  }
+  if (item.type === ITEM_TYPES.ARMOR) {
+    return numberOr(session.energy, 0) < ARMOR_PICKUP_CAP;
+  }
+  if (item.type === ITEM_TYPES.AMMO) {
+    return ammoPickupStates(session).some(ammoStateCanBenefitFromPickup);
+  }
+  return true;
+}
+
+function makeSpawnRaw(session, team, point) {
+  const stats = sessionRuntimeStats(session);
+  const maxHealth = sessionMaxHealth(session, stats);
+  const health = Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth));
+  const energy = Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, stats.maxEnergy));
+  const zombieType = isZombieModeValue(roomMode(session))
+    ? clampNumber(session.zombieType ?? ZOMBIE_TYPE.HUMAN, ZOMBIE_TYPE.HUMAN, ZOMBIE_TYPE.BOSS)
+    : ZOMBIE_TYPE.HUMAN;
+  return rawHashtable([
+    // Local SpawnMe uses NetworkTransform.Speed as rotation; remotes use Rotation, so emit both.
+    { key: rawByte(237), value: makeTransformRaw(point) },
+    { key: rawByte(239), value: rawShort(team) },
+    { key: rawByte(100), value: rawInt(health) },
+    { key: rawByte(99), value: rawInt(energy) },
+    { key: rawByte(10), value: rawByte(zombieType) },
+  ]);
+}
+
+function roomMode(session) {
+  const mode = Number(session.room?.mode ?? 1);
+  return Number.isFinite(mode) && mode > 0 ? mode : 1;
+}
+
+function isTeamMode(mode) {
+  return mode >= 2 && mode !== 16 && mode !== 64;
+}
+
+function hasTeamScoreMode(mode) {
+  return isTeamMode(mode) || isZombieModeValue(mode);
+}
+
+function hasTeamDamageMode(mode) {
+  return isTeamMode(mode) || isZombieModeValue(mode);
+}
+
+function normalizeTeamForRoom(session, requestedTeam = null) {
+  const mode = roomMode(session);
+  const team = Number(requestedTeam);
+
+  if (mode === 1) return 0;
+  if (isZombieModeValue(mode)) {
+    if (team === ZOMBIE_TEAM || team === HUMAN_TEAM) return team;
+    if (session.team === ZOMBIE_TEAM || session.team === HUMAN_TEAM) return session.team;
+    return HUMAN_TEAM;
+  }
+  if (team === 0 || team === 1 || team === 2) return team;
+  if (session.team === 0 || session.team === 1 || session.team === 2) return session.team;
+  return isTeamMode(mode) ? -1 : 0;
+}
+
+function autoTeamForTeamRoom(room) {
+  const players = Array.from(room?.players?.values?.() || []);
+  const team1 = players.filter((playerSession) => Number(playerSession.team) === 1).length;
+  const team2 = players.filter((playerSession) => Number(playerSession.team) === 2).length;
+  return team2 < team1 ? 2 : 1;
+}
+
+function awardBattleExp(session, amount, reason = "kill") {
+  if (!ENABLE_BATTLE_EXP || !session) return 0;
+  const exp = Math.max(0, Math.trunc(numberOr(amount, 0)));
+  if (exp <= 0) return 0;
+  session.expEarned = numberOr(session.expEarned, 0) + exp;
+  session.matchExp = numberOr(session.matchExp, 0) + exp;
+  const clanKoef = numberOr(session.loadedProfile?.clan?.ek, 0);
+  const exp2clan = clanKoef > 0 ? Math.round(exp * clanKoef / 100) : 0;
+  if (exp2clan > 0) {
+    session.exp2clan = numberOr(session.exp2clan, 0) + exp2clan;
+  }
+  console.log(`[event] exp actor=${session.actorId} player=${session.playerId || "unknown"} reason=${reason} add=${exp} total=${session.expEarned}`);
+  return exp;
+}
+
+function battleExpForKill(shooter, targetSession) {
+  if (!ENABLE_BATTLE_EXP || !shooter || !targetSession || shooter === targetSession) return 0;
+  return BATTLE_EXP_PER_KILL;
+}
+
+function makeScorePlayerRaw(session, team, options = {}) {
+  const entries = [
+    { key: rawByte(239), value: rawShort(team) },
+    { key: rawByte(69), value: rawInt(numberOr(session.kills, 0)) },
+    { key: rawByte(68), value: rawInt(numberOr(session.deaths, 0)) },
+    { key: rawByte(67), value: rawInt(numberOr(session.points, 0)) },
+    { key: rawByte(32), value: rawInt(numberOr(session.domination, 0)) },
+    { key: rawByte(102), value: rawInt(numberOr(session.expEarned, 0)) },
+  ];
+
+  const exp2clan = numberOr(session.exp2clan, 0);
+  if (exp2clan > 0) {
+    entries.push({ key: rawByte(107), value: rawInt(exp2clan) });
+  }
+
+  if (options.includeAlive && !session.dead && session.lastTransform) {
+    const stats = sessionRuntimeStats(session);
+    const maxHealth = sessionMaxHealth(session, stats);
+    entries.push(
+      { key: rawByte(101), value: rawBool(true) },
+      { key: rawByte(237), value: makeTransformRaw(session.lastTransform) },
+      { key: rawByte(100), value: rawInt(Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth))) },
+      { key: rawByte(99), value: rawInt(session.energy ?? stats.maxEnergy) },
+    );
+  }
+
+  return rawHashtable(entries);
+}
+
+function teamScorePoints(session, team) {
+  if (isControlPointsRoom(session?.room)) {
+    return Math.max(0, numberOr(session.room.controlPointScores?.[team], 0));
+  }
+  if (isZombieRoom(session?.room) && zombieModeForRoom(session.room) === ZOMBIE_MODE.PAUSE) {
+    const winnerTeam = Number(session.room.zombieRoundWinnerTeam || 0);
+    if (winnerTeam === ZOMBIE_TEAM || winnerTeam === HUMAN_TEAM) {
+      return Number(team) === winnerTeam ? 1 : 0;
+    }
+  }
+  let total = 0;
+  const players = session?.room?.players || new Map();
+  for (const playerSession of players.values()) {
+    if (!playerSession || Number(playerSession.team) !== team) continue;
+    total += numberOr(playerSession.points, numberOr(playerSession.kills, 0));
+  }
+  return total;
+}
+
+function makeTeamScoreRaw(points) {
+  return rawHashtable([{ key: rawByte(67), value: rawInt(Math.max(0, numberOr(points, 0))) }]);
+}
+
+function makeScoreRaw(session) {
+  const mode = roomMode(session);
+  const playerEntries = [];
+  const players = session.room?.players || new Map();
+  for (const [actorId, playerSession] of players.entries()) {
+    if (!playerSession?.actorRaw) continue;
+    const hasScoreState =
+      playerSession.spawned ||
+      playerSession.dead ||
+      numberOr(playerSession.kills, 0) > 0 ||
+      numberOr(playerSession.deaths, 0) > 0 ||
+      numberOr(playerSession.points, 0) > 0;
+    if (!hasScoreState) continue;
+    const rawTeam = Number(playerSession.team);
+    const team = mode === 1 ? 0 : (rawTeam === 1 || rawTeam === 2 ? rawTeam : -1);
+    if (team < 0) continue;
+    playerEntries.push({
+      key: rawInt(actorId),
+      value: makeScorePlayerRaw(playerSession, team, { includeAlive: true }),
+    });
+  }
+
+  const entries = [
+    { key: rawByte(89), value: rawInt(0) },
+    { key: rawByte(88), value: rawHashtable(playerEntries) },
+  ];
+
+  if (hasTeamScoreMode(mode)) {
+    const redPoints = teamScorePoints(session, 1);
+    const bluePoints = teamScorePoints(session, 2);
+    entries.push({
+      key: rawByte(87),
+      value: rawHashtable([
+        { key: rawByte(1), value: makeTeamScoreRaw(redPoints) },
+        { key: rawByte(2), value: makeTeamScoreRaw(bluePoints) },
+      ]),
+    });
+  }
+
+  return rawHashtable(entries);
+}
+
+function makeScoreUpdateEvent(session) {
+  return rawEvent(90, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: makeScoreRaw(session) },
+  ]);
+}
+
+function buildSpawnEvent(session, requestedTeam, reason) {
+  const team = normalizeTeamForRoom(session, requestedTeam);
+  const stats = sessionRuntimeStats(session);
+  const wasDead = Boolean(session.dead);
+  session.team = team;
+  if (!isZombieModeValue(roomMode(session))) {
+    session.zombieType = ZOMBIE_TYPE.HUMAN;
+  } else if (team === HUMAN_TEAM) {
+    session.zombieType = ZOMBIE_TYPE.HUMAN;
+  } else if (team === ZOMBIE_TEAM && session.zombieType !== ZOMBIE_TYPE.BOSS) {
+    session.zombieType = ZOMBIE_TYPE.REGULAR;
+  }
+  resetZombieInfectionProgress(session);
+  session.spawned = true;
+  session.dead = false;
+  session.moveSeen = false;
+  session.moveCount = 0;
+  session.pendingPickupSync = null;
+  clearPickupSpawnRepairTimers(session);
+  session.visibleItemIds = new Set();
+  session.waitingSelfSpawnMove = true;
+  resetSessionWeaponStatesForSpawn(session, wasDead ? "respawn" : reason);
+  clearSessionActiveShotLedgers(session);
+  clearSessionImpactTimers(session);
+  invalidatePeerWeaponConfirm(session.room, session.actorId);
+  const maxHealth = sessionMaxHealth(session, stats);
+  session.health = maxHealth;
+  session.energy = stats.maxEnergy;
+  const point = spawnPointFor(session, team);
+  session.lastTransform = point;
+  const spawn = makeSpawnRaw(session, team, point);
+  console.log(`[event] ${reason} spawn actor=${session.actorId} team=${team} zombieType=${session.zombieType ?? 0} mode=${roomMode(session)} map=${session.room?.map || DEFAULT_MAP} pos=${fmtPoint(point)} health=${maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump} jumpCap=${stats.jumpCap} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} armorPct=${stats.modifiers.armorPercent} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} prot=${formatProtectionBonuses(stats.modifiers.protections)} rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)} wearDmg=${formatDamageBonuses(stats.modifiers.damageBonuses)}`);
+  postBattleEvent(session, "spawn", {
+    team,
+    transform: { x: point.x, y: point.y, z: point.z, rotY: point.rotY || 0 },
+    eventData: { reason },
+  });
+  queueSpawnNoMoveWarning(session, point, reason);
+  return rawEvent(100, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: spawn },
+  ]);
+}
+
+function makeSpawnEventFromSession(session) {
+  if (!session?.spawned || session.dead || !session.lastTransform) return null;
+  const team = normalizeTeamForRoom(session, session.team);
+  return rawEvent(100, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: makeSpawnRaw(session, team, session.lastTransform) },
+  ]);
+}
+
+function makeZombieModeEvent(mode) {
+  return rawEvent(73, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: makeZombieModeStateRaw(mode) },
+  ]);
+}
+
+function makeZombiePlayerUpdateRaw(session, killerActorId = 0) {
+  const stats = sessionRuntimeStats(session);
+  const maxHealth = sessionMaxHealth(session, stats);
+  const entries = [
+    { key: rawByte(239), value: rawShort(normalizeTeamForRoom(session, session.team)) },
+    { key: rawByte(100), value: rawInt(Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth))) },
+    { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, stats.maxEnergy))) },
+    { key: rawByte(10), value: rawByte(clampNumber(session.zombieType ?? ZOMBIE_TYPE.HUMAN, ZOMBIE_TYPE.HUMAN, ZOMBIE_TYPE.BOSS)) },
+  ];
+  if (Number(killerActorId) > 0) {
+    entries.push({ key: rawByte(97), value: rawInt(killerActorId) });
+  }
+  return rawHashtable(entries);
+}
+
+function makeZombiePlayerUpdateEvent(session, killerActorId = 0) {
+  return rawEvent(73, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: makeZombiePlayerUpdateRaw(session, killerActorId) },
+  ]);
+}
+
+function makePlayerHealthEnergyEvent(session) {
+  const stats = sessionRuntimeStats(session);
+  const maxHealth = sessionMaxHealth(session, stats);
+  return rawEvent(85, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(100), value: rawInt(Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth))) },
+      { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP))) },
+    ]) },
+  ]);
+}
+
+function zombieRoomPlayers(room) {
+  return Array.from(room?.players?.values?.() || [])
+    .filter(Boolean)
+    .sort((left, right) => Number(left.actorId || 0) - Number(right.actorId || 0));
+}
+
+function zombieReadyPlayers(room) {
+  return zombieRoomPlayers(room).filter((playerSession) => playerSession.gameStateRequested);
+}
+
+function zombieAlivePlayers(room, team = 0) {
+  return zombieRoomPlayers(room).filter((playerSession) => {
+    if (!playerSession.spawned || playerSession.dead) return false;
+    return !team || Number(playerSession.team) === Number(team);
+  });
+}
+
+function sendZombiePayloadToReadyRoom(room, payload, channel = 0, currentSession = null, currentResponses = null) {
+  if (!payload || !room?.players?.size) return 0;
+  let sent = 0;
+  for (const playerSession of zombieReadyPlayers(room)) {
+    if (currentSession && playerSession === currentSession && Array.isArray(currentResponses)) {
+      currentResponses.push(payload);
+      sent += 1;
+      continue;
+    }
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function sendZombiePayloadsToReadyRoom(room, payloads, channel = 0, currentSession = null, currentResponses = null) {
+  let sent = 0;
+  for (const payload of payloads || []) {
+    sent += sendZombiePayloadToReadyRoom(room, payload, channel, currentSession, currentResponses);
+  }
+  return sent;
+}
+
+function isStandardRoundRoom(room) {
+  const mode = Number(room?.mode || 0);
+  return mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CAPTURE_THE_FLAG || mode === MAP_MODE_CONTROL_POINTS;
+}
+
+function isStandardRoundPaused(room) {
+  return isStandardRoundRoom(room) && room?.standardRoundState === "pause";
+}
+
+function isRoundPausedSession(session) {
+  return isZombieRoundPausedSession(session) || isStandardRoundPaused(session?.room);
+}
+
+function standardReadyPlayers(room) {
+  return zombieReadyPlayers(room);
+}
+
+function sendStandardPayloadToReadyRoom(room, payload, channel = 0, currentSession = null, currentResponses = null) {
+  if (!payload || !room?.players?.size) return 0;
+  let sent = 0;
+  for (const playerSession of standardReadyPlayers(room)) {
+    if (currentSession && playerSession === currentSession && Array.isArray(currentResponses)) {
+      currentResponses.push(payload);
+      sent += 1;
+      continue;
+    }
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function resetStandardRoundScore(playerSession) {
+  playerSession.kills = 0;
+  playerSession.deaths = 0;
+  playerSession.points = 0;
+  playerSession.domination = 0;
+  playerSession.revenge = 0;
+  resetSessionFragState(playerSession);
+}
+
+function clearStandardRoundTimer(room) {
+  if (!room?.standardRoundTimer) return;
+  clearTimeout(room.standardRoundTimer);
+  room.standardRoundTimer = null;
+}
+
+function clearStandardRestartTimer(room) {
+  if (!room?.standardRestartTimer) return;
+  clearTimeout(room.standardRestartTimer);
+  room.standardRestartTimer = null;
+}
+
+function clearStandardRoundTimers(room) {
+  clearStandardRoundTimer(room);
+  clearStandardRestartTimer(room);
+}
+
+function makeStandardNewGameEvent(room) {
+  return rawEvent(91, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(95), value: rawLong(room.startedAt) },
+    ]) },
+  ]);
+}
+
+function makeStandardTimeOverEvent(room) {
+  const entries = [{ key: rawByte(95), value: rawLong(room.startedAt) }];
+  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
+    entries.push({ key: rawByte(50), value: rawShortArray([room.standardTeam1Wins || 0, room.standardTeam2Wins || 0]) });
+  }
+  return rawEvent(92, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable(entries) },
+  ]);
+}
+
+function standardRoundWinner(room) {
+  const players = zombieRoomPlayers(room);
+  if (Number(room?.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room?.mode) === MAP_MODE_CONTROL_POINTS) {
+    const source = players[0];
+    if (!source) return 0;
+    const red = teamScorePoints(source, 1);
+    const blue = teamScorePoints(source, 2);
+    return red === blue ? 0 : (red > blue ? 1 : 2);
+  }
+  const ranked = players
+    .slice()
+    .sort((left, right) => numberOr(right.points, right.kills) - numberOr(left.points, left.kills));
+  if (!ranked.length) return 0;
+  const first = numberOr(ranked[0].points, ranked[0].kills);
+  const second = ranked[1] ? numberOr(ranked[1].points, ranked[1].kills) : -1;
+  return first === second ? 0 : Number(ranked[0].actorId || 0);
+}
+
+function resetStandardPlayerForNextRound(playerSession) {
+  resetStandardRoundScore(playerSession);
+  resetZombieInfectionProgress(playerSession);
+  clearSpawnMoveWarningTimer(playerSession);
+  clearSpawnSelfRetryTimers(playerSession);
+  clearSessionWeaponReloadTimers(playerSession);
+  clearSessionActiveShotLedgers(playerSession);
+  clearSessionImpactTimers(playerSession);
+  clearPeerSpawnTimers(playerSession);
+  clearPickupSpawnRepairTimers(playerSession);
+  clearSpawnStallRecovery(playerSession);
+  playerSession.pendingSpawnBroadcast = null;
+  playerSession.pendingPickupSync = null;
+  playerSession.visibleItemIds = new Set();
+  playerSession.team = normalizeTeamForRoom(playerSession, playerSession.team);
+  playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
+  playerSession.spawned = false;
+  playerSession.dead = false;
+  playerSession.moveSeen = false;
+  playerSession.moveCount = 0;
+  playerSession.waitingSelfSpawnMove = false;
+  const stats = sessionRuntimeStats(playerSession);
+  playerSession.health = stats.maxHealth;
+  playerSession.energy = stats.maxEnergy;
+}
+
+function scheduleStandardRoundLimit(room, channel = 0) {
+  clearStandardRoundTimer(room);
+  const timeLimitMs = Math.max(0, numberOr(room?.timeLimit, 0) * 60 * 1000);
+  if (!timeLimitMs) return;
+  const roundSeq = Number(room.standardRoundSeq || 0);
+  room.standardRoundTimer = setTimeout(() => {
+    try {
+      if (!room || rooms.get(room.name) !== room) return;
+      if (!isStandardRoundRoom(room) || room.standardRoundState !== "active" || Number(room.standardRoundSeq || 0) !== roundSeq) return;
+      finishStandardRound(room, standardRoundWinner(room), "time-limit", channel);
+    } catch (error) {
+      console.error(`[round] time-limit failed room=${room?.name || "unknown"} seq=${roundSeq}`, error);
+    }
+  }, timeLimitMs);
+  if (typeof room.standardRoundTimer.unref === "function") room.standardRoundTimer.unref();
+}
+
+function startStandardRound(room, channel = 0, reason = "sync") {
+  if (!isStandardRoundRoom(room) || room.standardRoundState === "pause" || room.standardRoundState === "active") return 0;
+  room.standardRoundSeq = Number(room.standardRoundSeq || 0) + 1;
+  room.standardRoundState = "active";
+  room.standardRoundWinner = 0;
+  room.startedAt = photonNow();
+  scheduleStandardRoundLimit(room, channel);
+  console.log(`[round] start room=${room.name} map=${room.map} mode=${room.mode} reason=${reason} players=${standardReadyPlayers(room).length} timeLimit=${room.timeLimit} fragLimit=${room.fragLimit}`);
+  return 1;
+}
+
+function beginNextStandardRound(room, roundSeq, channel = 0) {
+  if (!room || rooms.get(room.name) !== room) return;
+  if (!isStandardRoundRoom(room) || Number(room.standardRoundSeq || 0) !== Number(roundSeq)) return;
+
+  clearStandardRestartTimer(room);
+  if (isCtfRoom(room)) for (const flag of room.flags.values()) resetCtfFlag(room, flag, 4, channel);
+  resetControlPointsForRound(room, channel);
+  room.startedAt = photonNow();
+  room.standardRoundState = "ready";
+  room.standardRoundWinner = 0;
+  for (const playerSession of zombieRoomPlayers(room)) resetStandardPlayerForNextRound(playerSession);
+
+  const ready = standardReadyPlayers(room);
+  const newGameSent = sendStandardPayloadToReadyRoom(room, makeStandardNewGameEvent(room), channel);
+  const started = startStandardRound(room, channel, "round-restart");
+  console.log(`[round] restart room=${room.name} map=${room.map} mode=${room.mode} ready=${ready.length} newGamePeers=${newGameSent} spawn=client-request started=${started}`);
+}
+
+function scheduleStandardRestart(room, channel = 0) {
+  clearStandardRestartTimer(room);
+  const roundSeq = Number(room.standardRoundSeq || 0);
+  room.standardRestartTimer = setTimeout(() => {
+    try {
+      beginNextStandardRound(room, roundSeq, channel);
+    } catch (error) {
+      console.error(`[round] restart failed room=${room?.name || "unknown"} seq=${roundSeq}`, error);
+    }
+  }, STANDARD_ROUND_RESTART_MS);
+  if (typeof room.standardRestartTimer.unref === "function") room.standardRestartTimer.unref();
+}
+
+function finishStandardRound(room, winner, reason = "unknown", channel = 0, currentSession = null, currentResponses = null) {
+  if (!isStandardRoundRoom(room) || room.standardRoundState === "pause") return 0;
+  clearStandardRoundTimer(room);
+  room.standardRoundState = "pause";
+  room.standardRoundWinner = Number(winner || 0);
+  room.startedAt = photonNow();
+  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
+    if (Number(winner) === 1) room.standardTeam1Wins = numberOr(room.standardTeam1Wins, 0) + 1;
+    if (Number(winner) === 2) room.standardTeam2Wins = numberOr(room.standardTeam2Wins, 0) + 1;
+  }
+  const summaries = postStandardRoundBattleSummaries(room, winner, `round-${reason}`);
+
+  for (const playerSession of zombieRoomPlayers(room)) {
+    clearSpawnMoveWarningTimer(playerSession);
+    clearSpawnSelfRetryTimers(playerSession);
+    clearSessionWeaponReloadTimers(playerSession);
+    clearSessionActiveShotLedgers(playerSession);
+    clearSessionImpactTimers(playerSession);
+    clearPeerSpawnTimers(playerSession);
+    clearPickupSpawnRepairTimers(playerSession);
+    clearSpawnStallRecovery(playerSession);
+    playerSession.pendingSpawnBroadcast = null;
+    playerSession.waitingSelfSpawnMove = false;
+  }
+
+  const scoreSource = currentSession || standardReadyPlayers(room)[0] || zombieRoomPlayers(room)[0];
+  const payloads = [
+    scoreSource ? makeScoreUpdateEvent(scoreSource) : null,
+    makeStandardTimeOverEvent(room),
+  ].filter(Boolean);
+  let sent = 0;
+  for (const payload of payloads) sent += sendStandardPayloadToReadyRoom(room, payload, channel, currentSession, currentResponses);
+  scheduleStandardRestart(room, channel);
+  console.log(`[round] end room=${room.name} map=${room.map} mode=${room.mode} winner=${winner || "draw"} reason=${reason} players=${standardReadyPlayers(room).length} score=${hasTeamScoreMode(Number(room.mode)) ? `${teamScorePoints(scoreSource, 1)}:${teamScorePoints(scoreSource, 2)}` : "ffa"} summaries=${summaries} sent=${sent}`);
+  return sent;
+}
+
+function maybeFinishStandardRound(room, reason = "state", channel = 0, currentSession = null, currentResponses = null) {
+  if (!isStandardRoundRoom(room) || room.standardRoundState !== "active") return 0;
+  const fragLimit = Math.max(1, numberOr(room.fragLimit, 50));
+  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
+    const source = currentSession || zombieRoomPlayers(room)[0];
+    if (!source) return 0;
+    const red = teamScorePoints(source, 1);
+    const blue = teamScorePoints(source, 2);
+    if (red >= fragLimit || blue >= fragLimit) return finishStandardRound(room, red === blue ? 0 : (red > blue ? 1 : 2), reason, channel, currentSession, currentResponses);
+    return 0;
+  }
+  const winner = zombieRoomPlayers(room).find((playerSession) => numberOr(playerSession.points, playerSession.kills) >= fragLimit);
+  return winner ? finishStandardRound(room, winner.actorId, reason, channel, currentSession, currentResponses) : 0;
+}
+
+function resetZombieRoundScore(playerSession) {
+  playerSession.kills = 0;
+  playerSession.deaths = 0;
+  playerSession.points = 0;
+  playerSession.domination = 0;
+  playerSession.revenge = 0;
+  resetSessionFragState(playerSession);
+}
+
+function resetZombieInfectionProgress(playerSession) {
+  if (!playerSession) return;
+  playerSession.zombieInfectionHits = 0;
+  playerSession.zombieLastInfectorActorId = 0;
+}
+
+function resetZombieParticipantForHumanStart(playerSession) {
+  resetZombieRoundScore(playerSession);
+  resetZombieInfectionProgress(playerSession);
+  playerSession.team = HUMAN_TEAM;
+  playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
+  const stats = sessionRuntimeStats(playerSession);
+  playerSession.health = stats.maxHealth;
+  playerSession.energy = stats.maxEnergy;
+  playerSession.dead = false;
+}
+
+function chooseZombieBossActorId(room) {
+  const players = zombieAlivePlayers(room).length ? zombieAlivePlayers(room) : zombieReadyPlayers(room);
+  if (!players.length) return 0;
+  const index = Math.floor(Math.random() * players.length);
+  return Number(players[index]?.actorId || 0);
+}
+
+function makeZombieTimeOverEvent(room) {
+  return rawEvent(92, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(95), value: rawLong(room.startedAt) },
+      { key: rawByte(50), value: rawShortArray([room.zombieWins || 0, room.humanWins || 0]) },
+    ]) },
+  ]);
+}
+
+function makeZombieNewGameEvent(room) {
+  return rawEvent(91, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(95), value: rawLong(room.startedAt) },
+    ]) },
+  ]);
+}
+
+function clearZombieBossTimer(room) {
+  if (!room?.zombieBossTimer) return;
+  clearTimeout(room.zombieBossTimer);
+  room.zombieBossTimer = null;
+}
+
+function clearZombieRoundTimer(room) {
+  if (!room?.zombieRoundTimer) return;
+  clearTimeout(room.zombieRoundTimer);
+  room.zombieRoundTimer = null;
+}
+
+function clearZombieRestartTimer(room) {
+  if (!room?.zombieRestartTimer) return;
+  clearTimeout(room.zombieRestartTimer);
+  room.zombieRestartTimer = null;
+}
+
+function resetZombiePlayerForNextRound(playerSession) {
+  resetZombieRoundScore(playerSession);
+  resetZombieInfectionProgress(playerSession);
+  clearSpawnMoveWarningTimer(playerSession);
+  clearSpawnSelfRetryTimers(playerSession);
+  clearSessionWeaponReloadTimers(playerSession);
+  clearSessionActiveShotLedgers(playerSession);
+  clearSessionImpactTimers(playerSession);
+  clearPeerSpawnTimers(playerSession);
+  clearPickupSpawnRepairTimers(playerSession);
+  clearSpawnStallRecovery(playerSession);
+  playerSession.pendingSpawnBroadcast = null;
+  playerSession.pendingPickupSync = null;
+  playerSession.visibleItemIds = new Set();
+  playerSession.team = HUMAN_TEAM;
+  playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
+  playerSession.spawned = false;
+  playerSession.dead = false;
+  playerSession.moveSeen = false;
+  playerSession.moveCount = 0;
+  playerSession.waitingSelfSpawnMove = false;
+  const stats = sessionRuntimeStats(playerSession);
+  playerSession.health = stats.maxHealth;
+  playerSession.energy = stats.maxEnergy;
+}
+
+function beginNextZombieRound(room, roundSeq, channel = 0) {
+  if (!room || rooms.get(room.name) !== room) return;
+  if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== Number(roundSeq)) return;
+
+  clearZombieRestartTimer(room);
+  room.startedAt = photonNow();
+  room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
+  room.zombieBossActorId = 0;
+  room.zombieRoundWinnerTeam = 0;
+
+  for (const playerSession of zombieRoomPlayers(room)) {
+    resetZombiePlayerForNextRound(playerSession);
+  }
+
+  const ready = zombieReadyPlayers(room);
+  const newGame = makeZombieNewGameEvent(room);
+  const waitMode = makeZombieModeEvent(room.zombieMode);
+  const newGameSent = sendZombiePayloadToReadyRoom(room, newGame, channel);
+  const waitSent = sendZombiePayloadToReadyRoom(room, waitMode, channel);
+  const startSent = maybeStartZombieRound(room, channel, "round-restart");
+  console.log(`[zombie] restart room=${room.name} ready=${ready.length}/${ZOMBIE_MIN_PLAYERS} newGamePeers=${newGameSent} waitPeers=${waitSent} startSent=${startSent}`);
+}
+
+function scheduleZombieRestart(room, channel = 0) {
+  clearZombieRestartTimer(room);
+  const roundSeq = Number(room.zombieRoundSeq || 0);
+  room.zombieRestartTimer = setTimeout(() => beginNextZombieRound(room, roundSeq, channel), ZOMBIE_ROUND_RESTART_MS);
+  if (typeof room.zombieRestartTimer.unref === "function") room.zombieRestartTimer.unref();
+}
+
+function finishZombieRound(room, winnerTeam, reason = "unknown", channel = 0, currentSession = null, currentResponses = null) {
+  if (!isZombieRoom(room)) return 0;
+  if (zombieModeForRoom(room) === ZOMBIE_MODE.PAUSE) return 0;
+  const normalizedWinner = Number(winnerTeam) === HUMAN_TEAM ? HUMAN_TEAM : ZOMBIE_TEAM;
+  clearZombieBossTimer(room);
+  clearZombieRoundTimer(room);
+  room.zombieMode = ZOMBIE_MODE.PAUSE;
+  room.zombieBossActorId = 0;
+  room.zombieRoundWinnerTeam = normalizedWinner;
+  room.startedAt = photonNow();
+  if (normalizedWinner === ZOMBIE_TEAM) room.zombieWins = numberOr(room.zombieWins, 0) + 1;
+  else room.humanWins = numberOr(room.humanWins, 0) + 1;
+  const summaries = postZombieRoundBattleSummaries(room, normalizedWinner, `zombie-round-${reason}`);
+
+  for (const playerSession of zombieRoomPlayers(room)) {
+    clearSpawnMoveWarningTimer(playerSession);
+    clearSpawnSelfRetryTimers(playerSession);
+    clearSessionWeaponReloadTimers(playerSession);
+    clearSessionActiveShotLedgers(playerSession);
+    clearSessionImpactTimers(playerSession);
+    clearPeerSpawnTimers(playerSession);
+    clearPickupSpawnRepairTimers(playerSession);
+    clearSpawnStallRecovery(playerSession);
+    playerSession.pendingSpawnBroadcast = null;
+    playerSession.waitingSelfSpawnMove = false;
+  }
+
+  const scoreSource = currentSession || zombieReadyPlayers(room)[0] || zombieRoomPlayers(room)[0];
+  const payloads = [
+    scoreSource ? makeScoreUpdateEvent(scoreSource) : null,
+    makeZombieModeEvent(room.zombieMode),
+    makeZombieTimeOverEvent(room),
+  ].filter(Boolean);
+  const sent = sendZombiePayloadsToReadyRoom(room, payloads, channel, currentSession, currentResponses);
+  scheduleZombieRestart(room, channel);
+  console.log(`[zombie] round-end room=${room.name} winner=${normalizedWinner === ZOMBIE_TEAM ? "zombies" : "humans"} reason=${reason} aliveZ=${zombieAlivePlayers(room, ZOMBIE_TEAM).length} aliveH=${zombieAlivePlayers(room, HUMAN_TEAM).length} wins=${room.zombieWins || 0}:${room.humanWins || 0} summaries=${summaries} sent=${sent}`);
+  return sent;
+}
+
+function maybeFinishZombieRound(room, reason = "state", channel = 0, currentSession = null, currentResponses = null) {
+  if (!isZombieRoom(room) || zombieModeForRoom(room) !== ZOMBIE_MODE.MAIN) return 0;
+  const aliveHumans = zombieAlivePlayers(room, HUMAN_TEAM).length;
+  const aliveZombies = zombieAlivePlayers(room, ZOMBIE_TEAM).length;
+  if (aliveHumans <= 0) return finishZombieRound(room, ZOMBIE_TEAM, reason, channel, currentSession, currentResponses);
+  if (aliveZombies <= 0) return finishZombieRound(room, HUMAN_TEAM, reason, channel, currentSession, currentResponses);
+  return 0;
+}
+
+function queueZombiePeerActorRepairForReadyRoom(room, channel = 0, reason = "zombie-sync") {
+  if (!isZombieRoom(room) || !PEER_ACTOR_REPAIR_DELAYS_MS.length) return 0;
+  const players = zombieReadyPlayers(room);
+  for (const playerSession of players) {
+    queuePeerActorRepair(playerSession, channel, reason);
+  }
+  return players.length;
+}
+
+function queueZombiePlayerUpdateRepair(playerSession, channel = 0, reason = "zombie-update") {
+  const room = playerSession?.room;
+  const actorId = Number(playerSession?.actorId || 0);
+  if (!actorId || !isZombieRoom(room) || !ZOMBIE_UPDATE_REPAIR_DELAYS_MS.length) return 0;
+  const roundSeq = Number(room.zombieRoundSeq || 0);
+  let queued = 0;
+  for (const delayMs of ZOMBIE_UPDATE_REPAIR_DELAYS_MS) {
+    const waitMs = Math.max(0, Number(delayMs) || 0);
+    const timer = setTimeout(() => {
+      if (playerSession.room !== room || room.players.get(actorId) !== playerSession) return;
+      if (Number(room.zombieRoundSeq || 0) !== roundSeq) return;
+      if (!isZombiePlayerSession(playerSession) || playerSession.dead) return;
+      const sent = sendZombiePayloadToReadyRoom(room, makeZombiePlayerUpdateEvent(playerSession), channel);
+      console.log(`[zombie] update-repair actor=${actorId} type=${playerSession.zombieType} reason=${reason} delay=${waitMs}ms sent=${sent}`);
+    }, waitMs);
+    if (typeof timer.unref === "function") timer.unref();
+    queued += 1;
+  }
+  return queued;
+}
+
+function zombieRegenRange(session) {
+  if (Number(session?.zombieType) === ZOMBIE_TYPE.BOSS) {
+    return { min: ZOMBIE_BOSS_REGEN_MIN, max: ZOMBIE_BOSS_REGEN_MAX };
+  }
+  if (Number(session?.zombieType) === ZOMBIE_TYPE.REGULAR) {
+    return { min: ZOMBIE_REGULAR_REGEN_MIN, max: ZOMBIE_REGULAR_REGEN_MAX };
+  }
+  return null;
+}
+
+function runZombieRegenerationTick() {
+  for (const room of rooms.values()) {
+    if (!isZombieRoom(room) || zombieModeForRoom(room) !== ZOMBIE_MODE.MAIN) continue;
+    for (const playerSession of zombieAlivePlayers(room, ZOMBIE_TEAM)) {
+      const range = zombieRegenRange(playerSession);
+      if (!range || range.max <= 0) continue;
+      const stats = sessionRuntimeStats(playerSession);
+      const maxHealth = sessionMaxHealth(playerSession, stats);
+      const currentHealth = Math.round(clampNumber(playerSession.health ?? maxHealth, 0, maxHealth));
+      if (currentHealth <= 0 || currentHealth >= maxHealth) continue;
+      const amount = randomIntInclusive(range.min, range.max);
+      if (amount <= 0) continue;
+      playerSession.health = Math.min(maxHealth, currentHealth + amount);
+      const payload = makePlayerHealthEnergyEvent(playerSession);
+      const channel = reliableChannelForSession(playerSession, playerSession.lastChannel || 0);
+      const sent = sendReliableToSession(playerSession, payload, channel) ? 1 : 0;
+      console.log(`[zombie] regen actor=${playerSession.actorId} type=${playerSession.zombieType} hp=${currentHealth}->${playerSession.health}/${maxHealth} add=${playerSession.health - currentHealth} sent=${sent}`);
+    }
+  }
+}
+
+function beginZombieMain(room, roundSeq, channel = 0) {
+  if (!room || rooms.get(room.name) !== room) return;
+  if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== Number(roundSeq)) return;
+  const players = zombieReadyPlayers(room);
+  if (players.length < ZOMBIE_MIN_PLAYERS) {
+    room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
+    room.zombieBossActorId = 0;
+    room.zombieBossTimer = null;
+    sendZombiePayloadToReadyRoom(room, makeZombieModeEvent(room.zombieMode), channel);
+    console.log(`[zombie] main cancelled room=${room.name} ready=${players.length}/${ZOMBIE_MIN_PLAYERS}`);
     return;
   }
 
-  if (type === "death" || type === "score") {
-    const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
-    const victimPlayerId = Number(event.victimPlayerId || details.victimPlayerId || playerId || 0);
-    const hitZone = Number(event.hitZone ?? details.hitZone ?? 0);
-    const headshot = hitZone === 32 ? 1 : 0;
-    const nuts = hitZone === 16 ? 1 : 0;
-    const suicide = killerPlayerId > 0 && killerPlayerId === victimPlayerId;
-    const expAwarded = eventNumber(event, details, "expAwarded", 0);
-    const domination = eventNumber(event, details, "domination", 0);
-    const revenge = eventNumber(event, details, "revenge", 0);
-    const dominationStreak = eventNumber(event, details, "dominationStreak", 0);
-    const revengeStreak = eventNumber(event, details, "revengeStreak", 0);
-    details.domination = domination;
-    details.revenge = revenge;
-    details.dominationStreak = dominationStreak;
-    details.revengeStreak = revengeStreak;
+  const bossActorId = chooseZombieBossActorId(room);
+  const bossSession = room.players.get(bossActorId);
+  if (!bossSession) return;
 
-    if (victimPlayerId > 0) {
-      await incrementPlayerStats(client, victimPlayerId, {
-        d: 1,
-        s: suicide ? 1 : 0,
-        dhs: headshot,
-        dns: nuts
-      });
+  room.zombieMode = ZOMBIE_MODE.MAIN;
+  room.zombieBossActorId = bossActorId;
+  room.zombieBossTimer = null;
+
+  const stats = sessionRuntimeStats(bossSession);
+  bossSession.team = ZOMBIE_TEAM;
+  bossSession.zombieType = ZOMBIE_TYPE.BOSS;
+  resetZombieInfectionProgress(bossSession);
+  bossSession.spawned = true;
+  bossSession.dead = false;
+  bossSession.waitingSelfSpawnMove = false;
+  bossSession.health = sessionMaxHealth(bossSession, stats);
+  bossSession.energy = stats.maxEnergy;
+  clearSessionWeaponReloadTimers(bossSession);
+  clearSessionActiveShotLedgers(bossSession);
+  clearSessionImpactTimers(bossSession);
+
+  const modeEvent = makeZombieModeEvent(room.zombieMode);
+  const bossEvent = makeZombiePlayerUpdateEvent(bossSession);
+  const scoreEvent = makeScoreUpdateEvent(bossSession);
+  const modeSent = sendZombiePayloadToReadyRoom(room, modeEvent, channel);
+  const bossSent = sendZombiePayloadToReadyRoom(room, bossEvent, channel);
+  const scoreSent = sendZombiePayloadToReadyRoom(room, scoreEvent, channel);
+  const updateRepairs = queueZombiePlayerUpdateRepair(bossSession, channel, "zombie-main");
+  const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-main");
+  console.log(`[zombie] main room=${room.name} map=${room.map} boss=${bossActorId} players=${players.length} bossHp=${bossSession.health} modePeers=${modeSent} bossPeers=${bossSent} scorePeers=${scoreSent} updateRepairs=${updateRepairs} repairTargets=${repairTargets}`);
+}
+
+function scheduleZombieMain(room, channel = 0) {
+  clearZombieBossTimer(room);
+  const roundSeq = Number(room.zombieRoundSeq || 0);
+  room.zombieBossTimer = setTimeout(() => beginZombieMain(room, roundSeq, channel), ZOMBIE_BOSS_INFECTION_MS);
+  if (typeof room.zombieBossTimer.unref === "function") room.zombieBossTimer.unref();
+}
+
+function scheduleZombieRoundLimit(room, channel = 0) {
+  clearZombieRoundTimer(room);
+  const timeLimitMs = Math.max(0, numberOr(room?.timeLimit, 0) * 60 * 1000);
+  if (!timeLimitMs) return;
+  const roundSeq = Number(room.zombieRoundSeq || 0);
+  room.zombieRoundTimer = setTimeout(() => {
+    if (!room || rooms.get(room.name) !== room) return;
+    if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== roundSeq) return;
+    const winner = zombieAlivePlayers(room, HUMAN_TEAM).length > 0 ? HUMAN_TEAM : ZOMBIE_TEAM;
+    finishZombieRound(room, winner, "time-limit", channel);
+  }, timeLimitMs);
+  if (typeof room.zombieRoundTimer.unref === "function") room.zombieRoundTimer.unref();
+}
+
+function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSession = null, currentResponses = null) {
+  if (!isZombieRoom(room)) return 0;
+  if (zombieModeForRoom(room) !== ZOMBIE_MODE.WAIT_FOR_PLAYERS) return 0;
+  const players = zombieReadyPlayers(room);
+  if (players.length < ZOMBIE_MIN_PLAYERS) return 0;
+
+  room.zombieRoundSeq = Number(room.zombieRoundSeq || 0) + 1;
+  room.zombieMode = ZOMBIE_MODE.BOSS_INFECTION;
+  room.zombieBossActorId = 0;
+  room.zombieRoundWinnerTeam = 0;
+  room.startedAt = photonNow();
+
+  let sent = 0;
+  for (const playerSession of players) {
+    resetZombieParticipantForHumanStart(playerSession);
+    const spawnEvent = buildSpawnEvent(playerSession, HUMAN_TEAM, "zombie-round-start");
+    sent += sendZombiePayloadToReadyRoom(room, spawnEvent, channel, currentSession, currentResponses);
+  }
+  sent += sendZombiePayloadToReadyRoom(room, makeZombieModeEvent(room.zombieMode), channel, currentSession, currentResponses);
+
+  scheduleZombieMain(room, channel);
+  scheduleZombieRoundLimit(room, channel);
+  const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-round-start");
+  console.log(`[zombie] start room=${room.name} map=${room.map} reason=${reason} ready=${players.length}/${ZOMBIE_MIN_PLAYERS} boss=random-after-spawn infectionMs=${ZOMBIE_BOSS_INFECTION_MS} regularHits=${ZOMBIE_REGULAR_INFECTION_HITS} sent=${sent} repairTargets=${repairTargets}`);
+  return sent;
+}
+
+function maybeAppendZombieLateJoinSpawn(session, responses, channel = 0) {
+  const room = session?.room;
+  if (!isZombieRoom(room) || !Array.isArray(responses)) return false;
+  if (zombieModeForRoom(room) < ZOMBIE_MODE.BOSS_INFECTION || session.spawned) return false;
+  session.team = HUMAN_TEAM;
+  session.zombieType = ZOMBIE_TYPE.HUMAN;
+  const spawnEvent = buildSpawnEvent(session, HUMAN_TEAM, "zombie-late-join");
+  responses.push(spawnEvent);
+  sendZombiePayloadToReadyRoom(room, spawnEvent, channel, session, []);
+  const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-late-join");
+  console.log(`[zombie] late-join spawn actor=${session.actorId} room=${room.name} mode=${zombieModeForRoom(room)} repairTargets=${repairTargets}`);
+  return true;
+}
+
+function buildPeerSpawnReplayEvents(targetSession) {
+  if (!REPLAY_PEER_SPAWNS_AFTER_SELF) return [];
+  const room = targetSession?.room;
+  if (!room?.players?.size) return [];
+
+  const events = [];
+  for (const [actorId, playerSession] of room.players.entries()) {
+    if (!playerSession || playerSession === targetSession || !playerSession.spawned || playerSession.dead) continue;
+    if (!sessionHasActorData(targetSession, actorId)) continue;
+    const announceAge = actorAnnounceAgeMs(targetSession, actorId);
+    if (!sessionKnowsActor(targetSession, actorId) && announceAge != null && announceAge < ACTOR_JOIN_ASYNC_DELAY_MS) {
+      continue;
     }
-    if (!suicide && killerPlayerId > 0) {
-      await incrementPlayerStats(client, killerPlayerId, {
-        k: 1,
-        hs: headshot,
-        ns: nuts,
-        do: domination,
-        re: revenge
-      }, {
-        mdo: dominationStreak,
-        mre: revengeStreak
-      });
-      await incrementWeaponStats(client, killerPlayerId, event, details, {
-        kills: 1,
-        headshots: headshot,
-        nuts
-      });
-      if (expAwarded > 0) {
-        const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded);
-        if (expResult) {
-          details.expAwarded = expAwarded;
-          details.expResult = expResult;
-        }
-        const clan = playerClanRecord(killerPlayerId);
-        const member = clan?.members?.[String(killerPlayerId)];
-        const exp2clan = eventNumber(event, details, "exp2clan", 0) || Math.round(expAwarded * Number(member?.expKoef || 0) / 100);
-        if (exp2clan > 0) {
-          const clanExpResult = await awardClanExperience(client, killerPlayerId, exp2clan);
-          if (clanExpResult) {
-            details.exp2clan = exp2clan;
-            details.clanExpResult = clanExpResult;
+
+    const event = makeSpawnEventFromSession(playerSession);
+    if (event) events.push(event);
+  }
+
+  if (events.length > 0) {
+    console.log(`[sync] peer-spawn-after-self target=${targetSession.actorId} peers=${events.length}`);
+  }
+  return events;
+}
+
+function describeWeaponEventData(data) {
+  const slot = htGet(data, 78)?.value;
+  const weaponType = htGet(data, 89)?.value;
+  const loadedAmmo = htGet(data, 81)?.value;
+  const ammoReserve = htGet(data, 80)?.value;
+  const parts = [];
+  if (slot != null) parts.push(`slot=${slot}`);
+  if (weaponType != null) parts.push(`type=${weaponType}`);
+  if (loadedAmmo != null) parts.push(`loaded=${loadedAmmo}`);
+  if (ammoReserve != null) parts.push(`reserve=${ammoReserve}`);
+  return parts.length ? ` ${parts.join(" ")}` : "";
+}
+
+function buildActorEchoEvent(session, eventCode, parsed, reason) {
+  const data = parsed?.params?.get(245);
+  if (!data?.raw) return null;
+  console.log(`[event] ${reason} actor=${session.actorId}${describeWeaponEventData(data)}`);
+  return rawEvent(eventCode, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: data.raw },
+  ]);
+}
+
+function moveDataRawWithRotationKey(data) {
+  if (!ADD_MOVE_ROTATION_KEY || !data?.value?.entries || htGet(data, 7) !== undefined) {
+    return data?.raw || null;
+  }
+
+  const yaw = Number(htGet(data, 5)?.value);
+  if (!Number.isFinite(yaw)) return data.raw;
+
+  const entries = [];
+  for (const entry of data.value.entries) {
+    if (!entry?.key?.raw || !entry?.value?.raw) return data.raw;
+    entries.push({ key: entry.key.raw, value: entry.value.raw });
+  }
+  entries.push({ key: rawByte(7), value: rawFloat(yaw) });
+  return rawHashtable(entries);
+}
+
+function buildActorDataEvent(session, eventCode, parsed) {
+  const data = parsed?.params?.get(245);
+  if (!data?.raw) return null;
+  const dataRaw = eventCode === 99 ? moveDataRawWithRotationKey(data) : data.raw;
+  if (!dataRaw) return null;
+  return rawEvent(eventCode, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: dataRaw },
+  ]);
+}
+
+function weaponStateBySlot(session, slot) {
+  if (!session.weaponStates) session.weaponStates = makeWeaponRuntimeState(null);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const expiredWorkshopState = Array.from(session.weaponStates.values()).some(
+    (state) => numberOr(state.workshopExpiresAt, 0) > 0 && numberOr(state.workshopExpiresAt, 0) <= nowSeconds
+  );
+  if (expiredWorkshopState) {
+    session.weaponStates = makeWeaponRuntimeState(session.loadedProfile || null);
+    console.log(`[workshop] expired runtime actor=${session.actorId || 0} player=${session.playerId || 0}`);
+  }
+  return session.weaponStates.get(Number(slot)) || null;
+}
+
+function weaponStateByType(session, weaponType) {
+  const type = Number(weaponType);
+  if (!Number.isFinite(type)) return null;
+  const current = weaponStateBySlot(session, session.currentWeaponSlot);
+  if (current && current.type === type) return current;
+  for (const state of session.weaponStates?.values?.() || []) {
+    if (state.type === type) return state;
+  }
+  return null;
+}
+
+function weaponStateConfirmKey(state) {
+  if (!state) return "";
+  return `${state.slot}:${state.type}:${state.weaponId}:${state.systemName}`;
+}
+
+function buildWeaponChangePayloadFromState(state) {
+  if (!state) return null;
+  return rawHashtable([
+    { key: rawByte(78), value: rawInt(state.slot) },
+    { key: rawByte(89), value: rawByte(state.type) },
+  ]);
+}
+
+function buildWeaponChangeEventFromState(session, state) {
+  const payload = buildWeaponChangePayloadFromState(state);
+  if (!payload) return null;
+  return rawEvent(98, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: payload },
+  ]);
+}
+
+function buildShotWeaponConfirm(session, state) {
+  if (!state) return null;
+  const key = weaponStateConfirmKey(state);
+  if (!key) return null;
+  const event = buildWeaponChangeEventFromState(session, state);
+  return event ? { event, key, state } : null;
+}
+
+function invalidatePeerWeaponConfirm(room, actorId) {
+  if (!room?.players) return;
+  for (const playerSession of room.players.values()) {
+    playerSession?.peerWeaponConfirmKeys?.delete(Number(actorId));
+  }
+}
+
+function peerWeaponConfirmKnown(playerSession, actorId, key) {
+  return playerSession?.peerWeaponConfirmKeys?.get(Number(actorId)) === key;
+}
+
+function markPeerWeaponConfirm(playerSession, actorId, key) {
+  if (!playerSession.peerWeaponConfirmKeys) playerSession.peerWeaponConfirmKeys = new Map();
+  playerSession.peerWeaponConfirmKeys.set(Number(actorId), key);
+}
+
+function broadcastShotWeaponConfirmToRoom(sourceSession, confirm, channel = 0) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !confirm?.event || !confirm.key) return 0;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession) continue;
+    if (!playerSession.gameStateRequested || !playerSession.moveSeen) continue;
+    if (peerWeaponConfirmKnown(playerSession, sourceSession.actorId, confirm.key)) continue;
+    if (sendReliableToSession(playerSession, confirm.event, channel)) {
+      markPeerWeaponConfirm(playerSession, sourceSession.actorId, confirm.key);
+      sent += 1;
+    }
+  }
+  return sent;
+}
+
+function shotConsumesAmmo(weaponType, launchMode) {
+  const type = Number(weaponType);
+  const mode = Number(launchMode ?? 0);
+  if (isColdArmsWeaponType(type)) return false;
+  if (isActiveItemWeaponType(type)) return false;
+  if (type === 6) return mode === LAUNCH_MODE.SHOT;
+  if (type === 8 || type === 9 || type === 15) return mode === LAUNCH_MODE.LAUNCH;
+  return mode === LAUNCH_MODE.SHOT;
+}
+
+function isMineWeaponType(type) {
+  return ACTIVE_MINE_WEAPON_TYPES.has(Number(type));
+}
+
+function isTurretWeaponType(type) {
+  return ACTIVE_TURRET_WEAPON_TYPES.has(Number(type));
+}
+
+function isActiveItemWeaponType(type) {
+  return ACTIVE_ITEM_WEAPON_TYPES.has(Number(type));
+}
+
+function isProjectileWeaponType(type) {
+  const weaponType = Number(type);
+  return weaponType === 8 || weaponType === 9 || weaponType === 15;
+}
+
+function isArcingProjectileWeaponType(type) {
+  const weaponType = Number(type);
+  return weaponType === 9 || weaponType === 15;
+}
+
+function isProjectileLaunchShot(state, launchMode) {
+  return isProjectileWeaponType(state?.type) && Number(launchMode ?? 0) === LAUNCH_MODE.LAUNCH;
+}
+
+function isProjectileImpactShot(state, launchMode) {
+  return isProjectileWeaponType(state?.type) && Number(launchMode ?? 0) === LAUNCH_MODE.SHOT;
+}
+
+function shotHasLaunchTiming(data) {
+  return htGet(data, 9)?.value != null && htGet(data, 14)?.value != null;
+}
+
+function shotLaunchMode(data, fallback = LAUNCH_MODE.SHOT) {
+  const explicit = htGet(data, 16)?.value;
+  if (explicit != null) return numberOr(explicit, fallback);
+  return shotHasLaunchTiming(data) ? LAUNCH_MODE.LAUNCH : fallback;
+}
+
+function shouldForceExplicitProjectileLaunchMode(data, weaponType, launchMode) {
+  return (
+    isProjectileWeaponType(weaponType) &&
+    Number(launchMode ?? LAUNCH_MODE.SHOT) === LAUNCH_MODE.LAUNCH &&
+    htGet(data, 16)?.value == null
+  );
+}
+
+function describeProjectileLaunchPayloadKeys(data, weaponType, launchMode) {
+  if (!isProjectileWeaponType(weaponType) || Number(launchMode ?? LAUNCH_MODE.SHOT) !== LAUNCH_MODE.LAUNCH) return "";
+  const hasKey = (key) => (htGet(data, key)?.value != null ? 1 : 0);
+  return ` projectileKeys=8:${hasKey(8)},9:${hasKey(9)},14:${hasKey(14)},15:${hasKey(15)},16:${hasKey(16)}`;
+}
+
+function shotTimestampKey(data) {
+  const value = htGet(data, 8)?.value;
+  if (value == null) return "";
+  if (typeof value === "bigint") return value.toString();
+  const number = Number(value);
+  if (Number.isFinite(number)) return String(Math.trunc(number));
+  return String(value);
+}
+
+function projectileImpactExpiresAt(data, now = Date.now()) {
+  const launchAt = Number(htGet(data, 8)?.value);
+  const landingAt = Number(htGet(data, 9)?.value);
+  const flightMs = Number.isFinite(launchAt) && Number.isFinite(landingAt) && landingAt > launchAt
+    ? landingAt - launchAt
+    : PROJECTILE_SHOT_MAX_AGE_MS;
+  const ttlMs = clampNumber(
+    flightMs + PROJECTILE_IMPACT_GRACE_MS,
+    PROJECTILE_IMPACT_GRACE_MS,
+    PROJECTILE_SHOT_MAX_AGE_MS
+  );
+  return now + ttlMs;
+}
+
+function activeItemShotExpiresAt(data, now = Date.now()) {
+  const launchAt = Number(htGet(data, 8)?.value);
+  const landingAt = Number(htGet(data, 9)?.value);
+  const lifeMs = Number.isFinite(launchAt) && Number.isFinite(landingAt) && landingAt > launchAt
+    ? landingAt - launchAt
+    : ACTIVE_ITEM_SHOT_MAX_AGE_MS;
+  const ttlMs = clampNumber(
+    lifeMs + ACTIVE_ITEM_SHOT_GRACE_MS,
+    ACTIVE_ITEM_SHOT_GRACE_MS,
+    ACTIVE_ITEM_SHOT_MAX_AGE_MS
+  );
+  return now + ttlMs;
+}
+
+function trimActiveProjectileShots(state, now = Date.now()) {
+  const shots = state?.activeProjectileShots;
+  if (!(shots instanceof Map)) return;
+  for (const [key, entry] of shots.entries()) {
+    const expiresAt = numberOr(
+      entry?.expiresAt,
+      numberOr(entry?.createdAt, now) + PROJECTILE_SHOT_MAX_AGE_MS
+    );
+    if (!entry || now > expiresAt) {
+      shots.delete(key);
+    }
+  }
+  while (shots.size > MAX_ACTIVE_PROJECTILE_SHOTS) {
+    const oldestKey = shots.keys().next().value;
+    if (oldestKey == null) break;
+    shots.delete(oldestKey);
+  }
+}
+
+function isTripleRocketWeaponState(state) {
+  const name = stringOr(state?.systemName, "").toLowerCase();
+  return name.includes("triplerocket") || name.includes("triple_rocket") || (name.includes("triple") && name.includes("rocket"));
+}
+
+function projectileImpactLimitForState(state) {
+  return isTripleRocketWeaponState(state) ? 3 : 1;
+}
+
+function rememberProjectileLaunch(state, data, now = Date.now()) {
+  if (!state) return;
+  if (!(state.activeProjectileShots instanceof Map)) state.activeProjectileShots = new Map();
+  trimActiveProjectileShots(state, now);
+  const key = shotTimestampKey(data);
+  if (!key) return;
+  const impactLimit = projectileImpactLimitForState(state);
+  state.activeProjectileShots.set(key, {
+    createdAt: now,
+    expiresAt: projectileImpactExpiresAt(data, now),
+    impactLimit,
+    remainingImpacts: impactLimit,
+  });
+  trimActiveProjectileShots(state, now);
+}
+
+function consumeProjectileImpact(state, data, now = Date.now()) {
+  const shots = state?.activeProjectileShots;
+  if (!(shots instanceof Map)) return { ok: false, reason: "projectile-missing-launch" };
+  trimActiveProjectileShots(state, now);
+  const key = shotTimestampKey(data);
+  if (!key) return { ok: false, reason: "projectile-missing-timestamp" };
+  const entry = shots.get(key);
+  if (!entry) return { ok: false, reason: "projectile-missing-launch" };
+  const remainingImpacts = Math.max(1, numberOr(entry.remainingImpacts, 1));
+  if (remainingImpacts > 1) {
+    entry.remainingImpacts = remainingImpacts - 1;
+  } else {
+    shots.delete(key);
+  }
+  return { ok: true, reason: "projectile-impact" };
+}
+
+function ensureActiveItemShots(session) {
+  if (!session) return null;
+  if (!(session.activeItemShots instanceof Map)) session.activeItemShots = new Map();
+  return session.activeItemShots;
+}
+
+function trimActiveItemShots(session, now = Date.now()) {
+  const shots = session?.activeItemShots;
+  if (!(shots instanceof Map)) return;
+  for (const [key, entry] of shots.entries()) {
+    const expiresAt = numberOr(
+      entry?.expiresAt,
+      numberOr(entry?.createdAt, now) + ACTIVE_ITEM_SHOT_MAX_AGE_MS
+    );
+    if (!entry || now > expiresAt) {
+      shots.delete(key);
+    }
+  }
+  while (shots.size > MAX_ACTIVE_ITEM_SHOTS) {
+    const oldestKey = shots.keys().next().value;
+    if (oldestKey == null) break;
+    shots.delete(oldestKey);
+  }
+}
+
+function rememberActiveItemLaunch(session, weaponType, data, now = Date.now()) {
+  const key = shotTimestampKey(data);
+  if (!key) return { ok: false, reason: "active-item-missing-timestamp" };
+  const shots = ensureActiveItemShots(session);
+  if (!shots) return { ok: false, reason: "active-item-missing-session" };
+  trimActiveItemShots(session, now);
+  const type = Number(weaponType);
+  const turretReadyAt = isTurretWeaponType(type) ? now + TURRET_SHOT_WARMUP_MS : 0;
+  shots.set(key, {
+    type,
+    createdAt: now,
+    expiresAt: activeItemShotExpiresAt(data, now),
+    turretReadyAt,
+    nextTurretShotAt: turretReadyAt,
+    controlCount: 0,
+    shotCount: 0,
+  });
+  trimActiveItemShots(session, now);
+  return { ok: true, reason: "active-item-launch" };
+}
+
+function activeItemEntry(session, weaponType, data, now = Date.now()) {
+  const shots = session?.activeItemShots;
+  if (!(shots instanceof Map)) return { ok: false, reason: "active-item-missing-launch" };
+  trimActiveItemShots(session, now);
+  const key = shotTimestampKey(data);
+  if (!key) return { ok: false, reason: "active-item-missing-timestamp" };
+  const entry = shots.get(key);
+  if (!entry) return { ok: false, reason: "active-item-missing-launch" };
+  const type = Number(weaponType);
+  if (Number(entry.type) !== type) {
+    return { ok: false, reason: "active-item-type-mismatch" };
+  }
+  return { ok: true, key, entry, shots };
+}
+
+function consumeActiveItemEntry(session, weaponType, data, now = Date.now()) {
+  const found = activeItemEntry(session, weaponType, data, now);
+  if (!found.ok) return found;
+  found.shots.delete(found.key);
+  return found;
+}
+
+function allowActiveItemShot(session, weaponType, launchMode, data, now = Date.now()) {
+  const type = Number(weaponType);
+  if (!isActiveItemWeaponType(type)) return null;
+
+  const mode = Number(launchMode ?? LAUNCH_MODE.SHOT);
+  if (mode === LAUNCH_MODE.LAUNCH) {
+    const launch = rememberActiveItemLaunch(session, type, data, now);
+    return launch.ok
+      ? { ok: true, reason: launch.reason, intervalMs: 0 }
+      : { ok: false, reason: launch.reason, intervalMs: 0 };
+  }
+
+  if (isMineWeaponType(type) && mode === LAUNCH_MODE.SHOT) {
+    const mine = consumeActiveItemEntry(session, type, data, now);
+    return mine.ok
+      ? { ok: true, reason: "mine-shot", intervalMs: 0 }
+      : { ok: false, reason: mine.reason, intervalMs: 0 };
+  }
+
+  if (mode === LAUNCH_MODE.BLOW || mode === LAUNCH_MODE.DISACTIVATE) {
+    const item = consumeActiveItemEntry(session, type, data, now);
+    if (!item.ok) return { ok: false, reason: item.reason, intervalMs: 0 };
+    const reason = isTurretWeaponType(type)
+      ? "turret-blow"
+      : (mode === LAUNCH_MODE.DISACTIVATE ? "active-item-disactivate" : "mine-disactivate");
+    return { ok: true, reason, intervalMs: 0 };
+  }
+
+  if (mode === LAUNCH_MODE.TURRET_CONTROL) {
+    if (type !== 102) return { ok: false, reason: "turret-control-type", intervalMs: 0 };
+    const turret = activeItemEntry(session, type, data, now);
+    if (!turret.ok) return { ok: false, reason: turret.reason, intervalMs: 0 };
+    turret.entry.controlCount = numberOr(turret.entry.controlCount, 0) + 1;
+    return { ok: true, reason: "turret-control", intervalMs: 0 };
+  }
+
+  if (mode === LAUNCH_MODE.TURRET_SHOT) {
+    if (!isTurretWeaponType(type)) return { ok: false, reason: "turret-shot-type", intervalMs: 0 };
+    const turret = activeItemEntry(session, type, data, now);
+    if (!turret.ok) return { ok: false, reason: turret.reason, intervalMs: 0 };
+    const readyAt = numberOr(turret.entry.turretReadyAt, numberOr(turret.entry.createdAt, now) + TURRET_SHOT_WARMUP_MS);
+    if (now + TURRET_SHOT_TIMER_GRACE_MS < readyAt) {
+      return { ok: false, reason: "turret-warmup", waitMs: readyAt - now, intervalMs: TURRET_SHOT_INTERVAL_MS };
+    }
+    const nextAt = numberOr(turret.entry.nextTurretShotAt, 0);
+    if (nextAt > 0 && now + TURRET_SHOT_TIMER_GRACE_MS < nextAt) {
+      return { ok: false, reason: "turret-rate", waitMs: nextAt - now, intervalMs: TURRET_SHOT_INTERVAL_MS };
+    }
+    turret.entry.nextTurretShotAt = now + TURRET_SHOT_INTERVAL_MS;
+    turret.entry.shotCount = numberOr(turret.entry.shotCount, 0) + 1;
+    return { ok: true, reason: "turret-shot", intervalMs: TURRET_SHOT_INTERVAL_MS };
+  }
+
+  return { ok: false, reason: "active-item-mode", intervalMs: 0 };
+}
+
+function isWeaponControlShot(state, launchMode) {
+  if (!state) return false;
+  if (isColdArmsWeaponType(state.type)) return false;
+  return !shotConsumesAmmo(state.type, launchMode);
+}
+
+function isLaunchLoopWeaponType(type) {
+  const weaponType = Number(type);
+  return weaponType === 5 || weaponType === 6 || weaponType === 11 || weaponType === 12;
+}
+
+function isGatlingWeaponType(type) {
+  return Number(type) === 6;
+}
+
+function isComplexReloadWeaponState(state) {
+  const type = Number(state?.type);
+  return (type === 7 || type === 8 || type === 9 || type === 15) && numberOr(state?.maxLoadedAmmo, 0) >= 3;
+}
+
+function reloadSingleDurationMs(state) {
+  const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
+  if (!isComplexReloadWeaponState(state)) return fullReloadMs;
+  return Math.floor(fullReloadMs / Math.max(1, numberOr(state.maxLoadedAmmo, 1))) + 10;
+}
+
+function reloadDurationForAmountMs(state, amount) {
+  const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
+  if (!isComplexReloadWeaponState(state)) return fullReloadMs;
+  const shellCount = Math.max(1, numberOr(amount, 1));
+  return Math.min(fullReloadMs, reloadSingleDurationMs(state) * shellCount);
+}
+
+function isReloadWeaponMode(mode) {
+  return mode === WEAPON_MODE.RELOADING || mode === WEAPON_MODE.RELOADING_READY;
+}
+
+function shotReadyAt(state) {
+  return numberOr(state?.shotStartedAt, 0) + numberOr(state?.shotIntervalMs, shotIntervalMsFromRapidity(state?.rapidity));
+}
+
+function isShotReadyWithinSlack(state, now = Date.now()) {
+  return Math.max(0, shotReadyAt(state) - now) <= SHOT_THROTTLE_SLACK_MS;
+}
+
+function launchReadyAt(state) {
+  return numberOr(state?.launchStartedAt, 0) + numberOr(state?.launchDurationMs, DEFAULT_WEAPON_LAUNCH_DURATION_MS);
+}
+
+function setWeaponMode(state, mode, now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+  state.weaponMode = mode;
+  state.modeStartedAt = now;
+  return mode;
+}
+
+function resetWeaponActionState(state) {
+  if (!state) return;
+  state.nextShotAt = 0;
+  state.shotStartedAt = 0;
+  state.launchStartedAt = 0;
+  state.meleeDelayedShotUntil = 0;
+  state.meleeDelayedShotUsed = false;
+}
+
+function resetWeaponReloadState(state) {
+  if (!state) return;
+  state.reloading = false;
+  state.reloadStartedAt = 0;
+  state.reloadReadyAt = 0;
+  state.reloadFullUntil = 0;
+}
+
+function completeWeaponReloadState(state, now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+  clearWeaponReloadTimer(state);
+  resetWeaponReloadState(state);
+  return setWeaponMode(state, WEAPON_MODE.READY, now);
+}
+
+function refreshWeaponMode(state, now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+
+  const mode = state.weaponMode || WEAPON_MODE.READY;
+  if (mode === WEAPON_MODE.CHANGING) {
+    if (numberOr(state.changeUntil, 0) > 0 && now >= state.changeUntil) {
+      state.changeUntil = 0;
+      return setWeaponMode(state, WEAPON_MODE.READY, now);
+    }
+    return mode;
+  }
+
+  if (mode === WEAPON_MODE.SHOOTING) {
+    if (numberOr(state.shotStartedAt, 0) > 0 && now >= shotReadyAt(state)) {
+      return setWeaponMode(state, isLaunchLoopWeaponType(state.type) ? WEAPON_MODE.LAUNCHING : WEAPON_MODE.READY, now);
+    }
+    return mode;
+  }
+
+  if (mode === WEAPON_MODE.LAUNCHING) {
+    return mode;
+  }
+
+  if (!isReloadWeaponMode(mode)) return mode;
+  if (!state.reloading || numberOr(state.reloadFullUntil, 0) <= 0) {
+    resetWeaponReloadState(state);
+    return setWeaponMode(state, WEAPON_MODE.READY, now);
+  }
+
+  if (now >= state.reloadFullUntil) {
+    return completeWeaponReloadState(state, now);
+  }
+
+  if (
+    mode === WEAPON_MODE.RELOADING &&
+    isComplexReloadWeaponState(state) &&
+    numberOr(state.reloadReadyAt, 0) > 0 &&
+    now >= state.reloadReadyAt
+  ) {
+    return setWeaponMode(state, WEAPON_MODE.RELOADING_READY, now);
+  }
+
+  return mode;
+}
+
+function startWeaponChange(state, reason = "interrupted-by-change", now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+  cancelWeaponReload(state, reason, now);
+  resetWeaponActionState(state);
+  state.changeUntil = now + numberOr(state.changeDurationMs, WEAPON_CHANGE_DURATION_MS);
+  return setWeaponMode(state, WEAPON_MODE.CHANGING, now);
+}
+
+function startWeaponLaunching(state, now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+  state.launchStartedAt = now;
+  state.nextShotAt = 0;
+  return setWeaponMode(state, WEAPON_MODE.LAUNCHING, now);
+}
+
+function startWeaponShooting(state, now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+  state.shotStartedAt = now;
+  state.nextShotAt = now + numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  return setWeaponMode(state, WEAPON_MODE.SHOOTING, now);
+}
+
+function stopWeaponAction(state, now = Date.now()) {
+  if (!state) return WEAPON_MODE.READY;
+  resetWeaponActionState(state);
+  return setWeaponMode(state, WEAPON_MODE.READY, now);
+}
+
+function startMeleeShotChain(state, now = Date.now()) {
+  startWeaponShooting(state, now);
+  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  state.meleeDelayedShotUntil = now + Math.max(MELEE_DELAYED_SHOT_MS, intervalMs) + MELEE_DELAYED_SHOT_GRACE_MS;
+  state.meleeDelayedShotUsed = false;
+}
+
+function consumeMeleeDelayedShot(state) {
+  if (!state) return;
+  state.meleeDelayedShotUsed = true;
+  state.meleeDelayedShotUntil = 0;
+}
+
+function clearWeaponReloadTimer(state) {
+  if (!state?.reloadTimer) return;
+  clearTimeout(state.reloadTimer);
+  state.reloadTimer = null;
+}
+
+function cancelWeaponReload(state, reason = "cancel", now = Date.now()) {
+  if (!state) return;
+  clearWeaponReloadTimer(state);
+  if (state.reloading) {
+    console.log(`[event] reload ${reason} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+  }
+  resetWeaponReloadState(state);
+  setWeaponMode(state, WEAPON_MODE.READY, now);
+}
+
+function clearSessionWeaponReloadTimers(session) {
+  for (const state of session?.weaponStates?.values?.() || []) {
+    cancelWeaponReload(state, "clear");
+  }
+}
+
+function resetWeaponStateForSpawn(state, now = Date.now()) {
+  if (!state) return null;
+  clearWeaponReloadTimer(state);
+  state.reloadSeq = (state.reloadSeq || 0) + 1;
+  resetWeaponReloadState(state);
+  resetWeaponActionState(state);
+  state.changeUntil = 0;
+  state.loadedAmmo = Math.max(0, numberOr(state.maxLoadedAmmo, 0));
+  state.ammoReserve = Math.max(0, numberOr(state.maxAmmoReserve, 0) - state.loadedAmmo);
+  state.activeProjectileShots = new Map();
+  setWeaponMode(state, WEAPON_MODE.READY, now);
+  return `${state.slot}:${state.loadedAmmo}/${state.ammoReserve}`;
+}
+
+function resetSessionWeaponStatesForSpawn(session, reason = "spawn") {
+  const summaries = [];
+  const now = Date.now();
+  for (const state of session?.weaponStates?.values?.() || []) {
+    const summary = resetWeaponStateForSpawn(state, now);
+    if (summary) summaries.push(summary);
+  }
+  session.currentWeaponSlot = 1;
+  invalidatePeerWeaponConfirm(session.room, session.actorId);
+  if (summaries.length > 0) {
+    console.log(`[event] weapon-reset actor=${session.actorId} reason=${reason} slots=${summaries.length} ammo=${summaries.join(",")}`);
+  }
+}
+
+function clearSessionActiveShotLedgers(session) {
+  if (!session) return;
+  session.activeItemShots = new Map();
+  for (const state of session.weaponStates?.values?.() || []) {
+    state.activeProjectileShots = new Map();
+  }
+}
+
+function makeReloadUpdateEvent(session, state) {
+  if (!state || isColdArmsWeaponType(state.type)) return null;
+  const reload = rawHashtable([
+    { key: rawByte(78), value: rawInt(state.index) },
+    { key: rawByte(81), value: rawInt(state.loadedAmmo) },
+    { key: rawByte(80), value: rawInt(state.ammoReserve) },
+    { key: rawByte(89), value: rawByte(state.type) },
+  ]);
+  return rawEvent(96, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: reload },
+  ]);
+}
+
+function scheduleReloadTick(session, state, channel, reloadSeq, delayMs) {
+  clearWeaponReloadTimer(state);
+  state.reloadTimer = setTimeout(() => {
+    state.reloadTimer = null;
+    applyReloadTick(session, state, channel, reloadSeq);
+  }, Math.max(0, delayMs));
+  if (typeof state.reloadTimer.unref === "function") {
+    state.reloadTimer.unref();
+  }
+}
+
+function applyReloadTick(session, state, channel, reloadSeq) {
+  if (!session || !state || state.reloadSeq !== reloadSeq || !state.reloading) return;
+  if (session.weaponStates?.get?.(state.slot) !== state) return;
+
+  const now = Date.now();
+  const fullReloadMs = numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
+  const singleReloadMs = reloadSingleDurationMs(state);
+  const missing = Math.max(0, state.maxLoadedAmmo - state.loadedAmmo);
+  const reserve = Math.max(0, state.ammoReserve);
+  const complex = isComplexReloadWeaponState(state);
+
+  if (!complex) {
+    if (missing > 0 && reserve > 0) {
+      const amount = Math.min(missing, reserve);
+      state.loadedAmmo += amount;
+      state.ammoReserve -= amount;
+      const event = makeReloadUpdateEvent(session, state);
+      sendReliableToSession(session, event, channel);
+      broadcastReliableToRoom(session, event, channel, "reload", { requireLiveReady: true });
+      console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
+    }
+    completeWeaponReloadState(state, now);
+    return;
+  }
+
+  if (state.weaponMode === WEAPON_MODE.RELOADING && now >= numberOr(state.reloadReadyAt, now)) {
+    setWeaponMode(state, WEAPON_MODE.RELOADING_READY, now);
+  }
+
+  if (missing > 0 && reserve > 0) {
+    const amount = 1;
+    state.loadedAmmo += amount;
+    state.ammoReserve -= amount;
+    const event = makeReloadUpdateEvent(session, state);
+    sendReliableToSession(session, event, channel);
+    broadcastReliableToRoom(session, event, channel, "reload", { requireLiveReady: true });
+    console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
+  }
+
+  const remainingMs = Math.max(0, numberOr(state.reloadFullUntil, now + fullReloadMs) - now);
+  if (remainingMs <= 0) {
+    completeWeaponReloadState(state, now);
+    return;
+  }
+
+  const nextShellMs = Math.min(singleReloadMs, COMPLEX_RELOAD_AMMO_CLIP_MS);
+  if (state.loadedAmmo < state.maxLoadedAmmo && state.ammoReserve > 0 && nextShellMs <= remainingMs) {
+    scheduleReloadTick(session, state, channel, reloadSeq, nextShellMs);
+    return;
+  }
+
+  scheduleReloadTick(session, state, channel, reloadSeq, remainingMs);
+}
+
+function allowWeaponShot(session, state, weaponType, launchMode, data) {
+  const now = Date.now();
+  const activeItem = allowActiveItemShot(session, weaponType, launchMode, data, now);
+  if (activeItem) return activeItem;
+  if (!state) return { ok: true, reason: "unknown-state" };
+
+  const weaponMode = refreshWeaponMode(state, now);
+  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  const consumesAmmo = shotConsumesAmmo(state.type, launchMode);
+
+  if (isProjectileImpactShot(state, launchMode)) {
+    const impact = consumeProjectileImpact(state, data, now);
+    if (impact.ok) return { ok: true, reason: impact.reason, intervalMs };
+    if (
+      isArcingProjectileWeaponType(state.type) &&
+      impact.reason === "projectile-missing-launch" &&
+      shotTimestampKey(data)
+    ) {
+      return { ok: true, reason: "projectile-impact-untracked", intervalMs };
+    }
+    return { ok: false, reason: impact.reason, intervalMs };
+  }
+
+  if (weaponMode === WEAPON_MODE.CHANGING) {
+    return { ok: false, reason: "changing", waitMs: Math.max(0, numberOr(state.changeUntil, now) - now), intervalMs };
+  }
+
+  if (weaponMode === WEAPON_MODE.RELOADING) {
+    return { ok: false, reason: "reload", waitMs: Math.max(0, numberOr(state.reloadReadyAt || state.reloadFullUntil, now) - now), intervalMs };
+  }
+
+  if (
+    weaponMode === WEAPON_MODE.RELOADING_READY &&
+    !isComplexReloadWeaponState(state)
+  ) {
+    return { ok: false, reason: "reload", waitMs: Math.max(0, numberOr(state.reloadFullUntil, now) - now), intervalMs };
+  }
+
+  if (isColdArmsWeaponType(state.type)) {
+    const mode = Number(launchMode ?? 0);
+    if (mode === LAUNCH_MODE.SHOT) {
+      if (
+        numberOr(state.meleeDelayedShotUntil, 0) > 0 &&
+        !state.meleeDelayedShotUsed &&
+        now <= state.meleeDelayedShotUntil
+      ) {
+        return { ok: true, reason: "melee-delayed", intervalMs };
+      }
+      return {
+        ok: false,
+        reason: numberOr(state.meleeDelayedShotUntil, 0) > 0 ? "melee-delayed-expired" : "melee-missing-launch",
+        waitMs: Math.max(0, numberOr(state.meleeDelayedShotUntil, now) - now),
+        intervalMs,
+      };
+    }
+
+    if (mode === LAUNCH_MODE.LAUNCH) {
+      if (state.nextShotAt && now + SHOT_THROTTLE_SLACK_MS < state.nextShotAt) {
+        return { ok: false, reason: "rate", waitMs: state.nextShotAt - now, intervalMs };
+      }
+      if (weaponMode !== WEAPON_MODE.READY) {
+        return { ok: false, reason: weaponMode === WEAPON_MODE.SHOOTING ? "shooting" : "weapon-mode", waitMs: Math.max(0, shotReadyAt(state) - now), intervalMs };
+      }
+      return { ok: true, reason: "melee-launch", intervalMs };
+    }
+
+    return { ok: false, reason: "melee-mode", intervalMs };
+  }
+
+  if (isWeaponControlShot(state, launchMode)) {
+    const mode = Number(launchMode ?? 0);
+    if (isGatlingWeaponType(state.type) && mode === LAUNCH_MODE.LAUNCH) {
+      if (state.loadedAmmo <= 0) {
+        return { ok: false, reason: "empty", intervalMs };
+      }
+      if (weaponMode !== WEAPON_MODE.READY) {
+        return { ok: false, reason: "launch-state", intervalMs };
+      }
+      startWeaponLaunching(state, now);
+      return { ok: true, reason: "launch", intervalMs };
+    }
+    if (isGatlingWeaponType(state.type) && mode === LAUNCH_MODE.BLOW) {
+      stopWeaponAction(state, now);
+      return { ok: true, reason: "stop", intervalMs };
+    }
+    return { ok: true, reason: "control-event", intervalMs };
+  }
+
+  if (state.nextShotAt && now + SHOT_THROTTLE_SLACK_MS < state.nextShotAt) {
+    return { ok: false, reason: "rate", waitMs: state.nextShotAt - now, intervalMs };
+  }
+
+  if (weaponMode === WEAPON_MODE.SHOOTING) {
+    if (isShotReadyWithinSlack(state, now)) {
+      return { ok: true, reason: "shot-slack", intervalMs };
+    }
+    return { ok: false, reason: "shooting", waitMs: Math.max(0, shotReadyAt(state) - now), intervalMs };
+  }
+
+  if (isLaunchLoopWeaponType(state.type)) {
+    if (isGatlingWeaponType(state.type)) {
+      if (weaponMode !== WEAPON_MODE.LAUNCHING) {
+        return { ok: false, reason: "launch-required", intervalMs };
+      }
+      if (now < launchReadyAt(state)) {
+        return { ok: false, reason: "launching", waitMs: Math.max(0, launchReadyAt(state) - now), intervalMs };
+      }
+    } else if (weaponMode !== WEAPON_MODE.READY && weaponMode !== WEAPON_MODE.LAUNCHING) {
+      return { ok: false, reason: "launch-state", intervalMs };
+    }
+  } else if (weaponMode !== WEAPON_MODE.READY && weaponMode !== WEAPON_MODE.RELOADING_READY) {
+    return { ok: false, reason: "weapon-mode", intervalMs };
+  }
+
+  if (!consumesAmmo) {
+    return { ok: true, reason: "no-ammo-event", intervalMs };
+  }
+
+  if (state.loadedAmmo <= 0) {
+    return { ok: false, reason: "empty", intervalMs };
+  }
+
+  return { ok: true, reason: "shot", intervalMs };
+}
+
+function noteWeaponShot(session, parsed) {
+  const data = parsed?.params?.get(245);
+  const weaponType = htGet(data, 91)?.value;
+  const launchMode = shotLaunchMode(data);
+  const state = weaponStateByType(session, weaponType);
+  const now = Date.now();
+  if (!state) return;
+  if (isColdArmsWeaponType(state.type)) {
+    const mode = Number(launchMode ?? 0);
+    if (mode === 1) startMeleeShotChain(state, now);
+    if (mode === 0) consumeMeleeDelayedShot(state);
+    return;
+  }
+  if (!shotConsumesAmmo(state.type, launchMode)) return;
+  if (isReloadWeaponMode(refreshWeaponMode(state, now))) cancelWeaponReload(state, "interrupted-by-shot", now);
+  state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
+  startWeaponShooting(state, now);
+  if (isProjectileLaunchShot(state, launchMode)) rememberProjectileLaunch(state, data, now);
+}
+
+function describeShotTargets(data) {
+  const targets = htGet(data, 86);
+  const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  if (!targetItems) return targets ? " targets=unparsed" : " targets=none";
+  if (targetItems.length === 0) return " targets=empty";
+  const details = targetItems.map((target) => {
+    const actorId = htGet(target, 94)?.value;
+    const descriptorRaw = htGet(target, 68)?.value;
+    if (descriptorRaw == null) return `${actorId ?? "?"}:descriptor=none`;
+    const descriptor = Number(descriptorRaw) & 0xff;
+    return `${actorId ?? "?"}:descriptor=0x${descriptor.toString(16).padStart(2, "0")}:type=${descriptor & 7}:zone=0x${(descriptor & 48).toString(16).padStart(2, "0")}`;
+  });
+  return ` targets=${details.join(",")}`;
+}
+
+function pointFromHashtable(data) {
+  const x = Number(htGet(data, 1)?.value);
+  const y = Number(htGet(data, 2)?.value);
+  const z = Number(htGet(data, 3)?.value);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+  return { x, y, z };
+}
+
+function distanceBetweenPoints(left, right) {
+  if (!left || !right) return null;
+  const dx = Number(left.x) - Number(right.x);
+  const dy = Number(left.y) - Number(right.y);
+  const dz = Number(left.z) - Number(right.z);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) return null;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function pointOffset(point, y = 0) {
+  if (!point) return null;
+  const x = Number(point.x);
+  const baseY = Number(point.y);
+  const z = Number(point.z);
+  if (!Number.isFinite(x) || !Number.isFinite(baseY) || !Number.isFinite(z)) return null;
+  return { x, y: baseY + y, z };
+}
+
+function angleBetweenVectorsRadians(left, right) {
+  if (!left || !right) return null;
+  const leftLength = Math.hypot(left.x, left.y, left.z);
+  const rightLength = Math.hypot(right.x, right.y, right.z);
+  if (leftLength <= 0 || rightLength <= 0) return null;
+  const cosine = clampNumber(
+    (left.x * right.x + left.y * right.y + left.z * right.z) / (leftLength * rightLength),
+    -1,
+    1
+  );
+  return Math.acos(cosine);
+}
+
+function isClientSegmentMeleeTarget(shooter, target) {
+  if (!shooter || !target || shooter === target) return false;
+  return Number(shooter.team) !== Number(target.team) ||
+    roomMode(shooter) === MAP_MODE_DEATHMATCH ||
+    Boolean(shooter.room?.friendlyFire);
+}
+
+function recoverMeleeSegmentTargetBodies(session, data, state, weaponType, launchMode) {
+  if (
+    !isColdArmsWeaponType(weaponType) ||
+    Number(launchMode ?? LAUNCH_MODE.SHOT) !== LAUNCH_MODE.SHOT ||
+    !session?.lastTransform ||
+    !state
+  ) {
+    return null;
+  }
+
+  // Exact client basis from ShotCalculator.SegmentShot(): both actors are
+  // evaluated at transform.position + (0, 3.5, 0), in weapon rad/ang.
+  const attackerCenter = pointOffset(session.lastTransform, 3.5);
+  const origin = pointFromHashtable(htGet(data, 11));
+  if (!attackerCenter || !origin) return null;
+  const aimVector = {
+    x: origin.x - attackerCenter.x,
+    y: origin.y - attackerCenter.y,
+    z: origin.z - attackerCenter.z,
+  };
+  if (Math.hypot(aimVector.x, aimVector.y, aimVector.z) <= 0) return null;
+
+  const distance = Math.max(0, numberOr(state.meleeDistance, MELEE_DEFAULT_DISTANCE));
+  const angle = Math.max(0, numberOr(state.meleeAngle, MELEE_DEFAULT_ANGLE));
+  const bodies = [];
+  for (const target of session.room?.players?.values?.() || []) {
+    if (
+      !target?.spawned ||
+      target.dead ||
+      !target.lastTransform ||
+      !isClientSegmentMeleeTarget(session, target)
+    ) {
+      continue;
+    }
+    const targetCenter = pointOffset(target.lastTransform, 3.5);
+    if (!targetCenter) continue;
+    const targetVector = {
+      x: targetCenter.x - attackerCenter.x,
+      y: targetCenter.y - attackerCenter.y,
+      z: targetCenter.z - attackerCenter.z,
+    };
+    if (Math.hypot(targetVector.x, targetVector.y, targetVector.z) > distance) continue;
+    const targetAngle = angleBetweenVectorsRadians(targetVector, aimVector);
+    if (targetAngle == null || targetAngle > angle) continue;
+
+    bodies.push(readTypedRaw(rawHashtable([
+      { key: rawByte(94), value: rawInt(target.actorId) },
+      { key: rawByte(68), value: rawByte(SHOT_TARGET_PLAYER) },
+    ]), 0));
+  }
+  return bodies;
+}
+
+function formatCaptureDistance(distance) {
+  return Number.isFinite(distance) ? distance.toFixed(2) : "unknown";
+}
+
+function describeShotDamageContext(session, data, state) {
+  const targets = htGet(data, 86);
+  const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  if (!targetItems?.length) return "";
+
+  const origin = pointFromHashtable(htGet(data, 11));
+  const weapon = state
+    ? ` weapon=${state.systemName}#${state.weaponId} cfgDmg=${state.shortDamage.join("-")}/${state.mediumDamage.join("-")}/${state.longDamage.join("-")} crit=${state.crit} dev=${state.deviation}`
+    : " weapon=unknown";
+  const context = targetItems.map((target) => {
+    const actorId = Number(htGet(target, 94)?.value);
+    const targetSession = Number.isFinite(actorId) ? session.room?.players?.get(actorId) : null;
+    if (!targetSession) return `${Number.isFinite(actorId) ? actorId : "?"}:session=missing`;
+    const stats = sessionRuntimeStats(targetSession);
+    const maxHealth = sessionMaxHealth(targetSession, stats);
+    const actorDistance = distanceBetweenPoints(session.lastTransform, targetSession.lastTransform);
+    const originDistance = distanceBetweenPoints(origin, targetSession.lastTransform);
+    const health = targetSession.health ?? maxHealth;
+    const energy = targetSession.energy ?? stats.maxEnergy;
+    return `${actorId}:actorDist=${formatCaptureDistance(actorDistance)}:originDist=${formatCaptureDistance(originDistance)}:hp=${health}/${maxHealth}:energy=${energy}/${stats.maxEnergy}:prot=${formatProtectionBonuses(stats.modifiers.protections)}:rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)}`;
+  });
+  return `${weapon} origin=${origin ? fmtVector(origin) : "unknown"} context=${context.join(",")}`;
+}
+
+const SHOT_TARGET_PLAYER = 1;
+const HIT_ZONE_ENGINE = 16;
+const HIT_ZONE_CABIN = 32;
+
+function rawDamageShort(value) {
+  return rawShort(Math.round(clampNumber(value, 0, 32767)));
+}
+
+function fallbackWeaponStateByType(weaponType) {
+  const type = Number(weaponType);
+  if (!Number.isFinite(type)) return null;
+  for (const state of makeWeaponRuntimeState(null).values()) {
+    if (state.type === type) return state;
+  }
+  return {
+    slot: 0,
+    index: 0,
+    weaponId: type,
+    type,
+    systemName: `weapon_type_${type}`,
+    crit: 0,
+    deviation: 0,
+    shortDamage: [1, 1],
+    mediumDamage: [1, 1],
+    longDamage: [1, 1],
+  };
+}
+
+function shotDamageState(session, weaponType, state) {
+  if (state) return state;
+  if (isActiveItemWeaponType(weaponType)) return null;
+  return state || fallbackWeaponStateByType(weaponType);
+}
+
+function weaponProtectionKey(weaponType) {
+  switch (Number(weaponType)) {
+    case 1:
+    case 2:
+      return "melee";
+    case 3:
+      return "pistol";
+    case 5:
+      return "flamer";
+    case 6:
+    case 102:
+      return "machinegun";
+    case 7:
+      return "shotgun";
+    case 8:
+      return "rocket";
+    case 9:
+    case 15:
+      return "grenade";
+    case 10:
+      return "sniper";
+    case 11:
+      return "snow";
+    default:
+      return "automatic";
+  }
+}
+
+function isExplosiveDamageWeapon(weaponType, launchMode) {
+  const type = Number(weaponType);
+  const mode = Number(launchMode ?? 0);
+  if ((type === 8 || type === 9 || type === 15) && mode !== LAUNCH_MODE.LAUNCH) return true;
+  if (isMineWeaponType(type) && mode === LAUNCH_MODE.SHOT) return true;
+  return type === 108 && mode === LAUNCH_MODE.TURRET_SHOT;
+}
+
+function explosionDistanceCoefficient(distance) {
+  if (!Number.isFinite(distance)) return 1;
+  if (distance <= DAMAGE_EXPLOSION_FULL_RADIUS) return 1;
+  if (distance >= DAMAGE_EXPLOSION_ZERO_RADIUS) return 0;
+  const span = DAMAGE_EXPLOSION_ZERO_RADIUS - DAMAGE_EXPLOSION_FULL_RADIUS;
+  return Math.max(0, Math.min(1, 1 - (distance - DAMAGE_EXPLOSION_FULL_RADIUS) / span));
+}
+
+function damageRangeName(distance) {
+  if (!Number.isFinite(distance)) return "medium";
+  if (distance <= DAMAGE_SHORT_RANGE) return "short";
+  if (distance <= DAMAGE_MEDIUM_RANGE) return "medium";
+  return "long";
+}
+
+function normalizedDamagePair(pair) {
+  const first = Math.max(0, numberOr(pair?.[0], 0));
+  const second = Math.max(0, numberOr(pair?.[1], first));
+  return first <= second ? [first, second] : [second, first];
+}
+
+function damagePairAverage(pair) {
+  const [minDamage, maxDamage] = normalizedDamagePair(pair);
+  return (minDamage + maxDamage) / 2;
+}
+
+function balancedDamagePairs(state) {
+  if (!DAMAGE_SORT_RANGES_BY_POWER) {
+    return {
+      short: normalizedDamagePair(state?.shortDamage),
+      medium: normalizedDamagePair(state?.mediumDamage),
+      long: normalizedDamagePair(state?.longDamage),
+    };
+  }
+
+  const ordered = [
+    { source: "short", pair: normalizedDamagePair(state?.shortDamage) },
+    { source: "medium", pair: normalizedDamagePair(state?.mediumDamage) },
+    { source: "long", pair: normalizedDamagePair(state?.longDamage) },
+  ].sort((left, right) => damagePairAverage(right.pair) - damagePairAverage(left.pair));
+
+  return {
+    short: ordered[0]?.pair || [0, 0],
+    medium: ordered[1]?.pair || ordered[0]?.pair || [0, 0],
+    long: ordered[2]?.pair || ordered[1]?.pair || ordered[0]?.pair || [0, 0],
+  };
+}
+
+function damagePairForRange(state, range) {
+  const pairs = balancedDamagePairs(state);
+  if (range === "short") return pairs.short;
+  if (range === "long") return pairs.long;
+  return pairs.medium;
+}
+
+function hitZoneMultiplier(hitZone) {
+  if (hitZone === HIT_ZONE_CABIN) return DAMAGE_HEAD_MULTIPLIER;
+  if (hitZone === HIT_ZONE_ENGINE) return DAMAGE_ENGINE_MULTIPLIER;
+  return 1;
+}
+
+function sessionCurrentHealthEnergy(session) {
+  const stats = sessionRuntimeStats(session);
+  const maxHealth = sessionMaxHealth(session, stats);
+  return {
+    stats,
+    maxHealth,
+    health: Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth)),
+    energy: Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP)),
+  };
+}
+
+function friendlyFireBlocked(shooter, target) {
+  if (shooter && target && shooter === target) return false;
+  const mode = roomMode(shooter);
+  if (!hasTeamDamageMode(mode) || shooter.room?.friendlyFire) return false;
+  const shooterTeam = Number(shooter.team);
+  const targetTeam = Number(target.team);
+  return shooterTeam > 0 && targetTeam > 0 && shooterTeam === targetTeam;
+}
+
+function shotTimestampValue(data) {
+  const timestamp = htGet(data, 8)?.value;
+  return timestamp == null ? photonNow() : timestamp;
+}
+
+function pointSeedValue(point) {
+  if (!point) return "none";
+  return `${Number(point.x).toFixed(3)},${Number(point.y).toFixed(3)},${Number(point.z).toFixed(3)}`;
+}
+
+function shotRandomSeedParts(data, shooter, targetActorId, targetIndex, weaponType, range) {
+  return [
+    shooter?.actorId ?? "?",
+    targetActorId,
+    targetIndex,
+    weaponType,
+    range,
+    shotTimestampValue(data),
+    pointSeedValue(pointFromHashtable(htGet(data, 11))),
+    pointSeedValue(pointFromHashtable(htGet(data, 12))),
+  ];
+}
+
+function shotImpulseVector(data, shooter, target) {
+  const origin = pointFromHashtable(htGet(data, 11)) || shooter.lastTransform;
+  const destination = target.lastTransform;
+  if (!origin || !destination) return null;
+  const dx = Number(destination.x) - Number(origin.x);
+  const dy = Number(destination.y) - Number(origin.y);
+  const dz = Number(destination.z) - Number(origin.z);
+  const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (!Number.isFinite(length) || length <= 0.0001) return null;
+  return { x: dx / length, y: dy / length, z: dz / length };
+}
+
+function makePointRaw(point) {
+  return rawHashtable([
+    { key: rawByte(1), value: rawFloat(point.x) },
+    { key: rawByte(2), value: rawFloat(point.y) },
+    { key: rawByte(3), value: rawFloat(point.z) },
+  ]);
+}
+
+const KILL_FRAG_TYPE_REVENGE = 34;
+const KILL_FRAG_TYPE_DOMINATION = 35;
+
+function sessionFragPlayerId(session) {
+  const actorId = Number(session?.actorId || 0);
+  if (Number.isInteger(actorId) && actorId > 0) return actorId;
+  const playerId = Number(session?.playerId || 0);
+  return Number.isInteger(playerId) && playerId > 0 ? playerId : 0;
+}
+
+function ensureKillStreakByVictim(session) {
+  if (!(session?.killStreakByVictim instanceof Map)) session.killStreakByVictim = new Map();
+  return session.killStreakByVictim;
+}
+
+function ensureDominatedBy(session) {
+  if (!(session?.dominatedBy instanceof Set)) session.dominatedBy = new Set();
+  return session.dominatedBy;
+}
+
+function resetSessionFragState(session) {
+  if (!session) return;
+  session.domination = 0;
+  session.revenge = 0;
+  session.maxDomination = 0;
+  session.maxRevenge = 0;
+  session.revengeStreak = 0;
+  session.killStreakByVictim = new Map();
+  session.dominatedBy = new Set();
+}
+
+function recordKillFragState(shooter, targetSession) {
+  if (!shooter || !targetSession || shooter === targetSession) return null;
+  const shooterPlayerId = sessionFragPlayerId(shooter);
+  const targetPlayerId = sessionFragPlayerId(targetSession);
+  if (!shooterPlayerId || !targetPlayerId) return null;
+
+  const shooterStreaks = ensureKillStreakByVictim(shooter);
+  const targetDominatedBy = ensureDominatedBy(targetSession);
+  const shooterDominatedBy = ensureDominatedBy(shooter);
+  const streak = numberOr(shooterStreaks.get(targetPlayerId), 0) + 1;
+  shooterStreaks.set(targetPlayerId, streak);
+  ensureKillStreakByVictim(targetSession).set(shooterPlayerId, 0);
+
+  if (shooterDominatedBy.has(targetPlayerId)) {
+    shooterDominatedBy.delete(targetPlayerId);
+    shooter.revenge = numberOr(shooter.revenge, 0) + 1;
+    shooter.matchRevenge = numberOr(shooter.matchRevenge, 0) + 1;
+    shooter.revengeStreak = numberOr(shooter.revengeStreak, 0) + 1;
+    shooter.maxRevenge = Math.max(numberOr(shooter.maxRevenge, 0), numberOr(shooter.revengeStreak, 0));
+    return {
+      code: KILL_FRAG_TYPE_REVENGE,
+      name: "revenge",
+      dominationStreak: 0,
+      revengeStreak: numberOr(shooter.revengeStreak, 0),
+    };
+  }
+
+  shooter.revengeStreak = 0;
+  if (DOMINATION_STREAK_KILLS > 0 && streak >= DOMINATION_STREAK_KILLS && !targetDominatedBy.has(shooterPlayerId)) {
+    targetDominatedBy.add(shooterPlayerId);
+    shooter.domination = numberOr(shooter.domination, 0) + 1;
+    shooter.matchDomination = numberOr(shooter.matchDomination, 0) + 1;
+    shooter.maxDomination = Math.max(numberOr(shooter.maxDomination, 0), streak);
+    return {
+      code: KILL_FRAG_TYPE_DOMINATION,
+      name: "domination",
+      dominationStreak: streak,
+      revengeStreak: 0,
+    };
+  }
+
+  return null;
+}
+
+function makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse, fragInfo = null) {
+  const current = sessionCurrentHealthEnergy(shooter);
+  const entries = [
+    { key: rawByte(94), value: rawInt(targetActorId) },
+    { key: rawByte(91), value: rawByte(weaponType) },
+    { key: rawByte(68), value: rawByte(hitZone) },
+    { key: rawByte(92), value: rawInt(current.health) },
+    { key: rawByte(93), value: rawInt(current.energy) },
+  ];
+  if (impulse) entries.push({ key: rawByte(54), value: makePointRaw(impulse) });
+  if (fragInfo?.code) entries.push({ key: rawByte(33), value: rawByte(fragInfo.code) });
+  return rawEvent(95, [
+    { key: 254, value: rawInt(shooter.actorId) },
+    { key: 245, value: rawHashtable(entries) },
+  ]);
+}
+
+function isZombieInfectionHit(shooter, targetSession, weaponType) {
+  if (!isZombieModeValue(roomMode(shooter))) return false;
+  if (Number(weaponType) !== 1) return false;
+  return Number(shooter?.team) === ZOMBIE_TEAM && Number(targetSession?.team) === HUMAN_TEAM;
+}
+
+function noteZombieInfectionHit(shooter, targetSession) {
+  const isBoss = Number(shooter?.zombieType) === ZOMBIE_TYPE.BOSS;
+  const required = isBoss ? 1 : ZOMBIE_REGULAR_INFECTION_HITS;
+  const hits = isBoss ? 1 : Math.min(required, numberOr(targetSession?.zombieInfectionHits, 0) + 1);
+  if (targetSession) {
+    targetSession.zombieInfectionHits = hits;
+    targetSession.zombieLastInfectorActorId = numberOr(shooter?.actorId, 0);
+  }
+  return { complete: hits >= required, hits, required, isBoss };
+}
+
+function applyZombieInfectionHit(shooter, targetSession, context = {}) {
+  let expAwarded = 0;
+  let exp2clanAwarded = 0;
+  let fragInfo = null;
+
+  if (targetSession !== shooter) {
+    shooter.kills = numberOr(shooter.kills, 0) + 1;
+    shooter.points = numberOr(shooter.points, 0) + 1;
+    shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
+    if (context.hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
+    if (context.hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
+    targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+    targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
+    fragInfo = recordKillFragState(shooter, targetSession);
+    expAwarded = awardBattleExp(shooter, battleExpForKill(shooter, targetSession), "zombie-infect");
+    exp2clanAwarded = expAwarded > 0 ? Math.round(expAwarded * numberOr(shooter.loadedProfile?.clan?.ek, 0) / 100) : 0;
+  }
+
+  clearSpawnMoveWarningTimer(targetSession);
+  clearSpawnSelfRetryTimers(targetSession);
+  clearSessionWeaponReloadTimers(targetSession);
+  clearSessionActiveShotLedgers(targetSession);
+  clearSessionImpactTimers(targetSession);
+  clearPeerSpawnTimers(targetSession);
+  clearPickupSpawnRepairTimers(targetSession);
+  clearSpawnStallRecovery(targetSession);
+  targetSession.pendingSpawnBroadcast = null;
+  resetZombieInfectionProgress(targetSession);
+  targetSession.team = ZOMBIE_TEAM;
+  targetSession.zombieType = ZOMBIE_TYPE.REGULAR;
+  targetSession.spawned = true;
+  targetSession.dead = false;
+  targetSession.waitingSelfSpawnMove = false;
+  const stats = sessionRuntimeStats(targetSession);
+  targetSession.health = sessionMaxHealth(targetSession, stats);
+  targetSession.energy = stats.maxEnergy;
+  const updateRepairs = queueZombiePlayerUpdateRepair(targetSession, targetSession.lastChannel || shooter.lastChannel || 0, "zombie-infect");
+
+  postBattleEvent(targetSession, "death", {
+    health: targetSession.health,
+    energy: targetSession.energy,
+    killerPlayerId: shooter.playerId,
+    victimPlayerId: targetSession.playerId,
+    killerPlayerName: shooter.playerName,
+    victimPlayerName: targetSession.playerName,
+    killerActorId: shooter.actorId,
+    victimActorId: targetSession.actorId,
+    weaponId: numberOr(context.weaponId, context.weaponType),
+    weaponType: context.weaponType,
+    weaponSystemName: stringOr(context.weaponSystemName, "OHCA_Zombie"),
+    hitZone: context.hitZone,
+    healthDamage: 0,
+    energyDamage: 0,
+    expAwarded,
+    exp2clan: exp2clanAwarded,
+    fragType: fragInfo?.name || "zombie-infect",
+    domination: fragInfo?.code === KILL_FRAG_TYPE_DOMINATION ? 1 : 0,
+    revenge: fragInfo?.code === KILL_FRAG_TYPE_REVENGE ? 1 : 0,
+    dominationStreak: numberOr(fragInfo?.dominationStreak, 0),
+    revengeStreak: numberOr(fragInfo?.revengeStreak, 0),
+    zombieUpdateRepairs: updateRepairs,
+  });
+
+  return {
+    fragInfo,
+    expAwarded,
+    event: makeZombiePlayerUpdateEvent(targetSession, shooter.actorId),
+  };
+}
+
+function makePlayerImpactEvent(shooter, targetActorId, impactType, healthDamage, energyDamage) {
+  return rawEvent(74, [
+    { key: 254, value: rawInt(shooter.actorId) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(94), value: rawInt(targetActorId) },
+      { key: rawByte(52), value: rawByte(impactType) },
+      { key: rawByte(92), value: rawDamageShort(healthDamage) },
+      { key: rawByte(93), value: rawDamageShort(energyDamage) },
+    ]) },
+  ]);
+}
+
+function ensureSessionImpactTimers(session) {
+  if (!session) return null;
+  if (!session.impactTimers) session.impactTimers = new Map();
+  return session.impactTimers;
+}
+
+function clearImpactDotState(targetSession, impactType) {
+  const timers = targetSession?.impactTimers;
+  const key = Number(impactType);
+  const state = timers?.get(key);
+  if (!state) return;
+  if (state.timer) clearTimeout(state.timer);
+  timers.delete(key);
+}
+
+function clearSessionImpactTimers(session) {
+  if (!session?.impactTimers) return;
+  for (const state of session.impactTimers.values()) {
+    if (state?.timer) clearTimeout(state.timer);
+  }
+  session.impactTimers = new Map();
+}
+
+function hasSelectedEnhancer(profile, enhancerType) {
+  const type = Number(enhancerType);
+  if (!type) return false;
+  return selectedEnhancers(profile).some((entry) => Number(entry.enhancerType) === type);
+}
+
+function impactDamageReductionForTarget(targetSession, impactType) {
+  const stats = sessionRuntimeStats(targetSession);
+  const damageReduction = clampNumber(
+    stats.modifiers.damageReductionPercent ?? 0,
+    0,
+    DAMAGE_MAX_PROTECTION_PERCENT
+  );
+  const enhancerType = IMPACT_PROTECTION_ENHANCER_BY_TYPE.get(Number(impactType));
+  const enhancerReduction = enhancerType && hasSelectedEnhancer(targetSession.loadedProfile, enhancerType) ? 50 : 0;
+  return { damageReduction, enhancerReduction };
+}
+
+function impactDotRequestedDamage(effect) {
+  const minDamage = Math.max(0, numberOr(effect.min, 0));
+  const maxDamage = Math.max(minDamage, numberOr(effect.max, minDamage));
+  const roll = deterministicUnit(
+    BUILD_ID,
+    "impact-dot",
+    effect.token,
+    effect.tick,
+    effect.shooter?.actorId ?? "?",
+    effect.targetActorId,
+    effect.weaponId,
+    effect.type
+  );
+  return minDamage + Math.round((maxDamage - minDamage) * roll);
+}
+
+function applyImpactDotDamage(effect, targetSession) {
+  const targetCurrent = sessionCurrentHealthEnergy(targetSession);
+  const requestedDamage = impactDotRequestedDamage(effect);
+  const referenceMultiplier = Math.max(0.05, 1 - IMPACT_REFERENCE_DAMAGE_REDUCTION / 100);
+  const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
+  const totalDamage = Math.max(0, Math.round(
+    (requestedDamage / referenceMultiplier) *
+    (1 - damageReduction / 100) *
+    (1 - enhancerReduction / 100)
+  ));
+  const energyDamage = Math.min(targetCurrent.energy, totalDamage);
+  const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
+  targetSession.energy = targetCurrent.energy - energyDamage;
+  targetSession.health = targetCurrent.health - healthDamage;
+  return {
+    targetCurrent,
+    requestedDamage,
+    totalDamage,
+    healthDamage,
+    energyDamage,
+    damageReduction,
+    enhancerReduction,
+  };
+}
+
+function impactDotSourceStillValid(effect, targetSession) {
+  const shooter = effect?.shooter;
+  const room = shooter?.room;
+  if (!room || !targetSession?.room || targetSession.room !== room) return false;
+  if (room.players?.get(shooter.actorId) !== shooter) return false;
+  if (room.players?.get(targetSession.actorId) !== targetSession) return false;
+  return Boolean(targetSession.spawned && !targetSession.dead);
+}
+
+function applyImpactDotKill(effect, targetSession, damage) {
+  const shooter = effect.shooter;
+  targetSession.dead = true;
+  targetSession.waitingSelfSpawnMove = false;
+  resetZombieInfectionProgress(targetSession);
+  targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+  targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
+  let expAwarded = 0;
+  let exp2clanAwarded = 0;
+  let fragInfo = null;
+  if (targetSession !== shooter) {
+    shooter.kills = numberOr(shooter.kills, 0) + 1;
+    shooter.points = numberOr(shooter.points, 0) + 1;
+    shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
+    fragInfo = recordKillFragState(shooter, targetSession);
+    expAwarded = awardBattleExp(shooter, battleExpForKill(shooter, targetSession), "dot-kill");
+    exp2clanAwarded = expAwarded > 0 ? Math.round(expAwarded * numberOr(shooter.loadedProfile?.clan?.ek, 0) / 100) : 0;
+  } else {
+    shooter.matchSuicides = numberOr(shooter.matchSuicides, 0) + 1;
+  }
+  clearSpawnMoveWarningTimer(targetSession);
+  clearSpawnSelfRetryTimers(targetSession);
+  clearSessionWeaponReloadTimers(targetSession);
+  clearSessionActiveShotLedgers(targetSession);
+  clearSessionImpactTimers(targetSession);
+  clearPeerSpawnTimers(targetSession);
+  clearPickupSpawnRepairTimers(targetSession);
+  clearSpawnStallRecovery(targetSession);
+  targetSession.pendingSpawnBroadcast = null;
+  postBattleEvent(targetSession, "death", {
+    health: targetSession.health,
+    energy: targetSession.energy,
+    killerPlayerId: shooter.playerId,
+    victimPlayerId: targetSession.playerId,
+    killerPlayerName: shooter.playerName,
+    victimPlayerName: targetSession.playerName,
+    killerActorId: shooter.actorId,
+    victimActorId: targetSession.actorId,
+    weaponId: numberOr(effect.weaponId, effect.weaponType),
+    weaponType: effect.weaponType,
+    weaponSystemName: stringOr(effect.systemName, ""),
+    hitZone: 0,
+    healthDamage: damage.healthDamage,
+    energyDamage: damage.energyDamage,
+    expAwarded,
+    exp2clan: exp2clanAwarded,
+    fragType: fragInfo?.name || "none",
+    domination: fragInfo?.code === KILL_FRAG_TYPE_DOMINATION ? 1 : 0,
+    revenge: fragInfo?.code === KILL_FRAG_TYPE_REVENGE ? 1 : 0,
+    dominationStreak: numberOr(fragInfo?.dominationStreak, 0),
+    revengeStreak: numberOr(fragInfo?.revengeStreak, 0),
+  });
+  return makeKillPlayerEvent(shooter, targetSession.actorId, effect.weaponType, 0, null, fragInfo);
+}
+
+function sendImpactDotPayload(effect, payload, label, options = {}) {
+  if (!payload || !effect?.shooter) return 0;
+  const channel = effect.channel ?? 0;
+  let sent = sendReliableToSession(effect.shooter, payload, channel) ? 1 : 0;
+  sent += broadcastReliableToRoom(effect.shooter, payload, channel, label, options);
+  return sent;
+}
+
+function scheduleImpactDotTick(effect, targetSession, delayMs) {
+  effect.timer = setTimeout(() => {
+    try {
+      applyImpactDotTick(effect, targetSession);
+    } catch (error) {
+      console.log(`[error] impact-dot failed actor=${effect?.shooter?.actorId ?? "?"} target=${targetSession?.actorId ?? effect?.targetActorId ?? "?"} type=${impactTypeName(effect?.type)} tick=${numberOr(effect?.tick, 0) + 1}/${numberOr(effect?.ticks, 0)} reason=${error?.stack || error?.message || error}`);
+      if (targetSession && effect?.type != null) {
+        clearImpactDotState(targetSession, effect.type);
+      }
+    }
+  }, Math.max(0, delayMs));
+  if (typeof effect.timer.unref === "function") effect.timer.unref();
+}
+
+function applyImpactDotTick(effect, targetSession) {
+  const timers = targetSession?.impactTimers;
+  if (!timers || timers.get(Number(effect.type)) !== effect) return;
+  effect.timer = null;
+
+  if (!impactDotSourceStillValid(effect, targetSession)) {
+    clearImpactDotState(targetSession, effect.type);
+    return;
+  }
+
+  const damage = applyImpactDotDamage(effect, targetSession);
+  const impactEvent = makePlayerImpactEvent(
+    effect.shooter,
+    targetSession.actorId,
+    effect.type,
+    damage.healthDamage,
+    damage.energyDamage
+  );
+  const sent = sendImpactDotPayload(effect, impactEvent, "impact-dot", { requireMoveSeen: true });
+  console.log(`[event] impact-dot actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} tick=${effect.tick + 1}/${effect.ticks} dmg=${damage.healthDamage}/${damage.energyDamage} roll=${damage.requestedDamage}/${effect.min}-${effect.max} hp=${targetSession.health}/${damage.targetCurrent.maxHealth} en=${targetSession.energy}/${damage.targetCurrent.stats.maxEnergy} dmgRed=${damage.damageReduction} enhRed=${damage.enhancerReduction} sent=${sent}`);
+
+  if (damage.targetCurrent.health > 0 && targetSession.health <= 0) {
+    const killEvent = applyImpactDotKill(effect, targetSession, damage);
+    sendImpactDotPayload(effect, killEvent, "kill-dot");
+    const scoreEvent = makeScoreUpdateEvent(effect.shooter);
+    const scorePeers = sendImpactDotPayload(effect, scoreEvent, "score");
+    console.log(`[sync] impact-dot-kill actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} scorePeers=${scorePeers} kills=${numberOr(effect.shooter.kills, 0)} deaths=${numberOr(targetSession.deaths, 0)}`);
+    gateKilledSessionsAfterDelivery({ killedSessions: [targetSession] });
+    maybeFinishZombieRound(effect.shooter.room, "impact-dot-kill", effect.channel ?? 0);
+    maybeFinishStandardRound(effect.shooter.room, "impact-dot-kill", effect.channel ?? 0);
+    return;
+  }
+
+  effect.tick += 1;
+  if (effect.tick >= effect.ticks || damage.healthDamage + damage.energyDamage <= 0) {
+    clearImpactDotState(targetSession, effect.type);
+    return;
+  }
+  scheduleImpactDotTick(effect, targetSession, IMPACT_DOT_TICK_MS);
+}
+
+function startImpactDot(shooter, targetSession, damageState, data, targetIndex) {
+  const definition = damageState?.impact;
+  if (!definition || definition.type === IMPACT_TYPE.NONE) return "";
+  if (!targetSession || targetSession.dead || !targetSession.spawned) return "";
+
+  clearImpactDotState(targetSession, definition.type);
+  const timers = ensureSessionImpactTimers(targetSession);
+  if (!timers) return "";
+
+  const effect = {
+    type: definition.type,
+    min: numberOr(definition.min, 0),
+    max: numberOr(definition.max, definition.min),
+    ticks: Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS)),
+    tick: 0,
+    shooter,
+    targetActorId: targetSession.actorId,
+    weaponId: numberOr(damageState.weaponId, damageState.weaponType),
+    weaponType: numberOr(damageState.type, 0),
+    systemName: stringOr(damageState.systemName, ""),
+    channel: reliableChannelForSession(shooter, 0),
+    token: [
+      Date.now(),
+      shooter.actorId,
+      targetSession.actorId,
+      numberOr(damageState.weaponId, 0),
+      targetIndex,
+      shotTimestampValue(data),
+      pointSeedValue(pointFromHashtable(htGet(data, 11))),
+      pointSeedValue(pointFromHashtable(htGet(data, 12))),
+    ].join(":"),
+    timer: null,
+  };
+  timers.set(Number(effect.type), effect);
+  scheduleImpactDotTick(effect, targetSession, 0);
+  return `${impactTypeName(effect.type)}:${effect.min}-${effect.max}x${effect.ticks}`;
+}
+
+function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchMode, target, targetIndex) {
+  const descriptor = Number(htGet(target, 68)?.value ?? SHOT_TARGET_PLAYER) & 0xff;
+  const targetType = descriptor & 7;
+  const hitZone = descriptor & 48;
+  const targetActorId = Number(htGet(target, 94)?.value);
+  const result = {
+    descriptor,
+    targetActorId,
+    hitZone,
+    healthDamage: 0,
+    energyDamage: 0,
+    crit: false,
+    hit: false,
+    killed: false,
+    killEvent: null,
+    killedSession: null,
+    targetSession: null,
+    impactType: numberOr(damageState?.impactType, IMPACT_TYPE.NONE),
+    summary: `${Number.isFinite(targetActorId) ? targetActorId : "?"}:skip`,
+  };
+
+  if (!ENABLE_BATTLE_DAMAGE) {
+    result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:damage=off`;
+    return result;
+  }
+  if (targetType !== SHOT_TARGET_PLAYER || !Number.isFinite(targetActorId)) {
+    result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:non-player`;
+    return result;
+  }
+
+  const targetSession = shooter.room?.players?.get(targetActorId);
+  if (!targetSession || !targetSession.spawned || targetSession.dead) {
+    result.summary = `${targetActorId}:not-live`;
+    return result;
+  }
+  if (friendlyFireBlocked(shooter, targetSession)) {
+    result.summary = `${targetActorId}:friendly`;
+    return result;
+  }
+
+  const targetCurrent = sessionCurrentHealthEnergy(targetSession);
+  if (targetCurrent.health <= 0) {
+    targetSession.dead = true;
+    targetSession.waitingSelfSpawnMove = false;
+    resetZombieInfectionProgress(targetSession);
+    result.summary = `${targetActorId}:dead`;
+    return result;
+  }
+  result.targetSession = targetSession;
+  result.hit = true;
+
+  const origin = pointFromHashtable(htGet(data, 11));
+  const actorDistance = distanceBetweenPoints(shooter.lastTransform, targetSession.lastTransform);
+  const originDistance = distanceBetweenPoints(origin, targetSession.lastTransform);
+  const explosive = isExplosiveDamageWeapon(weaponType, launchMode);
+  const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
+  if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
+    noteAntiCheatWeaponViolation(shooter, "damage", "melee-range", {
+      weaponType,
+      slot: weaponStateByType(shooter, weaponType)?.slot,
+    });
+    result.hit = false;
+    result.summary = `${targetActorId}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
+    return result;
+  }
+  if (isZombieInfectionHit(shooter, targetSession, weaponType)) {
+    const infectionProgress = noteZombieInfectionHit(shooter, targetSession);
+    if (!infectionProgress.complete) {
+      result.hit = true;
+      result.summary = `${targetActorId}:infect-hit=${infectionProgress.hits}/${infectionProgress.required}:killer=${shooter.actorId}:ztype=${shooter.zombieType}:dist=${formatCaptureDistance(damageDistance)}`;
+      return result;
+    }
+    const infection = applyZombieInfectionHit(shooter, targetSession, {
+      damageState,
+      weaponId: numberOr(damageState?.weaponId, weaponType),
+      weaponType,
+      weaponSystemName: stringOr(damageState?.systemName, "OHCA_Zombie"),
+      hitZone,
+    });
+    result.hit = true;
+    result.killed = true;
+    result.killEvent = infection.event;
+    result.summary = `${targetActorId}:infect=1:hits=${infectionProgress.hits}/${infectionProgress.required}:killer=${shooter.actorId}:ztype=${shooter.zombieType}:type=${targetSession.zombieType}:hp=${targetSession.health}:en=${targetSession.energy}:dist=${formatCaptureDistance(damageDistance)}:exp=${infection.expAwarded}:frag=${infection.fragInfo?.name || "zombie-infect"}`;
+    return result;
+  }
+  const range = damageRangeName(damageDistance);
+  const [minDamage, maxDamage] = damagePairForRange(damageState, range);
+  const seedParts = shotRandomSeedParts(data, shooter, targetActorId, targetIndex, weaponType, range);
+  const roll = deterministicUnit(BUILD_ID, "damage", ...seedParts);
+  const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
+  const critChance = clampNumber(numberOr(damageState?.crit, 0), 0, DAMAGE_MAX_CRIT_CHANCE);
+  const crit = deterministicUnit(BUILD_ID, "crit", ...seedParts) * 100 < critChance;
+  const shooterStats = sessionRuntimeStats(shooter);
+  const headDamageBonus = hitZone === HIT_ZONE_CABIN
+    ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
+    : 0;
+  const explosionCoefficient = explosive ? explosionDistanceCoefficient(originDistance ?? actorDistance) : 1;
+  const protectionKey = weaponProtectionKey(weaponType);
+  const globalProtection = targetCurrent.stats.modifiers.protections?.[protectionKey] ?? 0;
+  const rangeProtection = targetCurrent.stats.modifiers.rangeProtections?.[range]?.[protectionKey] ?? 0;
+  const protection = clampNumber(
+    globalProtection + rangeProtection,
+    -DAMAGE_MAX_PROTECTION_PERCENT,
+    DAMAGE_MAX_PROTECTION_PERCENT
+  );
+  const damageReduction = clampNumber(
+    targetCurrent.stats.modifiers.damageReductionPercent ?? 0,
+    0,
+    DAMAGE_MAX_PROTECTION_PERCENT
+  );
+  const totalDamage = Math.max(0, Math.round(
+    baseDamage *
+    explosionCoefficient *
+    hitZoneMultiplier(hitZone) *
+    (1 + headDamageBonus / 100) *
+    (crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
+    (1 - protection / 100) *
+    (1 - damageReduction / 100)
+  ));
+
+  const energyDamage = Math.min(targetCurrent.energy, totalDamage);
+  const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
+  targetSession.energy = targetCurrent.energy - energyDamage;
+  targetSession.health = targetCurrent.health - healthDamage;
+
+  result.energyDamage = energyDamage;
+  result.healthDamage = healthDamage;
+  result.crit = crit && totalDamage > 0;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:prot=${protectionKey}:${protection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
+
+  if (targetCurrent.health > 0 && targetSession.health <= 0) {
+    targetSession.dead = true;
+    targetSession.waitingSelfSpawnMove = false;
+    resetZombieInfectionProgress(targetSession);
+    targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+    targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
+    let expAwarded = 0;
+    let exp2clanAwarded = 0;
+    let fragInfo = null;
+    if (targetSession !== shooter) {
+      shooter.kills = numberOr(shooter.kills, 0) + 1;
+      shooter.points = numberOr(shooter.points, 0) + 1;
+      shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
+      if (hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
+      if (hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
+      fragInfo = recordKillFragState(shooter, targetSession);
+      expAwarded = awardBattleExp(shooter, battleExpForKill(shooter, targetSession), "kill");
+      exp2clanAwarded = expAwarded > 0 ? Math.round(expAwarded * numberOr(shooter.loadedProfile?.clan?.ek, 0) / 100) : 0;
+    } else {
+      shooter.matchSuicides = numberOr(shooter.matchSuicides, 0) + 1;
+    }
+    clearSpawnMoveWarningTimer(targetSession);
+    clearSpawnSelfRetryTimers(targetSession);
+    clearSessionWeaponReloadTimers(targetSession);
+    clearSessionActiveShotLedgers(targetSession);
+    clearSessionImpactTimers(targetSession);
+    clearPeerSpawnTimers(targetSession);
+    clearPickupSpawnRepairTimers(targetSession);
+    clearSpawnStallRecovery(targetSession);
+    targetSession.pendingSpawnBroadcast = null;
+    const impulse = shotImpulseVector(data, shooter, targetSession);
+    result.killed = true;
+    result.killedSession = targetSession;
+    result.killEvent = makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse, fragInfo);
+    result.summary += `:kill=1:exp=${expAwarded}:frag=${fragInfo?.name || "none"}`;
+    postBattleEvent(targetSession, "death", {
+      health: targetSession.health,
+      energy: targetSession.energy,
+      killerPlayerId: shooter.playerId,
+      victimPlayerId: targetSession.playerId,
+      killerPlayerName: shooter.playerName,
+      victimPlayerName: targetSession.playerName,
+      killerActorId: shooter.actorId,
+      victimActorId: targetSession.actorId,
+      weaponId: numberOr(damageState?.weaponId, weaponType),
+      weaponType,
+      weaponSystemName: stringOr(damageState?.systemName, ""),
+      hitZone,
+      healthDamage,
+      energyDamage,
+      expAwarded,
+      exp2clan: exp2clanAwarded,
+      fragType: fragInfo?.name || "none",
+      domination: fragInfo?.code === KILL_FRAG_TYPE_DOMINATION ? 1 : 0,
+      revenge: fragInfo?.code === KILL_FRAG_TYPE_REVENGE ? 1 : 0,
+      dominationStreak: numberOr(fragInfo?.dominationStreak, 0),
+      revengeStreak: numberOr(fragInfo?.revengeStreak, 0),
+    });
+  }
+
+  return result;
+}
+
+function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
+  const targets = htGet(data, 86);
+  const targetItems = targets?.value?.kind === "typed-array" ? targets.value.items : null;
+  const recoveredMeleeTargetBodies = !targetItems?.length
+    ? recoverMeleeSegmentTargetBodies(session, data, state, weaponType, launchMode)
+    : null;
+  const damageTargetItems = targetItems?.length
+    ? targetItems
+    : (recoveredMeleeTargetBodies || null);
+  const damageTargetItemType = targetItems?.length ? targets.value.itemType : 0x68;
+  const replacements = new Map();
+  const killEvents = [];
+  const impactEvents = [];
+  const killedSessions = new Set();
+  let shotCrit = false;
+  const summaries = [];
+  const stats = { shots: 1, hits: 0, playerTargets: 0, headHits: 0, nutsHits: 0, kills: 0 };
+
+  if (shouldForceExplicitProjectileLaunchMode(data, weaponType, launchMode)) {
+    replacements.set(16, rawByte(LAUNCH_MODE.LAUNCH));
+  }
+
+  if (damageTargetItems?.length && damageTargetItemType === 0x68) {
+    const damageState = shotDamageState(session, weaponType, state);
+    if (!damageState) {
+      summaries.push("damage-state=missing");
+    } else {
+      const targetBodies = damageTargetItems.map((target, index) => {
+        const damage = applyShotDamageToTarget(session, data, damageState, weaponType, launchMode, target, index);
+        shotCrit = shotCrit || damage.crit;
+        if (damage.killEvent) killEvents.push(damage.killEvent);
+        if (damage.killedSession) killedSessions.add(damage.killedSession);
+        if (damage.hit) {
+          stats.hits += 1;
+          stats.playerTargets += 1;
+          if (damage.hitZone === HIT_ZONE_CABIN) stats.headHits += 1;
+          if (damage.hitZone === HIT_ZONE_ENGINE) stats.nutsHits += 1;
+          if (damage.impactType !== IMPACT_TYPE.NONE && damage.healthDamage + damage.energyDamage > 0 && !damage.killed) {
+            const impactSummary = startImpactDot(session, damage.targetSession, damageState, data, index);
+            if (impactSummary) damage.summary += `:dot=${impactSummary}`;
           }
         }
+        if (damage.killed) stats.kills += 1;
+        summaries.push(damage.summary);
+        return hashtableBodyWithReplacements(target, new Map([
+          [92, rawDamageShort(damage.healthDamage)],
+          [93, rawDamageShort(damage.energyDamage)],
+        ]));
+      });
+      replacements.set(86, rawTypedArray(0x68, targetBodies));
+      if (recoveredMeleeTargetBodies) {
+        summaries.unshift(`melee-segment-recovered=${recoveredMeleeTargetBodies.length}`);
       }
     }
+  } else if (targets && targetItems === null) {
+    summaries.push("targets=unparsed");
+  }
 
-    await client.query(
-      `INSERT INTO battle_score_events (room_id, killer_player_id, victim_player_id, weapon_id, hit_zone, event_data)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-      [roomId, killerPlayerId || playerId, victimPlayerId || playerId, Number(event.weaponId || details.weaponId || event.weaponType || details.weaponType || 0), hitZone, JSON.stringify(details)]
-    );
+  replacements.set(18, rawBool(shotCrit));
+  const localReplacements = new Map(replacements);
+  let localShotEvent = null;
+  if (
+    isProjectileWeaponType(weaponType) &&
+    Number(launchMode ?? LAUNCH_MODE.SHOT) === LAUNCH_MODE.LAUNCH &&
+    htGet(data, 15)?.value != null
+  ) {
+    localReplacements.set(15, RAW_OMIT);
+    localShotEvent = rawEvent(97, [
+      { key: 254, value: rawInt(session.actorId) },
+      { key: 245, value: hashtableRawWithReplacements(data, localReplacements) },
+    ]);
+  }
+  return {
+    shotEvent: rawEvent(97, [
+      { key: 254, value: rawInt(session.actorId) },
+      { key: 245, value: hashtableRawWithReplacements(data, replacements) },
+    ]),
+    localShotEvent,
+    killEvents,
+    impactEvents,
+    killedSessions: Array.from(killedSessions),
+    scoreEvent: killEvents.length ? makeScoreUpdateEvent(session) : null,
+    stats,
+    summary: summaries.length ? ` damage=${summaries.join(",")}` : "",
+  };
+}
+
+function buildShotEvent(session, parsed) {
+  const data = parsed?.params?.get(245);
+  if (!data?.raw) return null;
+
+  const weaponType = htGet(data, 91)?.value;
+  const launchMode = shotLaunchMode(data);
+  if (isRoundPausedSession(session)) {
+    console.log(`[round] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=round-paused`);
+    return null;
+  }
+  if (!session?.spawned || session.dead) {
+    console.log(`[event] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=not-live`);
+    return null;
+  }
+  if (isZombiePlayerSession(session) && Number(weaponType) !== 1) {
+    console.log(`[zombie] shot blocked actor=${session.actorId} type=${weaponType} mode=${launchMode} reason=zombie-hand-only`);
+    return null;
+  }
+  const state = weaponStateByType(session, weaponType);
+  const gate = allowWeaponShot(session, state, weaponType, launchMode, data);
+  if (!gate.ok) {
+    noteAntiCheatWeaponViolation(session, "shot", gate.reason, {
+      weaponType,
+      slot: state?.slot,
+      waitMs: gate.waitMs,
+    });
+    console.log(`[event] shot blocked actor=${session.actorId} type=${weaponType} mode=${launchMode} reason=${gate.reason}${gate.waitMs ? ` wait=${gate.waitMs}ms` : ""}`);
+    return null;
+  }
+
+  noteWeaponShot(session, parsed);
+  if (state && shotConsumesAmmo(state.type, launchMode)) session.currentWeaponSlot = state.slot;
+  const ammo = state
+    ? (shotConsumesAmmo(state.type, launchMode)
+      ? ` loaded=${state.loadedAmmo} reserve=${state.ammoReserve} interval=${gate.intervalMs}ms gate=${gate.reason}`
+      : ` interval=${gate.intervalMs}ms gate=${gate.reason}`)
+    : "";
+  const response = buildShotDamagePayload(session, data, state, weaponType, launchMode);
+  const shouldConfirmShotWeapon = state && (
+    shotConsumesAmmo(state.type, launchMode) ||
+    gate.reason === "melee-launch" ||
+    gate.reason === "launch" ||
+    gate.reason === "stop"
+  );
+  response.weaponConfirm = shouldConfirmShotWeapon ? buildShotWeaponConfirm(session, state) : null;
+  response.localAmmoSync = state ? makeReloadUpdateEvent(session, state) : null;
+  recordAcceptedShotStats(session, response, state, weaponType, launchMode);
+  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${describeProjectileLaunchPayloadKeys(data, weaponType, launchMode)}${response.summary}`);
+  return response;
+}
+
+function gateKilledSessionsAfterDelivery(response) {
+  for (const targetSession of response?.killedSessions || []) {
+    if (!targetSession) continue;
+    dropCtfFlagsForSession(targetSession);
+    targetSession.moveSeen = false;
+    targetSession.waitingSelfSpawnMove = false;
+    clearSpawnSelfRetryTimers(targetSession);
+    console.log(`[sync] death-gate actor=${targetSession.actorId} reason=kill-delivered`);
+  }
+}
+
+function buildPickItemEvent(session, parsed) {
+  const data = parsed?.params?.get(245);
+  const id = numberOr(htGet(data, 75)?.value, 0);
+  if (!id || !session?.room) return null;
+
+  const items = ensureRoomItems(session.room);
+  const item = items.get(id);
+  if (!item) {
+    console.log(`[event] item-pick ignored actor=${session.actorId} id=${id} reason=unknown`);
+    return null;
+  }
+  if (item.picked) {
+    console.log(`[event] item-pick ignored actor=${session.actorId} id=${id} reason=already-picked`);
+    return null;
+  }
+  if (!sessionHasVisibleRoomItem(session, item)) {
+    console.log(`[event] item-pick ignored actor=${session.actorId} id=${id} reason=not-visible`);
+    return null;
+  }
+  if (!itemCanBenefitSession(session, item)) {
+    console.log(`[event] item-pick ignored actor=${session.actorId} id=${id} reason=no-benefit`);
+    return null;
+  }
+
+  return takeRoomItem(session, item, "client-request");
+}
+
+function refillSessionAmmoFromPickup(session, percent) {
+  const summaries = [];
+  const reloadEvents = [];
+  for (const state of ammoPickupStates(session)) {
+    const before = `${state.slot}:${state.loadedAmmo}/${state.ammoReserve}`;
+    const reserveCap = reserveCapForState(state);
+    const add = Math.floor(Math.max(0, numberOr(state.maxAmmoReserve, 0)) * percent / 100);
+    state.ammoReserve = Math.min(reserveCap, Math.max(0, numberOr(state.ammoReserve, 0)) + add);
+    summaries.push(`${before}->${state.loadedAmmo}/${state.ammoReserve}`);
+    const reloadEvent = makeReloadUpdateEvent(session, state);
+    if (reloadEvent) reloadEvents.push(reloadEvent);
+  }
+  if (reloadEvents.length > 0) {
+    invalidatePeerWeaponConfirm(session.room, session.actorId);
+  }
+  return { reloadEvents, summary: summaries.join(",") };
+}
+
+function takeRoomItem(session, item, reason, context = {}) {
+  if (!item || item.picked) return null;
+
+  item.picked = true;
+  item.nextRespawnAt = ITEM_RESPAWN_MS > 0 ? Date.now() + ITEM_RESPAWN_MS : 0;
+  markRoomItemHiddenForAll(session.room, item.id);
+  let pickValue = 0;
+  let detail = "";
+  const localEvents = [];
+  if (item.type === ITEM_TYPES.AMMO) {
+    pickValue = pickupPercent(item);
+    const refill = refillSessionAmmoFromPickup(session, pickValue);
+    localEvents.push(...refill.reloadEvents);
+    detail = `${refill.summary ? ` ammo=${refill.summary}` : " ammo=none"} percent=${pickValue}`;
+  } else if (item.type === ITEM_TYPES.HEALTH) {
+    const stats = sessionRuntimeStats(session);
+    const maxHealth = sessionMaxHealth(session, stats);
+    const currentHealth = Math.max(0, numberOr(session.health, maxHealth));
+    const amount = Math.floor(maxHealth * pickupPercent(item) / 100);
+    pickValue = Math.min(Math.max(0, maxHealth - currentHealth), amount);
+    session.health = currentHealth + pickValue;
+    detail = ` hp=${session.health}/${maxHealth} add=${pickValue}`;
+  } else if (item.type === ITEM_TYPES.ARMOR) {
+    const currentEnergy = clampNumber(numberOr(session.energy, 0), 0, ARMOR_PICKUP_CAP);
+    const amount = Math.floor(ARMOR_PICKUP_CAP * pickupPercent(item) / 100);
+    pickValue = Math.min(Math.max(0, ARMOR_PICKUP_CAP - currentEnergy), amount);
+    session.energy = currentEnergy + pickValue;
+    detail = ` en=${session.energy}/${ARMOR_PICKUP_CAP} add=${pickValue}`;
+  }
+
+  const positionDetail = Number.isFinite(context.distance)
+    ? ` dist=${context.distance.toFixed(2)} actorPos=${fmtPoint(context.actorPoint)} itemPos=${fmtPoint(item)}`
+    : "";
+  console.log(`[event] item-pick actor=${session.actorId} id=${item.id} type=${item.type} subType=${item.subType ?? 0} value=${pickValue} reason=${reason}${positionDetail}${detail}${localEvents.length ? ` reloadSync=${localEvents.length}` : ""}${ITEM_RESPAWN_MS > 0 ? ` respawn=${ITEM_RESPAWN_MS}ms` : ""}`);
+  const pickEvent = rawEvent(93, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: makeItemRaw(item, { value: pickValue }) },
+  ]);
+  return { pickEvent, localEvents, itemId: item.id };
+}
+
+function buildProximityPickItemEvent(session, point) {
+  if (!ENABLE_MAP_PICKUPS || !point || !session?.room) return null;
+  const items = ensureRoomItems(session.room);
+  const radiusSquared = ITEM_PICKUP_RADIUS * ITEM_PICKUP_RADIUS;
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  for (const item of items.values()) {
+    if (item.picked || !sessionHasVisibleRoomItem(session, item) || !itemCanBenefitSession(session, item)) continue;
+    const dist = distanceSquared(point, item);
+    if (dist <= radiusSquared && dist < nearestDistance) {
+      nearest = item;
+      nearestDistance = dist;
+    }
+  }
+
+  return nearest ? takeRoomItem(session, nearest, "move-proximity", {
+    distance: Math.sqrt(nearestDistance),
+    actorPoint: point,
+  }) : null;
+}
+
+function buildWeaponChangeEvent(session, parsed) {
+  const data = parsed?.params?.get(245);
+  if (!data?.raw) return null;
+  if (isRoundPausedSession(session)) {
+    console.log(`[round] weapon-change ignored actor=${session?.actorId ?? "?"} reason=round-paused`);
+    return null;
+  }
+  if (!session?.spawned || session.dead) {
+    console.log(`[event] weapon-change ignored actor=${session?.actorId ?? "?"} reason=not-live`);
+    return null;
+  }
+  if (isZombiePlayerSession(session)) {
+    console.log(`[zombie] weapon-change ignored actor=${session.actorId} reason=zombie-hand-only`);
+    return null;
+  }
+  const slot = numberOr(htGet(data, 78)?.value, 0);
+  const now = Date.now();
+  const previousState = weaponStateBySlot(session, session.currentWeaponSlot);
+  const state = weaponStateBySlot(session, slot);
+  if (state) {
+    if (previousState && previousState !== state) {
+      startWeaponChange(previousState, "interrupted-by-change", now);
+      startWeaponChange(state, "change-target", now);
+    }
+    session.currentWeaponSlot = slot;
+    invalidatePeerWeaponConfirm(session.room, session.actorId);
+  }
+  console.log(`[event] weapon-change actor=${session.actorId}${describeWeaponEventData(data)}${state ? ` name=${state.systemName}` : ""}`);
+  return rawEvent(98, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: data.raw },
+  ]);
+}
+
+function buildReloadEvent(session, parsed, channel = 0) {
+  const data = parsed?.params?.get(245);
+  const requestedType = htGet(data, 89)?.value;
+  if (isRoundPausedSession(session)) {
+    console.log(`[round] reload ignored actor=${session?.actorId ?? "?"} type=${requestedType} reason=round-paused`);
+    return null;
+  }
+  if (!session?.spawned || session.dead) {
+    console.log(`[event] reload ignored actor=${session?.actorId ?? "?"} missingType=${requestedType} reason=not-live`);
+    return null;
+  }
+  if (isZombiePlayerSession(session)) {
+    console.log(`[zombie] reload ignored actor=${session.actorId} type=${requestedType} reason=zombie-hand-only`);
+    return null;
+  }
+  const state = weaponStateByType(session, requestedType);
+  if (!state) {
+    noteAntiCheatWeaponViolation(session, "reload", "missing-weapon", { weaponType: requestedType });
+    console.log(`[event] reload ignored actor=${session.actorId} missingType=${requestedType}`);
+    return null;
+  }
+
+  if (isColdArmsWeaponType(state.type)) {
+    noteAntiCheatWeaponViolation(session, "reload", "cold-arms", { weaponType: requestedType, slot: state.slot });
+    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=cold-arms`);
+    return null;
+  }
+
+  const missing = Math.max(0, state.maxLoadedAmmo - state.loadedAmmo);
+  const reserve = Math.max(0, state.ammoReserve);
+  const amount = Math.min(missing, reserve);
+  if (amount <= 0) {
+    noteAntiCheatWeaponViolation(session, "reload", "full-or-empty", { weaponType: requestedType, slot: state.slot });
+    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=full-or-empty loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    return null;
+  }
+
+  const now = Date.now();
+  const weaponMode = refreshWeaponMode(state, now);
+  if (weaponMode === WEAPON_MODE.RELOADING) {
+    noteAntiCheatWeaponViolation(session, "reload", "already-reloading", { weaponType: requestedType, slot: state.slot });
+    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=already-reloading loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    return null;
+  }
+  if (weaponMode === WEAPON_MODE.RELOADING_READY) {
+    cancelWeaponReload(state, "interrupted-by-reload", now);
+  }
+
+  state.reloadSeq = (state.reloadSeq || 0) + 1;
+  state.changeUntil = 0;
+  resetWeaponActionState(state);
+  state.reloading = true;
+  state.reloadStartedAt = now;
+  state.reloadReadyAt = isComplexReloadWeaponState(state) ? now + reloadSingleDurationMs(state) : 0;
+  state.reloadFullUntil = now + reloadDurationForAmountMs(state, amount);
+  setWeaponMode(state, WEAPON_MODE.RELOADING, now);
+  const firstTickMs = isComplexReloadWeaponState(state)
+    ? Math.min(reloadSingleDurationMs(state), numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs)))
+    : numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
+  scheduleReloadTick(session, state, channel, state.reloadSeq, firstTickMs);
+  console.log(`[event] reload start actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} first=${firstTickMs}ms ready=${Math.max(0, numberOr(state.reloadReadyAt, 0) - now)}ms full=${state.reloadFullUntil - now}ms complex=${isComplexReloadWeaponState(state) ? 1 : 0}`);
+  return null;
+}
+function clearSpawnStallRecovery(session) {
+  if (!session?.spawnRetry) return;
+  if (session.spawnRetry.timer) clearTimeout(session.spawnRetry.timer);
+  session.spawnRetry = null;
+}
+
+function queueAutoSpawn(session, requestedTeam, reason) {
+  if (!AUTO_SPAWN_AFTER_GAMESTATE || session.moveSeen) return;
+  session.spawnRetry = {
+    team: normalizeTeamForRoom(session, requestedTeam),
+    attempts: 0,
+    nextAt: Date.now() + AUTO_SPAWN_RETRY_MS,
+    reason,
+  };
+}
+
+function maybeAppendQueuedSpawn(session, commands, channel) {
+  if (!session.spawnRetry || session.moveSeen) return;
+
+  const now = Date.now();
+  if (now < session.spawnRetry.nextAt) return;
+
+  if (session.spawnRetry.attempts >= AUTO_SPAWN_RETRY_LIMIT) {
+    console.log(`[event] auto-spawn retry exhausted actor=${session.actorId}`);
+    session.spawnRetry = null;
     return;
   }
 
-  if (type === "summary") {
-    const playTimeMinutes = eventNumber(event, details, "playTimeMinutes", 0);
-    const kills = eventNumber(event, details, "kills", 0);
-    const deaths = eventNumber(event, details, "deaths", 0);
-    const headshots = eventNumber(event, details, "headshots", 0);
-    const hasWon = hasOwn(event, "won") || hasOwn(details, "won");
-    const won = Boolean(event.won ?? details.won);
-    const statDelta = { pt: playTimeMinutes };
-    if (hasWon) statDelta[won ? "w" : "l"] = 1;
-    await incrementPlayerStats(client, playerId, statDelta);
+  session.spawnRetry.attempts += 1;
+  session.spawnRetry.nextAt = now + AUTO_SPAWN_RETRY_MS;
+  const spawnResponse = buildSpawnEvent(session, session.spawnRetry.team, `auto-retry-${session.spawnRetry.attempts}`);
+  commands.push(...makeReliableCommandsForPayload(session, spawnResponse, channel));
+  broadcastSpawnToRoom(session, spawnResponse, channel);
+}
 
-    if (playTimeMinutes > 0 || kills > 0 || deaths > 0 || headshots > 0 || hasWon) {
-      await client.query(
-        `INSERT INTO player_match_stats (player_id, map_name, mode, kills, deaths, headshots, play_time, won)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false]
-      );
+function roomListData(room) {
+  const users = room?.players?.size || 0;
+  return [
+    stringOr(room?.map, DEFAULT_MAP),
+    String(shortRoomValue(room?.lvlMin, 1, 1, 99)),
+    String(shortRoomValue(room?.lvlMax, 50, 1, 99)),
+    String(shortRoomValue(room?.mode, FORCE_TEAM_MODE ? 2 : 1, 1, 255)),
+    String(shortRoomValue(room?.timeLimit, 10, 1, 50)),
+    String(shortRoomValue(room?.fragLimit, 50, 1, 1000)),
+    String(shortRoomValue(users, 0, 0, 32767)),
+    String(shortRoomValue(room?.maxUsers, 8, Math.max(1, users), 64)),
+    String(boolOr(room?.friendlyFire, false)),
+    String(Boolean(room?.password)),
+  ];
+}
+
+function makeRoomListRaw() {
+  const entries = [];
+  for (const room of rooms.values()) {
+    if (!room?.name) continue;
+    if ((room.players?.size || 0) <= 0) continue;
+    entries.push({
+      key: rawString(room.name),
+      value: rawStringArray(roomListData(room)),
+    });
+  }
+  return rawHashtable(entries);
+}
+
+function roomListSummary() {
+  return Array.from(rooms.values())
+    .filter((room) => room?.name && (room.players?.size || 0) > 0)
+    .map((room) => `${room.name}:${room.map}:${room.players.size}/${room.maxUsers || 8}`)
+    .join(",") || "empty";
+}
+
+function makeRoomListEvent(session) {
+  return rawEvent(252, [
+    { key: 254, value: rawInt(session?.actorId || 0) },
+    { key: 245, value: makeRoomListRaw() },
+  ]);
+}
+
+function pushRoomListToLobbySessions(reason = "room-list", channel = 0) {
+  let sent = 0;
+  for (const session of sessions.values()) {
+    if (!session?.listLobby) continue;
+    if (!session.socket || !session.rinfo) continue;
+    if (sendReliablePayload(session.socket, session.rinfo, session, makeRoomListEvent(session), channel)) sent += 1;
+  }
+  if (sent > 0) console.log(`[event] room list live push reason=${reason} sessions=${sent} rooms=${roomListSummary()}`);
+  return sent;
+}
+
+function roomSettingsCompatible(room, mapName, mode) {
+  if (!room) return false;
+  const roomModeValue = Number(room.mode || 1);
+  const requestedModeValue = Number(mode || 1);
+  return mapKey(room.map) === mapKey(mapName) && roomModeValue === requestedModeValue;
+}
+
+function nextAvailableRoomName(baseName) {
+  const name = stringOr(baseName, DEFAULT_ROOM);
+  if (!rooms.has(name)) return name;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${name} (${index})`;
+    if (!rooms.has(candidate)) return candidate;
+  }
+  return `${name} (${Date.now()})`;
+}
+
+function ensureRoom(settings) {
+  let name = settings.name || DEFAULT_ROOM;
+  const mode = Number(settings.mode ?? 1);
+  const requestedMap = settings.map || DEFAULT_MAP;
+  const normalizedMode = normalizeModeForMap(requestedMap, mode);
+  const existingRoom = rooms.get(name);
+  if (
+    existingRoom?.players?.size > 0 &&
+    settings.hasFullSettings !== false &&
+    !roomSettingsCompatible(existingRoom, requestedMap, normalizedMode)
+  ) {
+    const splitName = nextAvailableRoomName(name);
+    console.log(`[state] room name collision split requested=${name} existingMap=${existingRoom.map || DEFAULT_MAP} existingMode=${existingRoom.mode || 1} requestedMap=${requestedMap} requestedMode=${normalizedMode} newRoom=${splitName}`);
+    name = splitName;
+  }
+  if (!rooms.has(name)) {
+    const zombieRoom = normalizedMode === MAP_MODE_ZOMBIE;
+    rooms.set(name, {
+      name,
+      map: requestedMap,
+      mode: normalizedMode,
+      maxUsers: settings.maxUsers || 8,
+      friendlyFire: settings.friendlyFire || false,
+      timeLimit: settings.timeLimit || 10,
+      fragLimit: settings.fragLimit || 50,
+      lvlMin: settings.lvlMin || 1,
+      lvlMax: settings.lvlMax || 50,
+      password: settings.password || "",
+      guestMode: settings.guestMode || 0,
+      startedAt: photonNow(),
+      players: new Map(),
+      moves: 0,
+      items: makeRoomItemState(requestedMap),
+      controlPoints: makeControlPointState(requestedMap),
+      controlPointScores: makeControlPointScoreState(),
+      flags: makeFlagState(requestedMap),
+      controlPointTimer: null,
+      zombieMode: zombieRoom ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0,
+      zombieRoundSeq: 0,
+      zombieBossActorId: 0,
+      zombieBossTimer: null,
+      zombieRoundTimer: null,
+      zombieRestartTimer: null,
+      zombieRoundWinnerTeam: 0,
+      zombieWins: 0,
+      humanWins: 0,
+      standardRoundState: zombieRoom ? null : "ready",
+      standardRoundSeq: 0,
+      standardRoundWinner: 0,
+      standardRoundTimer: null,
+      standardRestartTimer: null,
+      standardTeam1Wins: 0,
+      standardTeam2Wins: 0,
+    });
+  } else {
+    const room = rooms.get(name);
+    if (room.players.size === 0 && settings.hasFullSettings !== false) {
+      clearZombieTimers(room);
+      room.map = settings.map || room.map || DEFAULT_MAP;
+      room.mode = normalizeModeForMap(room.map, mode);
+      room.maxUsers = settings.maxUsers || room.maxUsers || 8;
+      room.friendlyFire = settings.friendlyFire || false;
+      room.timeLimit = settings.timeLimit || room.timeLimit || 10;
+      room.fragLimit = settings.fragLimit || room.fragLimit || 50;
+      room.lvlMin = settings.lvlMin || room.lvlMin || 1;
+      room.lvlMax = settings.lvlMax || room.lvlMax || 50;
+      room.password = settings.password || "";
+      room.guestMode = settings.guestMode || 0;
+      room.startedAt = photonNow();
+      room.moves = 0;
+      room.items = makeRoomItemState(room.map);
+      stopControlPointTicker(room);
+      room.controlPoints = makeControlPointState(room.map);
+      room.controlPointScores = makeControlPointScoreState();
+      room.flags = makeFlagState(room.map);
+      room.zombieMode = room.mode === MAP_MODE_ZOMBIE ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0;
+      room.zombieRoundSeq = 0;
+      room.zombieBossActorId = 0;
+      room.zombieRoundWinnerTeam = 0;
+      room.zombieWins = 0;
+      room.humanWins = 0;
+      clearStandardRoundTimers(room);
+      room.standardRoundState = room.mode === MAP_MODE_ZOMBIE ? null : "ready";
+      room.standardRoundSeq = 0;
+      room.standardRoundWinner = 0;
+      room.standardTeam1Wins = 0;
+      room.standardTeam2Wins = 0;
+    }
+    ensureRoomItems(room);
+  }
+  const room = rooms.get(name);
+  startControlPointTicker(room);
+  return room;
+}
+
+function clearZombieTimers(room) {
+  clearZombieBossTimer(room);
+  clearZombieRoundTimer(room);
+  clearZombieRestartTimer(room);
+  clearStandardRoundTimers(room);
+  stopControlPointTicker(room);
+}
+
+function nextRoomActorId(room) {
+  if (!room?.players) return 1;
+  const maxUsers = Math.max(1, Number(room.maxUsers || 8));
+  for (let actorId = 1; actorId <= maxUsers + 32; actorId += 1) {
+    if (!room.players.has(actorId)) return actorId;
+  }
+  let actorId = maxUsers + 33;
+  while (room.players.has(actorId)) actorId += 1;
+  return actorId;
+}
+
+function resetReliableDedupe(session, reason = "reset", options = {}) {
+  if (!session) return;
+  const cached = session.reliableResponses?.size || 0;
+  const inFlight = session.reliableInFlight?.size || 0;
+  const fragments = session.reliableFragments?.size || 0;
+  session.reliableResponses?.clear?.();
+  session.reliableFragments?.clear?.();
+  if (options.clearInFlight !== false) {
+    session.reliableInFlight?.clear?.();
+  }
+  if (options.bumpGeneration) {
+    session.reliableGeneration = (session.reliableGeneration || 0) + 1;
+  }
+  if (cached || inFlight || fragments || options.bumpGeneration) {
+    console.log(`[state] reliable cache reset reason=${reason} cached=${cached} inflight=${inFlight} fragments=${fragments}${options.clearInFlight === false ? " preserved" : ""} gen=${session.reliableGeneration || 0}`);
+  }
+}
+
+function clearJoinSelfTimer(session) {
+  if (!session?.joinSelfEventTimer) return;
+  clearTimeout(session.joinSelfEventTimer);
+  session.joinSelfEventTimer = null;
+}
+
+function clearSpawnMoveWarningTimer(session) {
+  if (!session?.spawnMoveWarningTimer) return;
+  clearTimeout(session.spawnMoveWarningTimer);
+  session.spawnMoveWarningTimer = null;
+}
+
+function queueSpawnNoMoveWarning(session, point, reason) {
+  clearSpawnMoveWarningTimer(session);
+  if (!SPAWN_NO_MOVE_WARN_MS) return;
+  const actorId = session.actorId;
+  const roomName = session.room?.name;
+  const mapName = session.room?.map || DEFAULT_MAP;
+  session.spawnMoveWarningTimer = setTimeout(() => {
+    session.spawnMoveWarningTimer = null;
+    if (session.actorId !== actorId || session.room?.name !== roomName || session.moveSeen) {
+      return;
+    }
+    console.log(`[warn] spawn-no-move actor=${actorId} map=${mapName} reason=${reason} pos=${fmtPoint(point)} wait=${SPAWN_NO_MOVE_WARN_MS}ms`);
+  }, SPAWN_NO_MOVE_WARN_MS);
+  if (typeof session.spawnMoveWarningTimer.unref === "function") {
+    session.spawnMoveWarningTimer.unref();
+  }
+}
+
+function ensureSpawnSelfRetryTimerSet(session) {
+  if (!session) return null;
+  if (!(session.spawnSelfRetryTimers instanceof Set)) session.spawnSelfRetryTimers = new Set();
+  return session.spawnSelfRetryTimers;
+}
+
+function clearSpawnSelfRetryTimers(session) {
+  if (!(session?.spawnSelfRetryTimers instanceof Set)) return;
+  for (const timer of session.spawnSelfRetryTimers) {
+    clearTimeout(timer);
+  }
+  session.spawnSelfRetryTimers.clear();
+}
+
+function queueSelfSpawnRetry(session, reliableCommand, spawnSeq, reason) {
+  if (!SPAWN_SELF_RETRY_DELAYS_MS.length || !session?.room || !reliableCommandCommands(reliableCommand).length) return;
+  const actorId = session.actorId;
+  const room = session.room;
+  const timerSet = ensureSpawnSelfRetryTimerSet(session);
+  if (!timerSet || !actorId) return;
+
+  for (const delayMs of SPAWN_SELF_RETRY_DELAYS_MS) {
+    const waitMs = Math.max(0, Number(delayMs) || 0);
+    const timer = setTimeout(() => {
+      timerSet.delete(timer);
+      if (session.actorId !== actorId || session.room !== room) return;
+      if (room.players?.get(actorId) !== session) return;
+      if (session.spawnSeq !== spawnSeq) return;
+      if (!session.spawned || session.dead || session.moveSeen || !session.waitingSelfSpawnMove) return;
+      if (sendReliableCommandToSession(session, reliableCommand)) {
+        console.log(`[sync] spawn-self-retry actor=${actorId} seq=${reliableCommand.seqs ?? reliableCommand.seq} delay=${waitMs}ms reason=${reason}`);
+      }
+    }, waitMs);
+    timerSet.add(timer);
+    if (typeof timer.unref === "function") timer.unref();
+  }
+}
+
+function resetSessionMatchStats(session) {
+  if (!session) return;
+  session.matchStartedAt = 0;
+  session.matchStatsPosted = false;
+  session.matchShots = 0;
+  session.matchHits = 0;
+  session.matchKills = 0;
+  session.matchDeaths = 0;
+  session.matchHeadKills = 0;
+  session.matchNutsKills = 0;
+  session.matchSuicides = 0;
+  session.matchDomination = 0;
+  session.matchRevenge = 0;
+  session.matchExp = 0;
+}
+
+function beginSessionMatchStats(session) {
+  resetSessionMatchStats(session);
+  session.expEarned = 0;
+  session.exp2clan = 0;
+  session.matchStartedAt = Date.now();
+}
+
+function recordAcceptedShotStats(session, response, state, weaponType, launchMode) {
+  if (!session) return;
+  const stats = response?.stats || {};
+  const shots = Math.max(1, numberOr(stats.shots, 1));
+  const hits = Math.max(0, numberOr(stats.hits, 0));
+  session.matchShots = numberOr(session.matchShots, 0) + shots;
+  session.matchHits = numberOr(session.matchHits, 0) + hits;
+  postBattleEvent(session, "shot", {
+    weaponId: numberOr(state?.weaponId, weaponType),
+    weaponType: numberOr(state?.type, weaponType),
+    weaponSystemName: stringOr(state?.systemName, ""),
+    shots,
+    hits,
+    eventData: {
+      launchMode,
+      playerTargets: numberOr(stats.playerTargets, 0),
+      headHits: numberOr(stats.headHits, 0),
+      nutsHits: numberOr(stats.nutsHits, 0),
+      kills: numberOr(stats.kills, 0),
+    },
+  });
+}
+
+function postSessionBattleSummary(session, reason = "leave", outcome = {}) {
+  if (!session || session.matchStatsPosted || !session.matchStartedAt || !session.room) return false;
+  const elapsedMs = Math.max(0, Date.now() - session.matchStartedAt);
+  const playTimeMinutes = elapsedMs > 0 ? Math.max(1, Math.ceil(elapsedMs / 60000)) : 0;
+  if (
+    playTimeMinutes <= 0 &&
+    !numberOr(session.matchShots, 0) &&
+    !numberOr(session.matchKills, 0) &&
+    !numberOr(session.matchDeaths, 0)
+  ) {
+    return false;
+  }
+
+  session.matchStatsPosted = true;
+  const eventData = {
+    reason,
+    nutsKills: numberOr(session.matchNutsKills, 0),
+    suicides: numberOr(session.matchSuicides, 0),
+    domination: numberOr(session.matchDomination, 0),
+    revenge: numberOr(session.matchRevenge, 0),
+    maxDomination: numberOr(session.maxDomination, 0),
+    maxRevenge: numberOr(session.maxRevenge, 0),
+    ...(outcome && typeof outcome.eventData === "object" ? outcome.eventData : {}),
+  };
+  const summary = {
+    playTimeMinutes,
+    kills: numberOr(session.matchKills, 0),
+    deaths: numberOr(session.matchDeaths, 0),
+    headshots: numberOr(session.matchHeadKills, 0),
+    shots: numberOr(session.matchShots, 0),
+    hits: numberOr(session.matchHits, 0),
+    expEarned: numberOr(session.matchExp, 0),
+    eventData,
+  };
+  if (outcome && Object.prototype.hasOwnProperty.call(outcome, "won")) summary.won = Boolean(outcome.won);
+  postBattleEvent(session, "summary", summary);
+  return true;
+}
+
+function postStandardRoundBattleSummaries(room, winner, reason = "round-end") {
+  if (!room?.players?.size) return 0;
+  const mode = Number(room.mode || 0);
+  const normalizedWinner = Number(winner || 0);
+  const hasWinner = normalizedWinner > 0;
+  const teamMode = mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CAPTURE_THE_FLAG || mode === MAP_MODE_CONTROL_POINTS;
+  let posted = 0;
+  for (const playerSession of zombieRoomPlayers(room)) {
+    const outcome = { eventData: { roundWinner: normalizedWinner } };
+    if (hasWinner) {
+      outcome.won = teamMode
+        ? Number(playerSession.team || 0) === normalizedWinner
+        : Number(playerSession.actorId || 0) === normalizedWinner;
+    }
+    if (postSessionBattleSummary(playerSession, reason, outcome)) posted += 1;
+  }
+  return posted;
+}
+
+function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round-end") {
+  if (!room?.players?.size) return 0;
+  const normalizedWinner = Number(winnerTeam) === HUMAN_TEAM ? HUMAN_TEAM : ZOMBIE_TEAM;
+  let posted = 0;
+  for (const playerSession of zombieRoomPlayers(room)) {
+    const won = Number(playerSession.team || 0) === normalizedWinner;
+    if (postSessionBattleSummary(playerSession, reason, { won, eventData: { roundWinner: normalizedWinner } })) posted += 1;
+  }
+  return posted;
+}
+
+function resetSessionRoomProgress(session) {
+  if (!session) return;
+  session.spawned = false;
+  session.dead = false;
+  session.moveSeen = false;
+  session.moveCount = 0;
+  session.waitingSelfSpawnMove = false;
+  clearSpawnStallRecovery(session);
+  clearSpawnMoveWarningTimer(session);
+  clearSpawnSelfRetryTimers(session);
+  clearPeerSpawnTimers(session);
+  clearPickupSpawnRepairTimers(session);
+  clearJoinRoomTimers(session);
+  clearSessionWeaponReloadTimers(session);
+  clearSessionImpactTimers(session);
+  session.gameStateRequested = false;
+  session.lastGameStateResponseAt = 0;
+  session.knownActorIds = new Set();
+  session.actorJoinAnnouncedAt = new Map();
+  session.joinActorListIds = new Set();
+  session.deferredJoinActorIds = new Set();
+  session.peerWeaponConfirmKeys = new Map();
+  session.visibleItemIds = new Set();
+  session.expEarned = 0;
+  session.exp2clan = 0;
+  resetSessionFragState(session);
+  clearSessionActiveShotLedgers(session);
+  session.team = -1;
+  session.zombieType = ZOMBIE_TYPE.HUMAN;
+  session.lastTransform = null;
+  session.pendingSpawnBroadcast = null;
+  session.pendingPickupSync = null;
+  resetSessionMatchStats(session);
+  clearOutboundReliableState(session);
+}
+
+function deleteEmptyRoom(room, reason = "empty") {
+  if (!room?.name || (room.players?.size || 0) > 0) return false;
+  if (rooms.get(room.name) !== room) return false;
+  clearZombieTimers(room);
+  rooms.delete(room.name);
+  console.log(`[state] empty room deleted reason=${reason} room=${room.name} map=${room.map || DEFAULT_MAP}`);
+  pushRoomListToLobbySessions(`delete-${reason}`);
+  return true;
+}
+
+function sessionIdentityKey(session) {
+  const id = Number(session?.playerId || 0);
+  if (!Number.isFinite(id) || id <= 0) return "";
+  const authKey = String(session?.playerAuthKey || "").trim();
+  return authKey ? `${id}:${authKey}` : String(id);
+}
+
+function sameBattleIdentity(left, right) {
+  if (!left || !right || left === right) return false;
+  const leftIdentity = sessionIdentityKey(left);
+  const rightIdentity = sessionIdentityKey(right);
+  if (leftIdentity && rightIdentity && leftIdentity === rightIdentity) return true;
+  return Boolean(left.remoteKey && right.remoteKey && left.remoteKey === right.remoteKey);
+}
+
+function removeRoomPlayer(room, actorId, playerSession, reason = "leave", options = {}) {
+  if (!room?.players || room.players.get(actorId) !== playerSession) return false;
+  playerSession.room = room;
+  const peers = broadcastReliableToRoom(
+    playerSession,
+    makeActorLeaveEvent(actorId),
+    options.channel || 0,
+    options.broadcastReason || "actor-leave",
+    { requireGameState: false },
+  );
+  room.players.delete(actorId);
+  forgetActorForRoom(room, actorId);
+  maybeFinishZombieRound(room, `leave-${reason}`, options.channel || 0);
+  if (options.postSummary !== false) postSessionBattleSummary(playerSession, reason);
+  resetSessionRoomProgress(playerSession);
+  if (playerSession.room === room) playerSession.room = null;
+  console.log(`[state] room player removed reason=${reason} room=${room.name} map=${room.map || DEFAULT_MAP} actor=${actorId} player=${playerSession.playerId || "unknown"} peers=${peers}`);
+  broadcastMasterUserState(playerSession.playerId);
+  const deleted = deleteEmptyRoom(room, reason);
+  if (!deleted) pushRoomListToLobbySessions(`leave-${reason}`, options.channel || 0);
+  return true;
+}
+
+function detachSessionFromRoom(session, reason = "leave") {
+  const room = session?.room;
+  dropCtfFlagsForSession(session, 2, session?.lastChannel || 0);
+  let removed = false;
+  if (room?.players) {
+    for (const [actorId, playerSession] of Array.from(room.players.entries())) {
+      if (playerSession === session) {
+        removed = removeRoomPlayer(room, actorId, session, reason) || removed;
+      }
+    }
+  }
+  if (!removed) {
+    postSessionBattleSummary(session, reason);
+    resetSessionRoomProgress(session);
+    if (session) session.room = null;
+    deleteEmptyRoom(room, reason);
+  }
+}
+
+function resetTransportForReconnect(session, reason) {
+  detachSessionFromRoom(session, reason);
+  resetReliableDedupe(session, reason, { bumpGeneration: true });
+  session.serverSeq = 0;
+  session.unreliableSeq = 0;
+  session.serverSeqByChannel = new Map();
+  session.unreliableSeqByChannel = new Map();
+  session.reliableFragments = new Map();
+  session.verifySeq = null;
+  session.seenVerify = false;
+  session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
+  session.roomRaw = makeRoomSettingsRaw(session.room);
+  session.actorRaw = null;
+  session.peerActorRaw = null;
+  session.peerActorRawBytes = 0;
+  session.peerActorLoadoutSlots = 0;
+  session.peerActorProfile = "";
+  session.joinActorRaw = null;
+  session.joinActorRawBytes = 0;
+  session.joinActorLoadoutSlots = 0;
+  session.joinActorProfile = "";
+  session.actorJoinParam = null;
+  session.currentWeaponSlot = 1;
+  session.weaponStates = makeWeaponRuntimeState(null);
+  session.peerWeaponConfirmKeys = new Map();
+  clearSessionActiveShotLedgers(session);
+  clearSessionImpactTimers(session);
+  session.health = playerRuntimeStats(null).maxHealth;
+  session.energy = playerRuntimeStats(null).maxEnergy;
+  session.dead = false;
+  session.waitingSelfSpawnMove = false;
+  clearSpawnSelfRetryTimers(session);
+  session.pendingSpawnBroadcast = null;
+  session.kills = 0;
+  session.deaths = 0;
+  session.points = 0;
+  session.expEarned = 0;
+  session.exp2clan = 0;
+}
+
+function removeDuplicatePlayerSessions(room, session) {
+  if (!room?.players) return;
+  for (const [actorId, playerSession] of Array.from(room.players.entries())) {
+    if (sameBattleIdentity(playerSession, session)) {
+      removeRoomPlayer(room, actorId, playerSession, "duplicate-same-room", { broadcastReason: "stale-leave" });
     }
   }
 }
 
-async function recordBattleEvent(event) {
-  const account = ensureDesktopAccount();
-  if (!pgPool) {
-    return { ok: true, storage: "json-file", skipped: "postgres_disabled" };
+function removeDuplicatePlayerSessionsFromAllRooms(session, reason = "duplicate-global") {
+  let removed = 0;
+  for (const room of Array.from(rooms.values())) {
+    if (!room?.players) continue;
+    for (const [actorId, playerSession] of Array.from(room.players.entries())) {
+      if (!sameBattleIdentity(playerSession, session)) continue;
+      if (removeRoomPlayer(room, actorId, playerSession, reason, { broadcastReason: "stale-leave" })) {
+        removed += 1;
+      }
+    }
+  }
+  if (removed > 0) {
+    console.log(`[state] duplicate identity cleanup player=${session.playerId || "unknown"} removed=${removed}`);
+  }
+  return removed;
+}
+
+function maybePruneIdleRoomSessions(now = Date.now()) {
+  if (ROOM_SESSION_IDLE_MS <= 0) return 0;
+  if (now - lastRoomSessionPruneAt < ROOM_SESSION_PRUNE_INTERVAL_MS) return 0;
+  lastRoomSessionPruneAt = now;
+  let removed = 0;
+  for (const room of Array.from(rooms.values())) {
+    if (!room?.players) continue;
+    for (const [actorId, playerSession] of Array.from(room.players.entries())) {
+      const lastSeenAt = Number(playerSession?.lastSeenAt || 0);
+      if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
+      if (removeRoomPlayer(room, actorId, playerSession, "idle-timeout", { broadcastReason: "idle-leave" })) {
+        removed += 1;
+        if (playerSession.sessionId) sessions.delete(playerSession.sessionId);
+      }
+    }
+  }
+  if (removed > 0) {
+    console.log(`[state] idle room prune removed=${removed} idleMs=${ROOM_SESSION_IDLE_MS}`);
+  }
+  return removed;
+}
+
+function maybePruneIdleMasterSessions(now = Date.now()) {
+  if (ROOM_SESSION_IDLE_MS <= 0) return 0;
+  let removed = 0;
+  for (const [playerId, set] of Array.from(masterSessionsByPlayerId.entries())) {
+    for (const session of Array.from(set)) {
+      const lastSeenAt = Number(session?.lastSeenAt || 0);
+      if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
+      set.delete(session);
+      if (session?.sessionId) sessions.delete(session.sessionId);
+      removed += 1;
+    }
+    if (set.size <= 0) {
+      masterSessionsByPlayerId.delete(playerId);
+      broadcastMasterLobbyEvent(212, playerId, masterUserDataRaw(masterKnownUser(playerId), { status: 2 }), playerId);
+    }
+  }
+  if (removed > 0) {
+    console.log(`[master-social] idle prune removed=${removed} idleMs=${ROOM_SESSION_IDLE_MS}`);
+  }
+  return removed;
+}
+
+function makeActorJoinEvent(session) {
+  return rawEvent(105, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: actorRawForPeer(session) },
+  ]);
+}
+
+function makeActorLeaveEvent(actorId) {
+  return rawEvent(106, [
+    { key: 254, value: rawInt(actorId) },
+    { key: 245, value: rawHashtable([]) },
+  ]);
+}
+
+function ensureKnownActorSet(session) {
+  if (!session) return null;
+  if (!(session.knownActorIds instanceof Set)) session.knownActorIds = new Set();
+  return session.knownActorIds;
+}
+
+function ensureActorAnnounceMap(session) {
+  if (!session) return null;
+  if (!(session.actorJoinAnnouncedAt instanceof Map)) session.actorJoinAnnouncedAt = new Map();
+  return session.actorJoinAnnouncedAt;
+}
+
+function ensurePeerSpawnTimerSet(session) {
+  if (!session) return null;
+  if (!(session.peerSpawnTimers instanceof Set)) session.peerSpawnTimers = new Set();
+  return session.peerSpawnTimers;
+}
+
+function clearPeerSpawnTimers(session) {
+  if (!(session?.peerSpawnTimers instanceof Set)) return;
+  for (const timer of session.peerSpawnTimers) {
+    clearTimeout(timer);
+  }
+  session.peerSpawnTimers.clear();
+}
+
+function markActorKnown(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return;
+  ensureKnownActorSet(session)?.add(normalizedActorId);
+  session?.actorJoinAnnouncedAt?.delete?.(normalizedActorId);
+}
+
+function markActorAnnounced(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return;
+  if (sessionKnowsActor(session, normalizedActorId)) return;
+  ensureActorAnnounceMap(session)?.set(normalizedActorId, Date.now());
+}
+
+function sessionKnowsActor(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  return Number.isInteger(normalizedActorId) && session?.knownActorIds instanceof Set && session.knownActorIds.has(normalizedActorId);
+}
+
+function actorAnnounceAgeMs(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || !(session?.actorJoinAnnouncedAt instanceof Map)) return null;
+  const announcedAt = session.actorJoinAnnouncedAt.get(normalizedActorId);
+  return Number.isFinite(announcedAt) ? Date.now() - announcedAt : null;
+}
+
+function sessionHasActorData(session, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId)) return false;
+  return sessionKnowsActor(session, normalizedActorId) || actorAnnounceAgeMs(session, normalizedActorId) != null;
+}
+
+function markKnownRoomActors(session) {
+  if (!session?.room?.players) return;
+  markActorKnown(session, session.actorId);
+  if (session.joinActorListIds instanceof Set) {
+    for (const actorId of session.joinActorListIds) {
+      markActorKnown(session, actorId);
+    }
+    return;
+  }
+  for (const [actorId, playerSession] of session.room.players.entries()) {
+    if (!playerSession || playerSession === session || !playerSession.actorRaw) continue;
+    markActorKnown(session, actorId);
+  }
+}
+
+function forgetActorForRoom(room, actorId) {
+  const normalizedActorId = Number(actorId);
+  if (!Number.isInteger(normalizedActorId) || !room?.players?.size) return;
+  for (const playerSession of room.players.values()) {
+    playerSession?.knownActorIds?.delete?.(normalizedActorId);
+    playerSession?.actorJoinAnnouncedAt?.delete?.(normalizedActorId);
+  }
+}
+
+function schedulePeerSpawnEvent(targetSession, sourceSession, spawnPayload, channel, delayMs) {
+  const room = sourceSession?.room;
+  const sourceActorId = sourceSession?.actorId;
+  const targetActorId = targetSession?.actorId;
+  if (!room || !sourceActorId || !targetActorId || !spawnPayload) return false;
+  const timerSet = ensurePeerSpawnTimerSet(targetSession);
+  const waitMs = Math.max(0, Number(delayMs) || 0);
+  const timer = setTimeout(() => {
+    timerSet?.delete(timer);
+    if (sourceSession.room !== room || targetSession.room !== room) return;
+    if (room.players.get(sourceActorId) !== sourceSession || room.players.get(targetActorId) !== targetSession) return;
+    if (!targetSession.gameStateRequested) return;
+    if (sendPeerSpawnToSession(targetSession, sourceSession, spawnPayload, channel)) {
+      console.log(`[sync] spawn-delayed actor=${sourceActorId} peer=${targetActorId} delay=${waitMs}ms`);
+    }
+  }, waitMs);
+  timerSet?.add(timer);
+  if (typeof timer.unref === "function") timer.unref();
+  return true;
+}
+
+function buildDeferredPeerActorJoinEvents(targetSession, channel = 0) {
+  const deferredIds = targetSession?.deferredJoinActorIds;
+  const room = targetSession?.room;
+  if (!(deferredIds instanceof Set) || deferredIds.size === 0 || !room?.players?.size) return [];
+
+  const events = [];
+  let queuedSpawns = 0;
+  const announced = [];
+  for (const actorId of deferredIds) {
+    const normalizedActorId = Number(actorId);
+    if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) continue;
+    if (sessionHasActorData(targetSession, normalizedActorId)) continue;
+
+    const peerSession = room.players.get(normalizedActorId);
+    if (!peerSession || peerSession === targetSession || !peerSession.peerActorRaw) continue;
+
+    events.push(makeActorJoinEvent(peerSession));
+    markActorAnnounced(targetSession, normalizedActorId);
+    announced.push(normalizedActorId);
+
+    const spawnEvent = makeSpawnEventFromSession(peerSession);
+    if (spawnEvent && schedulePeerSpawnEvent(targetSession, peerSession, spawnEvent, channel, ACTOR_JOIN_ASYNC_DELAY_MS)) {
+      queuedSpawns += 1;
+    }
   }
 
-  const roomName = String(event.roomName || event.room || "restore-room").slice(0, 80);
-  const mapName = String(event.mapName || event.map || "Arena_3lvl").slice(0, 80);
-  const mode = normalizeStatsMode(event.mode || 2);
-  const maxPlayers = Number(event.maxPlayers || 8);
-  const playerId = Number(event.playerId || account.id || 1);
-  const actorId = Number(event.actorId || 1);
-  const team = Number(event.team ?? -1);
-  const health = Number(event.health ?? 100);
-  const energy = Number(event.energy ?? 100);
-  const serverHost = String(event.serverHost || BATTLE_HOST || "").slice(0, 128);
-  const serverPort = Number(event.serverPort || 5055);
-  const roomSettings = JSON.stringify(asBattleJson(event.roomSettings));
-  const playerData = JSON.stringify(asBattleJson(event.playerData));
-  const transform = JSON.stringify(asBattleJson(event.transform));
-  const details = asBattleJson(event.eventData);
-  const type = String(event.type || "event");
+  if (events.length > 0) {
+    console.log(`[sync] deferred-actor-join target=${targetSession.actorId} actors=${announced.join(",")} queuedSpawns=${queuedSpawns}`);
+  }
+  deferredIds.clear();
+  return events;
+}
 
-  const client = await pgPool.connect();
+function queuePeerActorRepair(targetSession, channel = 0, reason = "gamestate") {
+  const room = targetSession?.room;
+  const targetActorId = targetSession?.actorId;
+  if (!targetActorId || !room?.players?.size || !PEER_ACTOR_REPAIR_DELAYS_MS.length) return;
+
+  const peers = Array.from(room.players.entries())
+    .filter(([actorId, peerSession]) => Number(actorId) !== Number(targetActorId) && peerSession?.peerActorRaw);
+  if (!peers.length) return;
+
+  for (const delayMs of PEER_ACTOR_REPAIR_DELAYS_MS) {
+    const waitMs = Math.max(0, Number(delayMs) || 0);
+    const timer = setTimeout(() => {
+      if (targetSession.room !== room || room.players.get(targetActorId) !== targetSession) return;
+      if (!targetSession.gameStateRequested) return;
+
+      const payloads = [];
+      const actors = [];
+      let queuedSpawns = 0;
+      for (const [actorId, peerSession] of peers) {
+        const normalizedActorId = Number(actorId);
+        if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) continue;
+        if (peerSession.room !== room || room.players.get(normalizedActorId) !== peerSession || !peerSession.peerActorRaw) continue;
+
+        payloads.push(makeActorLeaveEvent(normalizedActorId));
+        payloads.push(makeActorJoinEvent(peerSession));
+        markActorAnnounced(targetSession, normalizedActorId);
+        actors.push(normalizedActorId);
+
+        const spawnEvent = makeSpawnEventFromSession(peerSession);
+        if (spawnEvent && schedulePeerSpawnEvent(targetSession, peerSession, spawnEvent, channel, ACTOR_JOIN_ASYNC_DELAY_MS)) {
+          queuedSpawns += 1;
+        }
+      }
+
+      if (!payloads.length) return;
+      if (sendReliablePayloadsToSession(targetSession, payloads, channel)) {
+        console.log(`[sync] peer-actor-repair target=${targetActorId} actors=${actors.join(",")} delay=${waitMs}ms reason=${reason} queuedSpawns=${queuedSpawns}`);
+      }
+    }, waitMs);
+    if (typeof timer.unref === "function") timer.unref();
+  }
+}
+
+function sendPeerSpawnToSession(targetSession, sourceSession, spawnPayload, channel) {
+  const sourceActorId = sourceSession?.actorId;
+  const targetActorId = targetSession?.actorId;
+  if (!sourceActorId || !targetActorId || !spawnPayload) return false;
+  if (!sendReliableToSession(targetSession, spawnPayload, channel)) return false;
+
+  markActorKnown(targetSession, sourceActorId);
+  if (CONFIRM_PEER_SPAWN_AFTER_ISENEMY) {
+    sendReliableToSession(targetSession, spawnPayload, channel);
+    console.log(`[sync] spawn-confirm actor=${sourceActorId} peer=${targetActorId}`);
+  }
+  return true;
+}
+
+function broadcastSpawnToRoom(sourceSession, spawnPayload, channel = 0) {
+  const room = sourceSession?.room;
+  if (!room?.players?.size || !spawnPayload) return 0;
+  let sent = 0;
+  let announced = 0;
+  let queued = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === sourceSession || !playerSession.gameStateRequested) continue;
+
+    if (sessionKnowsActor(playerSession, sourceSession.actorId)) {
+      if (sendPeerSpawnToSession(playerSession, sourceSession, spawnPayload, channel)) sent += 1;
+      continue;
+    }
+
+    const announceAge = actorAnnounceAgeMs(playerSession, sourceSession.actorId);
+    if (announceAge == null) {
+      if (sendReliableToSession(playerSession, makeActorJoinEvent(sourceSession), channel)) {
+        markActorAnnounced(playerSession, sourceSession.actorId);
+        announced += 1;
+        if (schedulePeerSpawnEvent(playerSession, sourceSession, spawnPayload, channel, ACTOR_JOIN_ASYNC_DELAY_MS)) queued += 1;
+      }
+      continue;
+    }
+
+    const remainingDelay = ACTOR_JOIN_ASYNC_DELAY_MS - announceAge;
+    if (remainingDelay > 0) {
+      if (schedulePeerSpawnEvent(playerSession, sourceSession, spawnPayload, channel, remainingDelay)) queued += 1;
+      continue;
+    }
+
+    if (sendPeerSpawnToSession(playerSession, sourceSession, spawnPayload, channel)) {
+      sent += 1;
+    }
+  }
+  if (sent > 0 || announced > 0 || queued > 0) {
+    console.log(`[sync] spawn actor=${sourceSession.actorId} peers=${sent} announced=${announced} queued=${queued}`);
+  }
+  return sent;
+}
+
+function makeJoinSelfEvent(session) {
+  return rawEvent(255, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 249, value: session.actorRaw || rawHashtable([]) },
+  ]);
+}
+
+function makeJoinStartEvent(session) {
+  return rawEvent(103, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: rawHashtable([]) },
+  ]);
+}
+
+function makeJoinSettingsRaw(session, actorListRaw = null) {
+  return rawHashtable([
+    { key: rawByte(100), value: session.roomRaw || rawHashtable([]) },
+    { key: rawByte(99), value: actorListRaw || makeRoomActorListRaw(session.room, session) },
+    { key: rawByte(98), value: session.actorRaw || rawHashtable([]) },
+    { key: rawByte(97), value: rawInt(session.actorId) },
+  ]);
+}
+
+function makeJoinSettingsEvent(session) {
+  return rawEvent(107, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: makeJoinSettingsRaw(session) },
+  ]);
+}
+
+function clearJoinSettingsTimers(session) {
+  if (!session?.joinSettingsTimers) return;
+  for (const timer of session.joinSettingsTimers) {
+    clearTimeout(timer);
+  }
+  session.joinSettingsTimers = [];
+}
+
+function clearJoinStartTimer(session) {
+  if (!session?.joinStartEventTimer) return;
+  clearTimeout(session.joinStartEventTimer);
+  session.joinStartEventTimer = null;
+}
+
+function clearJoinLateStartTimers(session) {
+  if (!session?.joinLateStartTimers) return;
+  for (const timer of session.joinLateStartTimers) {
+    clearTimeout(timer);
+  }
+  session.joinLateStartTimers = [];
+}
+
+function clearJoinRoomTimers(session) {
+  clearJoinSelfTimer(session);
+  clearJoinStartTimer(session);
+  clearJoinSettingsTimers(session);
+  clearJoinLateStartTimers(session);
+}
+
+function queueJoinSettingsPushes(port, socket, rinfo, session, channel = 0) {
+  clearJoinSettingsTimers(session);
+  if (!JOIN_SETTINGS_PUSH_DELAYS_MS.length) return;
+  session.joinSettingsTimers = JOIN_SETTINGS_PUSH_DELAYS_MS.map((delayMs) => {
+    const timer = setTimeout(() => {
+      if (sessions.get(key(port, rinfo)) !== session || session.gameStateRequested) {
+        return;
+      }
+      console.log(`[event] join-settings-push actor=${session.actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} roomRaw=${session.roomRaw?.length || 0}`);
+      markKnownRoomActors(session);
+      sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
+    }, delayMs);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    return timer;
+  });
+}
+
+function queueJoinStartFallback(port, socket, rinfo, session, channel = 0) {
+  clearJoinStartTimer(session);
+  // Normal slow-load recovery is handled by join-late-start pulses; this early one-shot is opt-in for diagnostics.
+  if (JOIN_START_EVENT_FALLBACK_DELAY_MS <= 0) return;
+  const actorId = session.actorId;
+  session.joinStartEventTimer = setTimeout(() => {
+    session.joinStartEventTimer = null;
+    if (sessions.get(key(port, rinfo)) !== session || session.actorId !== actorId || session.gameStateRequested) {
+      return;
+    }
+    console.log(`[event] join-start-fallback actor=${actorId} delay=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms`);
+    sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
+  }, JOIN_START_EVENT_FALLBACK_DELAY_MS);
+  if (typeof session.joinStartEventTimer.unref === "function") {
+    session.joinStartEventTimer.unref();
+  }
+}
+
+function queueJoinLateStartPulses(port, socket, rinfo, session, channel = 0) {
+  clearJoinLateStartTimers(session);
+  if (!JOIN_LATE_START_DELAYS_MS.length) return;
+  const actorId = session.actorId;
+  session.joinLateStartTimers = JOIN_LATE_START_DELAYS_MS.map((delayMs) => {
+    const timer = setTimeout(() => {
+      if (sessions.get(key(port, rinfo)) !== session || session.actorId !== actorId || session.gameStateRequested) {
+        return;
+      }
+      console.log(`[event] join-late-start-pulse actor=${actorId} delay=${delayMs}ms`);
+      sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
+      markKnownRoomActors(session);
+      sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
+    }, delayMs);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    return timer;
+  });
+}
+
+function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListRaw = null, options = {}) {
+  const response = rawOperationResponse(255, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 249, value: actorListRaw || makeRoomActorListRaw(session.room, session) },
+    { key: 248, value: session.roomRaw },
+  ]);
+  const selfDelayMs = options.waitForProfile ? JOIN_SELF_PROFILE_WAIT_MS : JOIN_SELF_EVENT_DELAY_MS;
+
+  if (!options.waitForProfile) {
+    queueJoinSettingsPushes(port, socket, rinfo, session, channel);
+    queueJoinStartFallback(port, socket, rinfo, session, channel);
+    queueJoinLateStartPulses(port, socket, rinfo, session, channel);
+  } else {
+    clearJoinSettingsTimers(session);
+    clearJoinStartTimer(session);
+    clearJoinLateStartTimers(session);
+  }
+
+  if (selfDelayMs <= 0) {
+    return [response, makeJoinSelfEvent(session)];
+  }
+
+  if (session.joinSelfEventTimer) {
+    clearTimeout(session.joinSelfEventTimer);
+  }
+  const actorId = session.actorId;
+  const startedAt = Date.now();
+  const scheduleSelfJoin = (delayMs) => {
+    session.joinSelfEventTimer = setTimeout(() => {
+      session.joinSelfEventTimer = null;
+      if (sessions.get(key(port, rinfo)) !== session || session.actorId !== actorId) {
+        return;
+      }
+
+      if (options.waitForProfile && isFallbackBattleProfile(session.loadedProfile)) {
+        const elapsed = Date.now() - startedAt;
+        if (elapsed < JOIN_PROFILE_MAX_WAIT_MS) {
+          console.log(`[event] join-self wait-profile actor=${actorId} elapsed=${elapsed}ms retry=${JOIN_PROFILE_RETRY_MS}ms`);
+          if (options.incomingActor) {
+            warmPlayerProfile(options.incomingActor, "join-self-retry").then((loadedProfile) => {
+              if (sessions.get(key(port, rinfo)) === session && session.actorId === actorId) {
+                applyLateProfile(session, loadedProfile, options.incomingActor);
+              }
+            });
+          }
+          scheduleSelfJoin(JOIN_PROFILE_RETRY_MS);
+          return;
+        }
+        if (!ALLOW_FALLBACK_JOIN_PROFILE) {
+          console.log(`[event] join-self blocked fallback-profile actor=${actorId} elapsed=${elapsed}ms`);
+          return;
+        }
+      }
+
+      console.log(`[event] delayed join-self actor=${actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} profileWait=${options.waitForProfile ? "on" : "off"}`);
+      sendReliablePayload(socket, rinfo, session, makeJoinSelfEvent(session), channel);
+      queueJoinSettingsPushes(port, socket, rinfo, session, channel);
+      queueJoinStartFallback(port, socket, rinfo, session, channel);
+      queueJoinLateStartPulses(port, socket, rinfo, session, channel);
+    }, delayMs);
+    if (typeof session.joinSelfEventTimer.unref === "function") {
+      session.joinSelfEventTimer.unref();
+    }
+  };
+  scheduleSelfJoin(selfDelayMs);
+
+  return [response];
+}
+
+function eventDataHash(parsed) {
+  const evData = parsed.params.get(245);
+  return evData && evData.type === 0x68 ? evData : null;
+}
+
+function chatRequestData(parsed) {
+  if (parsed?.opCode === 253) return eventDataHash(parsed);
+  return null;
+}
+
+function chatRequestText(parsed) {
+  const data = chatRequestData(parsed);
+  const value = data ? htGet(data, 77)?.value : parsed?.params?.get(77)?.value;
+  return String(value ?? "").trim();
+}
+
+function chatRequestType(parsed) {
+  const data = chatRequestData(parsed);
+  const value = data ? htGet(data, 80)?.value : parsed?.params?.get(80)?.value;
+  const type = Number(value ?? 253);
+  return Number.isFinite(type) ? (type & 0xff) : 253;
+}
+
+function buildBattleChatEvent(session, message, type) {
+  const team = Number.isFinite(Number(session?.team)) ? Number(session.team) : 0;
+  return rawEvent(155, [
+    { key: 254, value: rawInt(session.actorId) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(77), value: rawString(message) },
+        { key: rawByte(85), value: rawString(stringOr(session.playerName, process.env.DEFAULT_PLAYER_NAME || "ContraCity")) },
+        { key: rawByte(80), value: rawByte(type) },
+        { key: rawByte(84), value: rawShort(team) },
+      ]),
+    },
+  ]);
+}
+
+function broadcastBattleChat(session, payload, type, channel = 0) {
+  const room = session?.room;
+  if (!room?.players?.size || !payload) return 0;
+  const teamOnly = Number(type) === 249;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession === session) continue;
+    if (teamOnly && Number(playerSession.team) !== Number(session.team)) continue;
+    if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function handleBattleChatRequest(session, parsed, channel = 0) {
+  if (!session?.room || !session.actorId) {
+    console.log(`[chat] ignored op=155 reason=no-room actor=${session?.actorId || 0}`);
+    return [];
+  }
+  const message = chatRequestText(parsed).slice(0, 160);
+  if (!message) return [];
+  const type = chatRequestType(parsed);
+  const event = buildBattleChatEvent(session, message, type);
+  const peers = broadcastBattleChat(session, event, type, channel);
+  postBattleEvent(session, "chat", {
+    message,
+    eventData: { type, team: session.team || 0, peers },
+  });
+  console.log(`[chat] room=${session.room.name} actor=${session.actorId} user=${session.playerId || 0} type=${type} team=${session.team || 0} chars=${message.length} peers=${peers}`);
+  return [event];
+}
+
+function getTeamFromEventData(parsed, fallback = 1) {
+  const data = eventDataHash(parsed);
+  const team = htGet(data, 239)?.value;
+  if (team === 0 || team === 1 || team === 2) return team;
+  return fallback;
+}
+
+function jsonForDb(session, extra = {}) {
+  return {
+    token: API_TOKEN,
+    roomName: session.room?.name || DEFAULT_ROOM,
+    mapName: session.room?.map || DEFAULT_MAP,
+    mode: session.room?.mode ?? 1,
+    maxPlayers: session.room?.maxUsers || 8,
+    serverHost: PUBLIC_HOST,
+    serverPort: session.port,
+    playerId: session.playerId || 1,
+    playerName: session.playerName || "",
+    playerAuthKey: session.playerAuthKey || "",
+    actorId: session.actorId || 1,
+    team: session.team ?? -1,
+    health: extra.health ?? 100,
+    energy: extra.energy ?? 100,
+    roomSettings: {
+      name: session.room?.name || DEFAULT_ROOM,
+      map: session.room?.map || DEFAULT_MAP,
+      mode: session.room?.mode ?? 1,
+      forceTeamMode: FORCE_TEAM_MODE,
+    },
+    ...extra,
+  };
+}
+
+function roomSessionByPlayerId(room, playerId) {
+  const id = Number(playerId || 0);
+  if (!room?.players?.size || !Number.isInteger(id) || id <= 0) return null;
+  for (const playerSession of room.players.values()) {
+    if (Number(playerSession?.playerId || 0) === id) return playerSession;
+  }
+  return null;
+}
+
+function makeAchievementEvent(actorId, achievement) {
+  return rawEvent(76, [
+    { key: 254, value: rawInt(actorId) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawInt(0), value: rawLong(achievement.i) },
+        { key: rawInt(1), value: rawInt(achievement.maxValue) },
+        { key: rawInt(2), value: rawInt(achievement.currentValue) },
+        { key: rawInt(3), value: rawInt(achievement.reward) },
+        { key: rawInt(4), value: rawInt(achievement.userId) },
+      ]),
+    },
+  ]);
+}
+
+function emitAchievementEvents(sourceSession, achievements) {
+  if (!Array.isArray(achievements) || achievements.length <= 0) return;
+  for (const achievement of achievements) {
+    const ownerSession = roomSessionByPlayerId(sourceSession?.room, achievement.userId) || sourceSession;
+    const actorId = Number(ownerSession?.actorId || sourceSession?.actorId || 0);
+    if (!Number.isInteger(actorId) || actorId <= 0) continue;
+    const channel = reliableChannelForSession(ownerSession, sourceSession?.lastChannel || 0);
+    const payload = makeAchievementEvent(actorId, achievement);
+    const self = sendReliableToSession(ownerSession, payload, channel) ? 1 : 0;
+    const peers = broadcastReliableToRoom(ownerSession, payload, channel, "achievement", { requireGameState: false });
+    console.log(`[sync] achievement actor=${actorId} user=${achievement.userId} ach=${achievement.i} value=${achievement.currentValue}/${achievement.maxValue} reward=${achievement.reward} self=${self} peers=${peers}`);
+  }
+}
+
+async function postBattleEvent(session, type, extra = {}) {
+  if (!API_BASE_URL || typeof fetch !== "function") return;
   try {
-    await client.query("BEGIN");
-    await upsertBattleEventPlayer(client, event, details, account.id, account);
-    await upsertBattleEventPlayer(client, event, details, playerId, Number(playerId) === Number(account.id) ? account : null);
-    if (type === "death" || type === "score") {
-      await upsertBattleEventPlayer(client, event, details, Number(event.killerPlayerId || details.killerPlayerId || 0));
-      await upsertBattleEventPlayer(client, event, details, Number(event.victimPlayerId || details.victimPlayerId || 0));
+    const response = await fetch(`${API_BASE_URL}/battle/event`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
+      },
+      body: JSON.stringify(jsonForDb(session, { type, ...extra })),
+    });
+    if (!response.ok) {
+      console.log(`[api] ${type} failed status=${response.status}`);
+    } else {
+      let result = null;
+      try {
+        result = await response.json();
+      } catch {
+        result = null;
+      }
+      emitAchievementEvents(session, result?.achievements);
+      console.log(`[api] ${type} ok`);
     }
-
-    const room = await client.query(
-      `INSERT INTO battle_rooms (
-         room_name, map_name, mode, max_players, friendly_fire, status, host_player_id,
-         server_host, server_port, room_settings, updated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
-       ON CONFLICT (room_name) DO UPDATE SET
-         map_name = EXCLUDED.map_name,
-         mode = EXCLUDED.mode,
-         max_players = EXCLUDED.max_players,
-         friendly_fire = EXCLUDED.friendly_fire,
-         status = EXCLUDED.status,
-         host_player_id = EXCLUDED.host_player_id,
-         server_host = EXCLUDED.server_host,
-         server_port = EXCLUDED.server_port,
-         room_settings = EXCLUDED.room_settings,
-         updated_at = now()
-       RETURNING id`,
-      [roomName, mapName, mode, maxPlayers, Boolean(event.friendlyFire), type === "leave" ? "closed" : "running", playerId, serverHost, serverPort, roomSettings]
-    );
-
-    const roomId = room.rows[0].id;
-    await client.query(
-      `INSERT INTO battle_room_players (
-         room_id, player_id, actor_id, team, health, energy, ping, connected, player_data, updated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, now())
-       ON CONFLICT (room_id, player_id) DO UPDATE SET
-         actor_id = EXCLUDED.actor_id,
-         team = EXCLUDED.team,
-         health = EXCLUDED.health,
-         energy = EXCLUDED.energy,
-         ping = EXCLUDED.ping,
-         connected = EXCLUDED.connected,
-         player_data = EXCLUDED.player_data,
-         updated_at = now()`,
-      [roomId, playerId, actorId, team, health, energy, Number(event.ping || 0), type !== "leave", playerData]
-    );
-
-    if (type === "spawn") {
-      await client.query(
-        `INSERT INTO battle_spawn_events (room_id, player_id, actor_id, team, health, energy, transform)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-        [roomId, playerId, actorId, team, health, energy, transform]
-      );
-    } else if (type === "chat" && event.message) {
-      await client.query(
-        `INSERT INTO battle_chat_events (room_id, player_id, actor_id, channel, message)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [roomId, playerId, actorId, Number(event.channel || 0), String(event.message).slice(0, 500)]
-      );
-    }
-
-    await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
-
-    const achievements = [];
-    const achievementPlayerIds = new Set();
-    if (type === "death" || type === "score") {
-      const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
-      const victimPlayerId = Number(event.victimPlayerId || details.victimPlayerId || 0);
-      if (killerPlayerId > 0 && killerPlayerId !== victimPlayerId) achievementPlayerIds.add(killerPlayerId);
-    } else if (type === "summary") {
-      achievementPlayerIds.add(playerId);
-    }
-    for (const achievementPlayerId of achievementPlayerIds) {
-      achievements.push(...await syncPostgresAchievements(client, achievementPlayerId));
-    }
-
-    await client.query("COMMIT");
-    return { ok: true, storage: "postgres", roomId, type, achievements };
   } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
+    console.log(`[api] ${type} failed ${error.message}`);
   }
 }
 
-ensureDesktopAccount();
-
-const server = http.createServer(async (req, res) => {
-  if (Buffer.byteLength(req.url || "", "utf8") > MAX_REQUEST_URL_BYTES) {
-    sendJson(res, { ok: false, error: "uri_too_long" }, 414);
-    return;
+function masterSessionSet(playerId, create = false) {
+  const id = Number(playerId || 0);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  let set = masterSessionsByPlayerId.get(id);
+  if (!set && create) {
+    set = new Set();
+    masterSessionsByPlayerId.set(id, set);
   }
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-  if (!allowHttpRequest(req, url.pathname)) {
-    sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
-    return;
-  }
-  const requestOrigin = requestPublicOrigin(req, url);
+  return set || null;
+}
 
-  if (url.pathname === "/" || url.pathname === "/auth") {
-    sendHtml(res, "<h1>Contra City legacy API</h1><p>API online.</p>");
-    return;
+function unregisterMasterSession(session) {
+  const ids = Array.from(new Set([
+    Number(session?.masterRegisteredPlayerId || 0),
+    Number(session?.playerId || 0),
+  ])).filter((id) => Number.isInteger(id) && id > 0);
+  for (const id of ids) {
+    const set = masterSessionsByPlayerId.get(id);
+    if (!set) continue;
+    set.delete(session);
+    if (set.size <= 0) masterSessionsByPlayerId.delete(id);
+  }
+  if (session) session.masterRegisteredPlayerId = 0;
+}
+
+function registerMasterSession(session) {
+  const id = Number(session?.playerId || 0);
+  if (!Number.isInteger(id) || id <= 0) return;
+  unregisterMasterSession(session);
+  session.isMasterSession = true;
+  session.masterRegisteredPlayerId = id;
+  masterSessionSet(id, true)?.add(session);
+}
+
+function detachMasterSession(session, reason = "leave") {
+  if (!session?.isMasterSession) return 0;
+  const userId = Number(session.playerId || session.masterRegisteredPlayerId || 0);
+  unregisterMasterSession(session);
+  if (!Number.isInteger(userId) || userId <= 0) return 0;
+  const sent = broadcastMasterLobbyEvent(212, userId, masterUserDataRaw(masterKnownUser(userId), { status: 2 }), userId);
+  console.log(`[master-social] leave user=${userId} reason=${reason} sent=${sent}`);
+  return sent;
+}
+
+function activeMasterSessionsForUser(playerId) {
+  return Array.from(masterSessionSet(playerId) || [])
+    .filter((session) => session?.socket && session?.rinfo && sessions.get(session.sessionId) === session);
+}
+
+function rawMasterEvent(eventCode, actorId, dataRaw) {
+  const entries = [];
+  if (actorId != null) entries.push({ key: 225, value: rawInt(actorId) });
+  if (dataRaw) entries.push({ key: 213, value: dataRaw });
+  return rawEvent(eventCode, entries);
+}
+
+function isMasterSocialPort(port) {
+  return SOCIAL_MASTER_PORTS.has(Number(port || 0));
+}
+
+function isBattleListSession(session) {
+  const port = Number(session?.port || 0);
+  return port && port !== GAME_MASTER_PORT && !isMasterSocialPort(port);
+}
+
+function masterSocialStateForUser(playerId) {
+  const id = Number(playerId || 0);
+  for (const session of sessions.values()) {
+    if (!isBattleListSession(session)) continue;
+    if (Number(session?.playerId || 0) !== id) continue;
+    if (!session?.room || !session.room.players?.has(session.actorId)) continue;
+    return {
+      status: 3,
+      roomName: session.room.name || DEFAULT_ROOM,
+      serverId: `${PUBLIC_HOST}:${session.port || 5055}`,
+      userOnline: Math.min(255, Math.max(0, Number(session.room.players?.size || 0))),
+      userMax: Math.min(255, Math.max(0, Number(session.room.maxUsers || 0))),
+    };
   }
 
-  if (tryServeAssetBundle(req, res, url)) {
-    return;
+  if (activeMasterSessionsForUser(id).length > 0) {
+    return { status: 1, roomName: "", serverId: "", userOnline: 0, userMax: 0 };
   }
 
-  if (tryServeClanArm(req, res, url)) {
-    return;
-  }
+  return { status: 2, roomName: "", serverId: "", userOnline: 0, userMax: 0 };
+}
 
-  if (url.pathname === "/" || url.pathname === "/auth") {
-    const account = await refreshAccountFromPostgres(ensureDesktopAccount());
-    const link = loginLink(account, requestOrigin);
-    sendHtml(
-      res,
-      `<h1>Contra City legacy API</h1>
-<p>API работает.</p>
-<p>Хранилище: <b>${pgPool ? "PostgreSQL" : "JSON fallback"}</b></p>
-<p>Создать/сбросить аккаунт: <a href="/create?code=${encodeURIComponent(CREATE_CODE)}">/create</a></p>
-<p>Текущий аккаунт: ${escapeHtml(account.name)}, уровень ${account.level}, монеты ${account.money}</p>
-<p>Ссылка для входа: <code>${escapeHtml(link)}</code></p>`
-    );
-    return;
+function masterKnownUser(playerId, fallback = {}) {
+  const id = Number(playerId || 0);
+  let bestSession = null;
+  for (const session of sessions.values()) {
+    if (Number(session?.playerId || 0) !== id) continue;
+    if (!bestSession || (session.loadedProfile && !bestSession.loadedProfile)) bestSession = session;
   }
+  const profile = bestSession?.loadedProfile || null;
+  return {
+    userId: id,
+    name: stringOr(fallback.name ?? profile?.name ?? bestSession?.playerName, `Player ${id}`),
+    level: numberOr(fallback.level ?? profile?.level, 1),
+    exp: numberOr(fallback.exp ?? profile?.exp, 0),
+  };
+}
 
-  if (url.pathname === "/launcher-device/challenge") {
-    if (req.method !== "POST") {
-      sendJson(res, { result: false, error: "method_not_allowed" }, 405);
-      return;
+function masterUserDataRaw(user, options = {}) {
+  const state = masterSocialStateForUser(user.userId);
+  const entries = [
+    { key: rawByte(212), value: rawString(user.name || `Player ${user.userId}`) },
+    { key: rawByte(205), value: rawShort(user.level || 1) },
+    { key: rawByte(211), value: rawByte(options.status ?? state.status) },
+    { key: rawByte(209), value: rawString(options.roomName ?? state.roomName ?? "") },
+    { key: rawByte(210), value: rawString(options.serverId ?? state.serverId ?? "") },
+    { key: rawByte(204), value: rawByte(options.userOnline ?? state.userOnline ?? 0) },
+    { key: rawByte(203), value: rawByte(options.userMax ?? state.userMax ?? 0) },
+  ];
+  if (options.includeTarget) entries.unshift({ key: rawByte(207), value: rawInt(user.userId) });
+  if (options.includeState) entries.push({ key: rawByte(208), value: rawByte(options.friendState || 0) });
+  return rawHashtable(entries);
+}
+
+function masterFriendListRaw(friends) {
+  return rawHashtable((friends || []).map((friend) => ({
+    key: rawInt(friend.userId),
+    value: masterUserDataRaw(masterKnownUser(friend.userId, friend), {
+      includeState: true,
+      friendState: Number(friend.state || 0),
+    }),
+  })));
+}
+
+function masterChatListRaw(ownerId, friends = []) {
+  const byId = new Map();
+  for (const friend of friends || []) {
+    const friendId = Number(friend.userId || 0);
+    if (!friendId || friendId === Number(ownerId)) continue;
+    const live = masterSocialStateForUser(friendId);
+    if (live.status !== 2) {
+      byId.set(friendId, masterKnownUser(friendId, friend));
     }
-    try {
-      const body = await readJsonBody(req, 16 * 1024);
-      const account = await accountFromLauncherDeviceBody(body, url);
-      if (!account) {
-        sendJson(res, { result: false, error: "invalid_session" }, 403);
-        return;
+  }
+  return rawHashtable(Array.from(byId.values()).map((user) => ({
+    key: rawInt(user.userId),
+    value: masterUserDataRaw(user),
+  })));
+}
+
+function masterServerListReportRaw() {
+  const battlePeerCount = Array.from(sessions.values())
+    .filter((session) => isBattleListSession(session) && session?.socket && session?.rinfo)
+    .length;
+  return rawHashtable([
+    {
+      key: rawString(PUBLIC_HOST),
+      value: rawHashtable([
+        { key: rawByte(214), value: rawInt(battlePeerCount) },
+        { key: rawByte(199), value: rawShort(0) },
+        { key: rawByte(202), value: rawShort(0) },
+      ]),
+    },
+  ]);
+}
+
+async function loadMasterSocialList(userId) {
+  try {
+    const payload = await postApiJson("/battle/social", {
+      token: API_TOKEN,
+      action: "list",
+      userId,
+    });
+    return Array.isArray(payload?.friends) ? payload.friends : [];
+  } catch (error) {
+    console.log(`[master-social] list failed user=${userId} ${error.message}`);
+    return [];
+  }
+}
+
+async function mutateMasterSocial(action, userId, targetId) {
+  try {
+    const payload = await postApiJson("/battle/social", {
+      token: API_TOKEN,
+      action,
+      userId,
+      targetId,
+    });
+    if (payload?.ok === false) {
+      console.log(`[master-social] ${action} rejected user=${userId} target=${targetId} error=${payload.error || "unknown"}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.log(`[master-social] ${action} failed user=${userId} target=${targetId} ${error.message}`);
+    return false;
+  }
+}
+
+async function masterSocialRefreshEventsForUser(userId) {
+  const friends = await loadMasterSocialList(userId);
+  return [
+    rawMasterEvent(224, userId, masterFriendListRaw(friends)),
+    rawMasterEvent(214, userId, masterChatListRaw(userId, friends)),
+  ];
+}
+
+async function buildMasterSocialInitEvents(session) {
+  return masterSocialRefreshEventsForUser(session.playerId);
+}
+
+function sendMasterPayloadToUser(userId, payload) {
+  let sent = 0;
+  for (const targetSession of activeMasterSessionsForUser(userId)) {
+    if (sendReliableToSession(targetSession, payload, targetSession.lastChannel || 0)) sent += 1;
+  }
+  return sent;
+}
+
+function broadcastMasterLobbyEvent(eventCode, actorUserId, dataRaw, exceptUserId = 0) {
+  const payload = rawMasterEvent(eventCode, actorUserId, dataRaw);
+  let sent = 0;
+  for (const [playerId] of masterSessionsByPlayerId.entries()) {
+    if (Number(playerId) === Number(exceptUserId)) continue;
+    sent += sendMasterPayloadToUser(playerId, payload);
+  }
+  return sent;
+}
+
+function broadcastMasterUserState(userId) {
+  const user = masterKnownUser(userId);
+  let sent = 0;
+  for (const [ownerId] of masterSessionsByPlayerId.entries()) {
+    if (Number(ownerId) === Number(userId)) continue;
+    const data = masterUserDataRaw(user, { includeTarget: true });
+    sent += sendMasterPayloadToUser(ownerId, rawMasterEvent(211, ownerId, data));
+  }
+  if (sent > 0) {
+    console.log(`[master-social] state user=${userId} sent=${sent}`);
+  }
+}
+
+async function prepareMasterLobbySession(session, actorParam) {
+  const { authId, authKey } = actorCredentials(actorParam);
+  const cached = cachedPlayerProfile(actorParam);
+  session.playerId = authId;
+  session.playerAuthKey = authKey;
+  session.playerName = stringOr(cached?.name ?? htGet(actorParam, 242)?.value, process.env.DEFAULT_PLAYER_NAME || "ContraCity");
+  session.loadedProfile = cached || session.loadedProfile || null;
+  registerMasterSession(session);
+
+  warmPlayerProfile(actorParam, "master-lobby").then((profile) => {
+    if (sessions.get(session.sessionId) !== session || Number(session.playerId) !== Number(authId)) return;
+    session.loadedProfile = profile;
+    session.playerName = profile.name || session.playerName;
+    broadcastMasterUserState(authId);
+  }).catch(() => {});
+
+  const initEvents = await buildMasterSocialInitEvents(session);
+  const userData = masterUserDataRaw(masterKnownUser(session.playerId, { name: session.playerName }));
+  const joined = broadcastMasterLobbyEvent(213, session.playerId, userData, session.playerId);
+  console.log(`[master-social] lobby user=${session.playerId} name=${session.playerName} friends-init=${initEvents.length} joined=${joined}`);
+  return initEvents;
+}
+
+async function handleMasterEvent(session, parsed) {
+  const eventCode = photonEventCode(parsed);
+  const data = eventDataHash(parsed);
+  const userId = Number(session.playerId || 0);
+  const targetId = Number(htGet(data, 207)?.value || htGet(data, 68)?.value || 0);
+
+  if (eventCode === 216) {
+    console.log(`[master-social] refresh user=${userId}`);
+    return buildMasterSocialInitEvents(session);
+  }
+
+  if ([222, 221, 220, 219].includes(eventCode)) {
+    const action = ({ 222: "request", 221: "confirm", 220: "decline", 219: "remove" })[eventCode];
+    if (!targetId) return [];
+    const ok = await mutateMasterSocial(action, userId, targetId);
+    if (!ok) return [];
+    const eventData = rawHashtable([{ key: rawByte(207), value: rawInt(targetId) }]);
+    const event = rawMasterEvent(eventCode, userId, eventData);
+    sendMasterPayloadToUser(targetId, event);
+    const targetRefresh = await masterSocialRefreshEventsForUser(targetId);
+    let targetRefreshSent = 0;
+    for (const payload of targetRefresh) {
+      targetRefreshSent += sendMasterPayloadToUser(targetId, payload);
+    }
+    const ownerRefresh = await masterSocialRefreshEventsForUser(userId);
+    console.log(`[master-social] ${action} user=${userId} target=${targetId} targetRefresh=${targetRefreshSent} ownerRefresh=${ownerRefresh.length}`);
+    return [event, ...ownerRefresh];
+  }
+
+  if (eventCode === 217) {
+    const message = String(htGet(data, 77)?.value || "").trim();
+    if (!message) return [];
+    const type = Number(htGet(data, 80)?.value ?? 253);
+    const entries = [{ key: rawByte(77), value: rawString(message) }];
+    if (data && htGet(data, 80) !== undefined) entries.push({ key: rawByte(80), value: rawByte(type) });
+    if (targetId) entries.push({ key: rawByte(68), value: rawInt(targetId) });
+    const event = rawMasterEvent(217, userId, rawHashtable(entries));
+    if (targetId) {
+      sendMasterPayloadToUser(targetId, event);
+    } else {
+      broadcastMasterLobbyEvent(217, userId, rawHashtable(entries), 0);
+    }
+    console.log(`[master-social] chat user=${userId} target=${targetId || "all"} type=${type} chars=${message.length}`);
+    return [event];
+  }
+  if (eventCode === 209) {
+    if (!data?.raw) return [];
+    const clanEventCode = Number(htGet(data, 0)?.value || 0);
+    const clanId = Number(htGet(data, 1)?.value || 0);
+    const event = rawMasterEvent(209, userId, data.raw);
+    const sent = broadcastMasterLobbyEvent(209, userId, data.raw, userId);
+    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} peers=${sent}`);
+    return [event];
+  }
+
+  if (eventCode === 210) {
+    console.log(`[master-social] server-list user=${userId} host=${PUBLIC_HOST}`);
+    return [rawMasterEvent(223, userId, masterServerListReportRaw())];
+  }
+  console.log(`[master-social] ack only code=${eventCode} user=${userId}`);
+  return [];
+}
+
+async function handleOperation(port, socket, rinfo, session, parsed, channel = 0) {
+  if (!parsed || parsed.messageType !== 2) {
+    console.log(`[photon] unsupported messageType=${parsed?.messageType ?? "null"}`);
+    return [];
+  }
+
+  const eventCode = photonEventCode(parsed);
+  if (shouldLogParsedPayload(parsed)) {
+    console.log(`[photon] op=${parsed.opCode} params=${Array.from(parsed.params.keys()).join(",")}`);
+  }
+
+  // BaseEnter is used by CTF BaseEnterTrigger and by ControlPointProximity.
+  if (eventCode === 79) {
+    const data = parsed.params.get(245);
+    const declaredTeam = Number(htGet(data, 239)?.value);
+    const pointData = htGet(data, 98);
+
+    if (isCtfRoom(session.room) && pointData == null) {
+      if (!session.spawned || session.dead || isRoundPausedSession(session)) {
+        console.log(`[flag] base-enter ignored actor=${session.actorId} reason=session`);
+        return [];
       }
-      const device = await loadLauncherDevice(account.id);
-      const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
-      if (!device || !deviceKeyId || device.deviceKeyId !== deviceKeyId) {
-        sendJson(res, { result: false, error: "device_signature_required" }, 403);
-        return;
+      if (declaredTeam !== session.team) {
+        console.log(`[flag] base-enter ignored actor=${session.actorId} declaredTeam=${declaredTeam || 0} actualTeam=${session.team} reason=team`);
+        return [];
       }
-      const challenge = createLauncherDeviceChallenge(account, deviceKeyId);
-      sendJson(res, { result: true, ...challenge });
-    } catch (error) {
-      sendJson(res, { result: false, error: error.message || "device_challenge_failed" }, 500);
+      if (!ctfPlayerAtBase(session, declaredTeam)) {
+        console.log(`[flag] base-enter ignored actor=${session.actorId} team=${declaredTeam} reason=position pos=${fmtPoint(session.lastTransform)}`);
+        return [];
+      }
+      const delivered = tryDeliverCtfFlag(session, channel, "base-enter");
+      console.log(`[flag] base-enter actor=${session.actorId} team=${declaredTeam} delivered=${delivered ? 1 : 0}`);
+      return [];
     }
-    return;
+
+    if (!isControlPointsRoom(session.room) || !session.spawned || session.dead || isRoundPausedSession(session)) {
+      console.log(`[control] enter ignored actor=${session.actorId} reason=room-or-session`);
+      return [];
+    }
+    const pointId = Number(htGet(pointData, 61)?.value);
+    const entering = Number(htGet(pointData, 1)?.value) === 1;
+    const point = session.room.controlPoints?.get(pointId);
+    if (!point || declaredTeam !== session.team) {
+      console.log(`[control] enter ignored actor=${session.actorId} point=${pointId || 0} reason=contract`);
+      return [];
+    }
+    if (entering && !controlPointContains(point, session.lastTransform)) {
+      console.log(`[control] enter ignored actor=${session.actorId} point=${pointId} reason=position pos=${fmtPoint(session.lastTransform)}`);
+      return [];
+    }
+    if (entering) point.occupants.add(session.actorId);
+    else point.occupants.delete(session.actorId);
+    updateControlPoint(session.room, point, channel);
+    console.log(`[control] ${entering ? "enter" : "exit"} actor=${session.actorId} point=${pointId} team=${session.team}`);
+    return [];
   }
 
-  if (url.pathname === "/admin/device-reset") {
-    if (req.method !== "POST") {
-      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
-      return;
-    }
-    if (!hasValidAdminToken(req)) {
-      sendJson(res, { ok: false, error: "not_found" }, 404);
-      return;
-    }
-    try {
-      const body = await readJsonBody(req, 16 * 1024);
-      const ccid = Number(body?.ccid || body?.playerId || 0);
-      if (!Number.isInteger(ccid) || ccid <= 0) {
-        sendJson(res, { ok: false, error: "invalid_ccid" }, 400);
-        return;
+  if (parsed.opCode === 255) {
+    const roomNameParam = parsed.params.get(255);
+    const roomPropsParam = parsed.params.get(248);
+    const actorParam = parsed.params.get(249);
+    const requestedName = roomNameParam?.value || DEFAULT_ROOM;
+
+    if (String(requestedName).includes("list_lobby")) {
+      session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
+      session.roomRaw = makeRoomSettingsRaw(session.room);
+      session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
+      session.listLobby = true;
+      warmPlayerProfile(actorParam, "list-lobby");
+      if (isMasterSocialPort(port)) {
+        const socialInitEvents = await prepareMasterLobbySession(session, actorParam);
+        console.log(`[state] master-social lobby accepted port=${port} lobby=${requestedName}`);
+        return [
+          rawEvent(255, [
+            { key: 225, value: rawInt(session.actorId) },
+            { key: 213, value: rawHashtable([]) },
+          ]),
+          ...socialInitEvents,
+          rawOperationResponse(255, []),
+        ];
       }
-      const removed = await resetLauncherDeviceBinding(ccid);
-      console.log(`[launcher-device] admin reset player=${ccid} removed=${removed}`);
-      sendJson(res, { ok: true, ccid, removed });
-    } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "device_reset_failed" }, 500);
+      if (Number(port) === GAME_MASTER_PORT) {
+        console.log(`[state] game-logic lobby accepted port=${port} lobby=${requestedName}`);
+        return [
+          rawEvent(255, [
+            { key: 225, value: rawInt(session.actorId) },
+            { key: 213, value: rawHashtable([]) },
+          ]),
+          rawOperationResponse(255, []),
+        ];
+      }
+      console.log(`[state] server-list refresh accepted port=${port} lobby=${requestedName}`);
+      return [
+        rawOperationResponse(255, [{ key: 75, value: rawInt(1) }], -3),
+      ];
     }
-    return;
+
+    const plainLobbyJoin = !roomPropsParam || !parsed.params.has(242) || !parsed.params.has(250);
+    if (plainLobbyJoin) {
+      session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
+      session.roomRaw = makeRoomSettingsRaw(session.room);
+      session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
+      session.listLobby = true;
+      warmPlayerProfile(actorParam, "plain-lobby");
+      console.log(`[state] plain lobby join accepted port=${port} lobby=${requestedName} actorKeys=${describeHashtable(actorParam)}`);
+      return [
+        rawOperationResponse(255, [
+          { key: 254, value: rawInt(session.actorId) },
+          { key: 249, value: makeEmptyActorListRaw() },
+          { key: 248, value: session.roomRaw },
+        ]),
+      ];
+    }
+
+    const settings = roomSettingsFrom(roomPropsParam);
+    settings.name = settings.name || requestedName || DEFAULT_ROOM;
+    if (settings.hasFullSettings === false) {
+      const joinRoom = rooms.get(settings.name);
+      if (!joinRoom || (joinRoom.players?.size || 0) <= 0) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0) deleteEmptyRoom(joinRoom, "stale-name-join");
+        console.log(`[state] room join rejected reason=missing-room name=${settings.name} requested=${requestedName}`);
+        return [rawOperationResponse(255, [], -17, "room-not-found")];
+      }
+    }
+    resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
+    session.listLobby = false;
+    detachSessionFromRoom(session, "rejoin");
+    const { profile, source: profileSource, pendingProfile } = await profileForJoin(actorParam, { forceRefresh: true });
+    session.playerId = profile.authId;
+    session.playerAuthKey = profile.authKey || actorCredentials(actorParam).authKey || "";
+    session.playerName = profile.name;
+    session.loadedProfile = profile;
+    session.currentWeaponSlot = 1;
+    session.weaponStates = makeWeaponRuntimeState(profile);
+    session.peerWeaponConfirmKeys = new Map();
+    clearSessionActiveShotLedgers(session);
+    clearSessionImpactTimers(session);
+    session.dead = false;
+    session.kills = 0;
+    session.deaths = 0;
+    session.points = 0;
+    resetSessionFragState(session);
+    beginSessionMatchStats(session);
+    {
+      const stats = sessionRuntimeStats(session);
+      session.health = stats.maxHealth;
+      session.energy = stats.maxEnergy;
+    }
+    removeDuplicatePlayerSessionsFromAllRooms(session, "room-join-duplicate");
+    session.room = ensureRoom(settings);
+    session.roomRaw = makeRoomSettingsRaw(session.room);
+    removeDuplicatePlayerSessions(session.room, session);
+    session.actorId = nextRoomActorId(session.room);
+    updateActorWireData(session, actorParam, profile, channel);
+    const joinActorId = session.actorId;
+    if (profileSource === "fallback") {
+      (pendingProfile || warmPlayerProfile(actorParam, "late-room-profile")).then((loadedProfile) => {
+        if (sessions.get(key(port, rinfo)) === session && session.actorId === joinActorId) {
+          applyLateProfile(session, loadedProfile, actorParam);
+        }
+      });
+    } else if (profileSource === "cache") {
+      loadPlayerProfile(actorParam, { forceRefresh: true }).then((loadedProfile) => {
+        if (sessions.get(key(port, rinfo)) === session && session.actorId === joinActorId) {
+          applyLateProfile(session, loadedProfile, actorParam);
+        }
+      });
+    }
+    const actorListRaw = makeRoomActorListRaw(session.room, session);
+    session.knownActorIds = new Set();
+    session.actorJoinAnnouncedAt = new Map();
+    markKnownRoomActors(session);
+    session.room.players.set(session.actorId, session);
+    pushRoomListToLobbySessions("room-join", channel);
+    markActorKnown(session, session.actorId);
+    session.gameStateRequested = false;
+    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
+    postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
+    broadcastMasterUserState(session.playerId);
+    const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
+      waitForProfile: profileSource === "fallback",
+      incomingActor: actorParam,
+    });
+    broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
+      markActorAnnounced: true,
+      skipKnownActor: true,
+    });
+    return responses;
   }
 
-  if (url.pathname === "/launcher-state") {
-    let body = {};
-    if (req.method === "POST") {
+  if (parsed.opCode === 254) {
+    if (isMasterSocialPort(port) && session.isMasterSession) {
+      detachMasterSession(session, "op-leave");
+    }
+    resetReliableDedupe(session, "op-leave");
+    detachSessionFromRoom(session, "op-leave");
+    return [rawOperationResponse(254, [])];
+  }
+
+  if (parsed.opCode === 155) {
+    return handleBattleChatRequest(session, parsed, channel);
+  }
+
+  if (parsed.opCode !== 253) {
+    console.log(`[op] unsupported op=${parsed.opCode}`);
+    return [];
+  }
+
+  if (shouldLogParsedPayload(parsed)) {
+    console.log(`[event] request code=${eventCode}`);
+  }
+
+  if (isMasterSocialPort(port)) {
+    return handleMasterEvent(session, parsed);
+  }
+
+  if (eventCode === 155) {
+    return handleBattleChatRequest(session, parsed, channel);
+  }
+
+  if (eventCode === 86) {
+    console.log(`[event] room list request rooms=${roomListSummary()}`);
+    return [makeRoomListEvent(session)];
+  }
+
+  if (eventCode === 84) {
+    const now = Date.now();
+    if (
+      GAMESTATE_REPEAT_MIN_MS > 0 &&
+      session.gameStateRequested &&
+      !session.spawned &&
+      session.lastGameStateResponseAt &&
+      now - session.lastGameStateResponseAt < GAMESTATE_REPEAT_MIN_MS
+    ) {
+      console.log(`[event] game state request throttled actor=${session.actorId} age=${now - session.lastGameStateResponseAt}ms`);
+      return [];
+    }
+    session.gameStateRequested = true;
+    session.lastGameStateResponseAt = now;
+    clearJoinRoomTimers(session);
+    console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM} roomAge=${roomAgeMs(session.room)}ms`);
+    postBattleEvent(session, "gamestate");
+    if (MAP_PICKUPS_IN_GAMESTATE) markActiveRoomItemsVisible(session);
+    if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
+      startStandardRound(session.room, channel, "pre-gamestate");
+    }
+    const responses = [
+      ...buildDeferredPeerActorJoinEvents(session, channel),
+      rawEvent(84, [
+        { key: 254, value: rawInt(session.actorId) },
+        { key: 245, value: makeGameStateRaw(session) },
+      ]),
+    ];
+    if (isZombieRoom(session.room)) {
+      const zombieStarted = maybeStartZombieRound(session.room, channel, "post-gamestate", session, responses);
+      if (!zombieStarted) {
+        maybeAppendZombieLateJoinSpawn(session, responses, channel);
+      }
+      if (!session.spawned) {
+        console.log(`[zombie] waiting actor=${session.actorId} ready=${zombieReadyPlayers(session.room).length}/${ZOMBIE_MIN_PLAYERS} mode=${zombieModeForRoom(session.room)}`);
+      }
+    } else if (isStandardRoundPaused(session.room)) {
+      console.log(`[round] game-state pause actor=${session.actorId} room=${session.room.name} waiting-restart=yes`);
+    } else if (isCtfRoom(session.room) && !session.spawned) {
+      console.log(`[event] waiting client team selection actor=${session.actorId} mode=${roomMode(session)} room=${session.room?.name || DEFAULT_ROOM}`);
+    } else if (AUTO_SPAWN_AFTER_GAMESTATE && !session.spawned && !isTeamMode(roomMode(session))) {
+      const spawnResponse = buildSpawnEvent(session, null, "auto-after-gamestate");
+      responses.push(spawnResponse);
+      broadcastSpawnToRoom(session, spawnResponse, channel);
+      queueAutoSpawn(session, null, "post-gamestate");
+    } else if (!session.spawned) {
+      console.log(`[event] waiting client spawn request actor=${session.actorId} team=${normalizeTeamForRoom(session)} mode=${roomMode(session)}`);
+    }
+    queuePeerActorRepair(session, channel, "post-gamestate");
+    return responses;
+  }
+
+  if (eventCode === 100) {
+    if (isZombieRoom(session.room)) {
+      console.log(`[zombie] spawn request ignored actor=${session.actorId} reason=server-driven mode=${zombieModeForRoom(session.room)} ready=${zombieReadyPlayers(session.room).length}/${ZOMBIE_MIN_PLAYERS}`);
+      return [];
+    }
+    if (isStandardRoundPaused(session.room)) {
+      console.log(`[round] spawn request ignored actor=${session.actorId} reason=round-paused`);
+      return [];
+    }
+    if (session.spawned && !session.dead) {
+      console.log(`[event] spawn request ignored actor=${session.actorId} reason=already-spawned team=${session.team}`);
+      return [];
+    }
+    const team = getTeamFromEventData(parsed, normalizeTeamForRoom(session));
+    const respawnAfterDeath = Boolean(session.dead);
+    session.lastGameStateResponseAt = 0;
+    clearSpawnStallRecovery(session);
+    clearSpawnSelfRetryTimers(session);
+    clearJoinRoomTimers(session);
+    session.spawnSeq = (session.spawnSeq || 0) + 1;
+    const spawnSeq = session.spawnSeq;
+    const response = buildSpawnEvent(session, team, "client-request");
+    const selfSpawnCommand = makeSessionReliableCommand(session, response, channel);
+    if (sendReliableCommandToSession(session, selfSpawnCommand)) {
+      console.log(`[sync] spawn-self actor=${session.actorId} seq=${selfSpawnCommand.seq} reason=${respawnAfterDeath ? "respawn" : "spawn"}`);
+    }
+    queueSelfSpawnRetry(session, selfSpawnCommand, spawnSeq, respawnAfterDeath ? "respawn" : "spawn");
+    if (respawnAfterDeath) {
+      session.pendingSpawnBroadcast = { payload: response, channel };
+      console.log(`[sync] spawn actor=${session.actorId} peer-broadcast=deferred-until-move reason=respawn`);
+      return [];
+    }
+    broadcastSpawnToRoom(session, response, channel);
+    return buildPeerSpawnReplayEvents(session);
+  }
+
+  if (eventCode === 99) {
+    if (isRoundPausedSession(session)) {
+      if (DEBUG_MOVE_PACKETS) {
+        console.log(`[round] move ignored actor=${session.actorId} reason=round-paused`);
+      }
+      return [];
+    }
+    if (session.dead) {
+      if (DEBUG_MOVE_PACKETS) {
+        console.log(`[event] move ignored actor=${session.actorId} reason=dead`);
+      }
+      return [];
+    }
+    const firstMoveAfterSpawn = !session.moveSeen;
+    session.spawned = true;
+    session.moveSeen = true;
+    session.moveCount = (Number(session.moveCount) || 0) + 1;
+    session.waitingSelfSpawnMove = false;
+    clearSpawnStallRecovery(session);
+    clearSpawnSelfRetryTimers(session);
+    clearJoinRoomTimers(session);
+    clearSpawnMoveWarningTimer(session);
+    session.room.moves += 1;
+    const point = transformFromEventData(parsed);
+    if (point) {
+      session.lastTransform = point;
+      updateCtfOnMove(session, channel);
+      updateControlPointOccupancyFromMove(session);
+    }
+    if (DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) {
+      console.log(`[event] move actor=${session.actorId} count=${session.room.moves}${point ? ` pos=${fmtPoint(point)}` : ""}`);
+    }
+    if (session.pendingSpawnBroadcast?.payload) {
+      const pending = session.pendingSpawnBroadcast;
+      session.pendingSpawnBroadcast = null;
+      const spawnPeers = broadcastSpawnToRoom(session, pending.payload, pending.channel ?? channel);
+      console.log(`[sync] deferred-spawn actor=${session.actorId} peers=${spawnPeers} reason=first-move-after-respawn`);
+    }
+    if (session.room.moves === 1 || session.room.moves % 250 === 0) {
+      postBattleEvent(session, "move", { eventData: { count: session.room.moves } });
+    }
+    const move = buildActorDataEvent(session, 99, parsed);
+    const movePeers = broadcastMoveToRoom(session, move, channel);
+    if ((DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) && movePeers.total > 0) {
+      console.log(`[sync] move actor=${session.actorId} peers=${movePeers.total} reliable=${movePeers.reliable} unreliable=${movePeers.unreliable || 0} spectator=${movePeers.spectator}${movePeers.spectator ? ` spectatorChannel=${movePeers.spectatorChannel}` : ""} count=${session.room.moves}`);
+    }
+    if (firstMoveAfterSpawn) {
+      queuePostSpawnPickupSync(session, "second-move-after-spawn");
+    }
+    const pickup = firstMoveAfterSpawn ? null : buildProximityPickItemEvent(session, point);
+    if (pickup?.pickEvent) {
+      broadcastReliableToRoom(session, pickup.pickEvent, channel, "item-pick", {
+        requireLiveReady: false,
+        markItemHiddenId: pickup.itemId,
+      });
+    }
+    return pickup?.pickEvent ? [pickup.pickEvent, ...(pickup.localEvents || [])] : [];
+  }
+
+  if (eventCode === 96) {
+    const response = buildReloadEvent(session, parsed, channel);
+    if (response) broadcastReliableToRoom(session, response, channel, "reload", { requireLiveReady: true });
+    return response ? [response] : [];
+  }
+
+  if (eventCode === 93) {
+    const response = buildPickItemEvent(session, parsed);
+    if (response?.pickEvent) {
+      broadcastReliableToRoom(session, response.pickEvent, channel, "item-pick", {
+        requireLiveReady: false,
+        markItemHiddenId: response.itemId,
+      });
+    }
+    return response?.pickEvent ? [response.pickEvent, ...(response.localEvents || [])] : [];
+  }
+
+  if (eventCode === 97) {
+    const response = buildShotEvent(session, parsed);
+    const zombieRoundEndEvents = [];
+    const standardRoundEndEvents = [];
+    if (response?.shotEvent) {
+      if (response.weaponConfirm) {
+        const confirmPeers = broadcastShotWeaponConfirmToRoom(session, response.weaponConfirm, channel);
+        if (confirmPeers > 0) {
+          const state = response.weaponConfirm.state;
+          console.log(`[sync] shot-weapon-confirm actor=${session.actorId} peers=${confirmPeers} slot=${state.slot} type=${state.type} name=${state.systemName}`);
+        }
+      }
+      broadcastReliableToRoom(session, response.shotEvent, channel, "shot", { requireMoveSeen: true });
+      for (const impactEvent of response.impactEvents || []) {
+        broadcastReliableToRoom(session, impactEvent, channel, "impact", { requireMoveSeen: true });
+      }
+      for (const killEvent of response.killEvents || []) {
+        broadcastReliableToRoom(session, killEvent, channel, "kill");
+      }
+      if (response.scoreEvent) {
+        const scorePeers = broadcastReliableToRoom(session, response.scoreEvent, channel, "score");
+        console.log(`[sync] score-update actor=${session.actorId} peers=${scorePeers} kills=${numberOr(session.kills, 0)} deaths=${numberOr(session.deaths, 0)} points=${numberOr(session.points, 0)} team1=${teamScorePoints(session, 1)} team2=${teamScorePoints(session, 2)}`);
+      }
+      if (response.killEvents?.length) {
+        console.log(`[sync] kill-self actor=${session.actorId} events=${response.killEvents.length} score=${response.scoreEvent ? "yes" : "no"} delivery=cached-response`);
+      }
+      gateKilledSessionsAfterDelivery(response);
+      if (response.killEvents.length) {
+        maybeFinishZombieRound(session.room, "kill", channel, session, zombieRoundEndEvents);
+        maybeFinishStandardRound(session.room, "kill", channel, session, standardRoundEndEvents);
+      }
+    }
+    return response?.shotEvent
+      ? [
+          response.localShotEvent || response.shotEvent,
+          ...(response.impactEvents || []),
+          ...(response.killEvents || []),
+          ...(response.scoreEvent ? [response.scoreEvent] : []),
+          ...(response.localAmmoSync ? [response.localAmmoSync] : []),
+          ...zombieRoundEndEvents,
+          ...standardRoundEndEvents,
+        ]
+      : [];
+  }
+
+  if (eventCode === 98) {
+    const response = buildWeaponChangeEvent(session, parsed);
+    const ammoSync = response ? makeReloadUpdateEvent(session, weaponStateBySlot(session, session.currentWeaponSlot)) : null;
+    if (response) {
+      const weaponPeers = broadcastLiveToRoom(session, response, channel);
+      if (weaponPeers.total > 0) {
+        console.log(`[sync] weapon-change actor=${session.actorId} peers=${weaponPeers.total} reliable=${weaponPeers.reliable} spectator=${weaponPeers.spectator}${weaponPeers.spectator ? ` spectatorChannel=${weaponPeers.spectatorChannel}` : ""}`);
+      }
+    }
+    return response ? [response, ...(ammoSync ? [ammoSync] : [])] : [];
+  }
+  if (eventCode === 77) {
+    const animation = buildActorDataEvent(session, 77, parsed);
+    const animationPeers = broadcastLiveToRoom(session, animation, channel);
+    if (DEBUG_MOVE_PACKETS && animationPeers.total > 0) {
+      console.log(`[sync] animation actor=${session.actorId} peers=${animationPeers.total} reliable=${animationPeers.reliable} spectator=${animationPeers.spectator}${animationPeers.spectator ? ` spectatorChannel=${animationPeers.spectatorChannel}` : ""}`);
+    }
+    return [];
+  }
+  console.log(`[event] ack only code=${eventCode}`);
+  return [];
+}
+
+async function handleUdp(port, socket, msg, rinfo) {
+  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) return;
+  if (!allowUdpPacket(rinfo, msg.length)) return;
+
+  let offset = 12;
+  const sessionId = key(port, rinfo);
+  let session = sessions.get(sessionId);
+  if (!session) {
+    const reboundSession = findNatRebindSession(port, msg, rinfo);
+    if (reboundSession) {
+      session = rebindSessionEndpoint(reboundSession, sessionId, socket, rinfo);
+    }
+  }
+  if (!session) {
+    if (sessions.size >= MAX_SESSIONS_TOTAL) return;
+    if (sessionCountForIp(rinfo.address) >= MAX_SESSIONS_PER_IP) return;
+    session = {
+      peerId: 1,
+      actorId: 1,
+      challenge: readU32(msg, 8),
+      // VerifyConnect is an ENet control command and is not dispatched through
+      // Photon payload order. The first real Photon payload must therefore use
+      // reliable sequence 1, otherwise the Unity client ACKs it but waits for
+      // missing sequence 1 forever.
+      serverSeq: 0,
+      unreliableSeq: 0,
+      serverSeqByChannel: new Map(),
+      unreliableSeqByChannel: new Map(),
+      outboundReliable: new Map(),
+      outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
+      outboundRoundTripVariance: 0,
+      verifySeq: null,
+      seenVerify: false,
+      listLobby: false,
+      room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
+      roomRaw: null,
+      actorRaw: null,
+      peerActorRaw: null,
+      peerActorRawBytes: 0,
+      peerActorLoadoutSlots: 0,
+      peerActorProfile: "",
+      joinActorRaw: null,
+      joinActorRawBytes: 0,
+      joinActorLoadoutSlots: 0,
+      joinActorProfile: "",
+      actorJoinParam: null,
+      team: -1,
+      zombieType: ZOMBIE_TYPE.HUMAN,
+      zombieInfectionHits: 0,
+      zombieLastInfectorActorId: 0,
+      spawned: false,
+      dead: false,
+      moveSeen: false,
+      moveCount: 0,
+      waitingSelfSpawnMove: false,
+      currentWeaponSlot: 1,
+      weaponStates: makeWeaponRuntimeState(null),
+      peerWeaponConfirmKeys: new Map(),
+      visibleItemIds: new Set(),
+      activeItemShots: new Map(),
+      impactTimers: new Map(),
+      spawnSeq: 0,
+      spawnRetry: null,
+      spawnMoveWarningTimer: null,
+      spawnSelfRetryTimers: new Set(),
+      joinSelfEventTimer: null,
+      joinStartEventTimer: null,
+      joinSettingsTimers: [],
+      joinLateStartTimers: [],
+      gameStateRequested: false,
+      lastGameStateResponseAt: 0,
+      reliableResponses: new Map(),
+      reliableInFlight: new Map(),
+      reliableFragments: new Map(),
+      reliableGeneration: 0,
+      knownActorIds: new Set(),
+      actorJoinAnnouncedAt: new Map(),
+      joinActorListIds: new Set(),
+      deferredJoinActorIds: new Set(),
+      peerSpawnTimers: new Set(),
+      pendingSpawnBroadcast: null,
+      pendingPickupSync: null,
+      pickupSpawnRepairTimers: new Set(),
+      lastChannel: 0,
+      port,
+      remoteKey: `${rinfo.address}:${rinfo.port}`,
+      playerId: 1,
+      playerAuthKey: "",
+      playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
+      lastSeenAt: Date.now(),
+      health: playerRuntimeStats(null).maxHealth,
+      energy: playerRuntimeStats(null).maxEnergy,
+      kills: 0,
+      deaths: 0,
+      points: 0,
+      domination: 0,
+      revenge: 0,
+      maxDomination: 0,
+      maxRevenge: 0,
+      revengeStreak: 0,
+      killStreakByVictim: new Map(),
+      dominatedBy: new Set(),
+      expEarned: 0,
+      exp2clan: 0,
+      matchStartedAt: 0,
+      matchStatsPosted: false,
+      matchShots: 0,
+      matchHits: 0,
+      matchKills: 0,
+      matchDeaths: 0,
+      matchHeadKills: 0,
+      matchNutsKills: 0,
+      matchSuicides: 0,
+      matchDomination: 0,
+      matchRevenge: 0,
+      matchExp: 0,
+    };
+    session.roomRaw = makeRoomSettingsRaw(session.room);
+    sessions.set(sessionId, session);
+  }
+  const incomingChallenge = readU32(msg, 8);
+  if (session.challenge && incomingChallenge && session.challenge !== incomingChallenge) {
+    resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
+  }
+  session.challenge = incomingChallenge;
+  session.remoteKey = `${rinfo.address}:${rinfo.port}`;
+  session.sessionId = sessionId;
+  session.socket = socket;
+  session.rinfo = { address: rinfo.address, port: rinfo.port };
+  refreshSessionReliableEndpoint(session, socket, rinfo);
+  const packetNow = Date.now();
+  session.lastSeenAt = packetNow;
+  maybePruneIdleRoomSessions(packetNow);
+  maybePruneIdleMasterSessions(packetNow);
+
+  const commands = [];
+  let peerIdOverride = null;
+  let lastChannel = 0;
+  let transportDisconnected = false;
+  const commandCount = msg[3] || 0;
+  if (commandCount > MAX_ENET_COMMANDS_PER_PACKET) return;
+  const sentTime = readU32(msg, 4);
+  if (DEBUG_PACKETS) {
+    console.log(`[udp:${port}] peer=${msg.readUInt16BE(0)} count=${commandCount} len=${msg.length}`);
+  }
+
+  for (let i = 0; i < commandCount && offset + 12 <= msg.length; i++) {
+    const commandType = msg[offset];
+    const channel = msg[offset + 1];
+    lastChannel = channel;
+    session.lastChannel = channel;
+    const commandLength = readU32(msg, offset + 4);
+    const reliableSeq = readU32(msg, offset + 8);
+    const commandEnd = offset + commandLength;
+    if (commandLength < 12 || commandEnd > msg.length) {
+      if (DEBUG_PACKETS) {
+        console.log(`[security] invalid command length ip=${rinfo.address} port=${port} type=${commandType} bytes=${commandLength}/${msg.length - offset}`);
+      }
+      break;
+    }
+    const payloadOffset = commandType === 0x07 ? offset + 16 : (commandType === 0x08 ? offset + 32 : offset + 12);
+    if (DEBUG_PACKETS || ![0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0c].includes(commandType)) {
+      console.log(`[cmd:${port}] type=${commandType} seq=${reliableSeq} size=${commandLength}`);
+    }
+
+    if (commandType === 0x01) {
+      if (commandEnd >= offset + 20) {
+        acknowledgeOutboundReliable(session, channel, readU32(msg, offset + 12));
+      }
+    } else if (commandType === 0x02) {
+      session.seenVerify = true;
+      commands.push(makeAck(channel, reliableSeq, sentTime));
+      if (session.verifySeq == null) {
+        session.verifySeq = session.serverSeq++;
+      }
+      const verifySeq = session.verifySeq;
+      commands.push(makeVerifyConnect(verifySeq));
+      peerIdOverride = 0xffff;
+      console.log(`[state] verify connect seq=${verifySeq}`);
+    } else if (commandType === 0x04) {
+      commands.push(makeAck(channel, reliableSeq, sentTime));
+      if (!session.transportDisconnected) {
+        session.transportDisconnected = true;
+        transportDisconnected = true;
+        const disconnectedRoom = session.room?.name || "none";
+        detachMasterSession(session, "enet-disconnect");
+        detachSessionFromRoom(session, "enet-disconnect");
+        if (session.sessionId) sessions.delete(session.sessionId);
+        console.log(`[state] enet disconnect port=${port} actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${disconnectedRoom}`);
+      }
+    } else if (commandType === 0x05 || commandType === 0x0c) {
+      commands.push(makeAck(channel, reliableSeq, sentTime));
+    } else if ((commandType === 0x06 || commandType === 0x07 || commandType === 0x08) && payloadOffset <= commandEnd) {
+      commands.push(makeAck(channel, reliableSeq, sentTime));
+      if (!session.seenVerify && session.verifySeq == null) {
+        session.verifySeq = session.serverSeq++;
+        commands.push(makeVerifyConnect(session.verifySeq));
+        peerIdOverride = 0xffff;
+        console.log(`[state] implicit verify connect seq=${session.verifySeq} reason=missing-handshake command=${commandType}`);
+        offset = commandEnd;
+        continue;
+      }
+      let cacheKey = commandType === 0x06 ? `${session.reliableGeneration || 0}:${channel}:${reliableSeq}` : null;
+      let payload = msg.subarray(payloadOffset, commandEnd);
+      let fragment = null;
+      if (commandType === 0x08) {
+        fragment = parseReliableFragmentCommand(msg, offset, commandEnd, channel, reliableSeq);
+        if (fragment.error) {
+          console.log(`[fragment] ignored actor=${session.actorId} seq=${reliableSeq} channel=${channel} reason=${fragment.error}`);
+          offset = commandEnd;
+          continue;
+        }
+        cacheKey = reliableFragmentCacheKey(session, channel, fragment.startSeq);
+      }
+      if (cacheKey && session.reliableResponses.has(cacheKey)) {
+        const cached = session.reliableResponses.get(cacheKey);
+        commands.push(...cached);
+        console.log(`[state] reliable replay seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
+        offset = commandEnd;
+        continue;
+      }
+      if (cacheKey && session.reliableInFlight.has(cacheKey)) {
+        const cached = await session.reliableInFlight.get(cacheKey);
+        commands.push(...cached);
+        console.log(`[state] reliable replay-wait seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
+        offset = commandEnd;
+        continue;
+      }
+
+      if (commandType === 0x08) {
+        const complete = addReliableFragment(session, fragment);
+        if (ENET_FRAGMENT_TRACE) {
+          console.log(`[fragment] recv actor=${session.actorId} seq=${reliableSeq} start=${fragment.startSeq} part=${fragment.fragmentNumber + 1}/${fragment.fragmentCount} offset=${fragment.fragmentOffset} bytes=${fragment.payload.length}/${fragment.totalLength} complete=${complete ? "yes" : "no"} channel=${channel}`);
+        }
+        if (!complete) {
+          offset = commandEnd;
+          continue;
+        }
+        session.reliableFragments.delete(cacheKey);
+        payload = complete.payload;
+      }
+
       try {
-        body = await readJsonBody(req, 32 * 1024);
+        const parsed = parsePhotonRequest(payload);
+        if (commandType === 0x08 && ENET_FRAGMENT_TRACE) {
+          const eventCode = photonEventCode(parsed);
+          console.log(`[fragment] complete actor=${session.actorId} start=${fragment.startSeq} event=${eventCode ?? "init"}${eventCode === 97 ? ` ${describeShotRequest(parsed)}` : ""} bytes=${payload.length} channel=${channel}`);
+        }
+        if (shouldLogParsedPayload(parsed)) {
+          if (parsed?.messageType === 2) {
+            console.log(`[payload] op-request ${payload.toString("hex").slice(0, 160)}`);
+          } else {
+            console.log(`[payload] messageType=${parsed?.messageType ?? "raw"} ${payload.toString("hex").slice(0, 160)}`);
+          }
+        }
+
+        const buildReliableCommands = () => buildReliableCommandsForParsedPayload(port, socket, rinfo, session, parsed, payload, channel);
+
+        if (cacheKey) {
+          const promise = buildReliableCommands()
+            .then((reliableCommands) => cacheReliableResponse(session, cacheKey, reliableCommands))
+            .finally(() => session.reliableInFlight.delete(cacheKey));
+          session.reliableInFlight.set(cacheKey, promise);
+          commands.push(...await promise);
+        } else {
+          commands.push(...await buildReliableCommands());
+        }
       } catch (error) {
-        sendJson(res, { result: false, error: error.message || "invalid_json", news: launcherNewsPayload() }, 400, {}, { ascii: true });
-        return;
+        console.log(`[parse] ${error.message}`);
+        console.log(payload.toString("hex").match(/.{1,32}/g)?.join("\n") || "");
       }
     }
 
-    const account = req.method === "POST"
-      ? await accountFromLauncherDeviceBody(body, url)
-      : await accountFromRequest(url);
-    if (!account) {
-      sendJson(res, { result: false, error: "invalid_session", news: launcherNewsPayload() }, 403, {}, { ascii: true });
-      return;
-    }
-
-    let deviceAccess;
-    try {
-      deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
-    } catch (error) {
-      console.error("[launcher-device] access check failed", error);
-      sendJson(res, { result: false, error: "device_binding_failed", news: launcherNewsPayload() }, 500, {}, { ascii: true });
-      return;
-    }
-    if (!deviceAccess.ok) {
-      sendJson(res, { result: false, error: deviceAccess.error, news: launcherNewsPayload() }, deviceAccess.status || 403, {}, { ascii: true });
-      return;
-    }
-
-    sendJson(res, launcherStatePayload(account), 200, { "Set-Cookie": cookieHeaders(account) }, { ascii: true });
-    return;
+    offset = commandEnd;
   }
 
-  if (url.pathname === "/launcher-session") {
-    const account = await accountFromRequest(url);
-    if (!account) {
-      sendJson(res, { result: false, error: "invalid_session" }, 403);
-      return;
-    }
-
-    const launcherSession = createLauncherSession(account);
-    sendJson(res, {
-      result: true,
-      ccid: account.id,
-      cckey: account.key,
-      sessionAuth: sessionAuth(account),
-      token: launcherSession.token,
-      expiresInSeconds: launcherSession.expiresInSeconds
-    }, 200, { "Set-Cookie": cookieHeaders(account) });
-    return;
+  if (!transportDisconnected) {
+    maybeAppendQueuedSpawn(session, commands, lastChannel);
+    maybeAppendPostSpawnPickupSync(session, commands, lastChannel);
+    maybeAppendRespawnItems(session, commands, lastChannel);
   }
 
-  if (url.pathname === "/session") {
-    const account = await loginAccountFromUrl(url);
-    if (!account) {
-      sendJson(res, { result: false, error: "invalid_session" }, 403);
-      return;
-    }
-    sendJson(res, {
-      result: true,
-      ...sessionPayload(account, requestOrigin)
+  if (commands.length > 0) {
+    sendPacket(socket, rinfo, session, commands, peerIdOverride);
+  }
+}
+
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
+console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
+console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
+console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
+
+const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
+if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
+const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
+if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
+
+for (const port of PORTS) {
+  const udp = dgram.createSocket("udp4");
+  udp.on("message", (msg, rinfo) => {
+    handleUdp(port, udp, msg, rinfo).catch((error) => {
+      console.log(`[udp:${port}] handler failed ${error.stack || error.message}`);
     });
-    return;
-  }
+  });
+  udp.bind(port, "0.0.0.0", () => console.log(`[udp] ${port} listening`));
 
-  if (url.pathname === "/vk-login" || url.pathname === "/login-link") {
-    const account = await loginAccountFromUrl(url);
-    if (!account) {
-      sendHtml(res, "<h1>Contra City login</h1><p>Ссылка входа недействительна.</p>", 403);
+  const tcp = net.createServer((socket) => {
+    const address = String(socket.remoteAddress || "unknown");
+    const active = Number(tcpConnectionsByIp.get(address) || 0);
+    if (active >= TCP_MAX_CONNECTIONS_PER_IP) {
+      socket.destroy();
       return;
     }
-    sendHtml(
-      res,
-      `<h1>Contra City login</h1><p>Ссылка активна для ${escapeHtml(account.name)} (#${account.id}).</p>`,
-      200,
-      { "Set-Cookie": cookieHeaders(account) }
-    );
-    return;
-  }
-
-  if (url.pathname === "/create") {
-    const result = await createAccountPage(url, requestOrigin);
-    sendHtml(res, result.html, result.status);
-    return;
-  }
-
-  if (url.pathname.endsWith("/ajax.php")) {
-    await mergeAjaxBodyParams(req, url);
-    const account = await accountFromRequest(url);
-    if (!account) {
-      sendJson(res, { result: false, error: "1" }, 403);
-      return;
-    }
-    sendJson(res, await routeAjax(url, account, requestOrigin), 200, { "Set-Cookie": cookieHeaders(account) });
-    return;
-  }
-
-  if (url.pathname === "/health") {
-    sendJson(res, { ok: true, build: API_BUILD_ID, storage: pgPool ? "postgres" : "json-file" });
-    return;
-  }
-
-  if (url.pathname === "/battle/social") {
-    if (req.method !== "POST") {
-      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
-      return;
-    }
-    try {
-      const body = await readJsonBody(req, 128 * 1024);
-      if (!hasValidBattleServiceToken(req, body)) {
-        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+    tcpConnectionsByIp.set(address, active + 1);
+    socket.setTimeout(TCP_IDLE_TIMEOUT_MS);
+    socket.setNoDelay(true);
+    let receivedBytes = 0;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const current = Number(tcpConnectionsByIp.get(address) || 1) - 1;
+      if (current > 0) tcpConnectionsByIp.set(address, current);
+      else tcpConnectionsByIp.delete(address);
+    };
+    socket.once("close", release);
+    socket.once("error", release);
+    socket.on("timeout", () => socket.destroy());
+    console.log(`[tcp:${port}] client ${address}:${socket.remotePort}`);
+    socket.on("data", (data) => {
+      receivedBytes += data.length;
+      if (receivedBytes > TCP_MAX_BYTES_PER_CONNECTION) {
+        socket.destroy();
         return;
       }
-      const result = await battleSocialRequest(body);
-      sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
-    } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "battle_social_failed" }, 500);
-    }
-    return;
-  }
-
-  if (url.pathname === "/battle/event") {
-    if (req.method !== "POST") {
-      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
-      return;
-    }
-    try {
-      const body = await readJsonBody(req, 256 * 1024);
-      if (!hasValidBattleServiceToken(req, body)) {
-        sendJson(res, { ok: false, error: "invalid_token" }, 403);
-        return;
-      }
-      const result = await recordBattleEvent(body);
-      sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
-    } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "battle_event_failed" }, 500);
-    }
-    return;
-  }
-
-  if (url.pathname === "/db") {
-    if (!hasValidAdminToken(req)) {
-      sendJson(res, { ok: false, error: "not_found" }, 404);
-      return;
-    }
-    sendJson(res, {
-      ok: true,
-      storage: pgPool ? "postgres" : "json-file",
-      schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events"
-        : "accounts-json",
-      accounts: Object.keys(store.accounts).length,
-      databaseUrlConfigured: Boolean(DATABASE_URL)
+      if (DEBUG_PACKETS) console.log(`[tcp:${port}] ${data.length} bytes`);
     });
-    return;
-  }
-
-  res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-  res.end("not found");
-});
-
-server.listen(PORT, () => {
-  console.log(`Contra City legacy API listening on ${PORT} build=${API_BUILD_ID}`);
-  if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
-  if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
-  if (!CREATE_CODE) console.warn("[security] CREATE_CODE is not set; /create account creation is disabled.");
-  if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
-  if (DEFAULT_KEY === "contra-revive-key") console.warn("[security] DEFAULT_KEY still uses the public fallback; rotate it");
-});
-server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
-server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
-server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
-server.maxHeadersCount = 64;
-server.on("clientError", (_error, socket) => {
-  if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
-});
-
-
-
+  });
+  tcp.maxConnections = Math.max(100, MAX_SESSIONS_TOTAL);
+  tcp.listen(port, "0.0.0.0", () => console.log(`[tcp] ${port} listening`));
+}
 
