@@ -1,4 +1,4 @@
-﻿ALTER TABLE players
+ALTER TABLE players
   ADD COLUMN IF NOT EXISTS name_pending BOOLEAN NOT NULL DEFAULT false;
 
 UPDATE players

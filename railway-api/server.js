@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-09-create-postgres-schema-v23";
+const API_BUILD_ID = "railway-api-2026-07-09-migration-bom-safe-v24";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1277,7 +1277,7 @@ async function runMigrations() {
     const applied = await pgPool.query("SELECT 1 FROM schema_migrations WHERE version = $1", [version]);
     if (applied.rowCount) continue;
 
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8").replace(/^\uFEFF/, "");
     const client = await pgPool.connect();
     try {
       await client.query("BEGIN");
