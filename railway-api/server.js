@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-09-migration-bom-safe-v24";
+const API_BUILD_ID = "railway-api-2026-07-09-clan-inventory-upsert-v25";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1785,7 +1785,10 @@ async function savePostgresStore(nextStore) {
         const itemKey = String(item.itemKey || inventoryItemKey(item));
         await client.query(
           `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
-           VALUES ($1, $2, $3::jsonb, $4, $5)`,
+           VALUES ($1, $2, $3::jsonb, $4, $5)
+           ON CONFLICT (clan_id, item_key) DO UPDATE SET
+             item_data = EXCLUDED.item_data,
+             expires_at = EXCLUDED.expires_at`,
           [
             normalized.id,
             itemKey,
