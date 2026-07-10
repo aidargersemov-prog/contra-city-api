@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-10-training-ability-runtime-off-v251";
+const BUILD_ID = "battle-server-2026-07-10-set-bonus-parser-repair-v253";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -126,7 +126,7 @@ const BIKER_SET_HEALTH_FLOOR = Number(process.env.BIKER_SET_HEALTH_FLOOR || 170)
 const BIKER_SET_SPEED_FLOOR = Number(process.env.BIKER_SET_SPEED_FLOOR || 0);
 const BIKER_SET_WEAPON_SPEED_BONUS = Number(process.env.BIKER_SET_WEAPON_SPEED_BONUS || 0);
 const BIKER_SET_SHOTGUN_JUMP_BONUS = Number(process.env.BIKER_SET_SHOTGUN_JUMP_BONUS || 0);
-const APPLY_TRAINING_ABILITY_BONUSES = process.env.APPLY_TRAINING_ABILITY_BONUSES === "1";
+const APPLY_TRAINING_ABILITY_BONUSES = process.env.APPLY_TRAINING_ABILITY_BONUSES !== "0";
 // ShotController uses ActorInfo[92] directly for shotgun air recoil; no per-weapon hidden recoil stat exists in the client.
 const SHOTGUN_RECOIL_SMALL_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_SMALL_JUMP_BONUS || 2);
 const SHOTGUN_RECOIL_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_JUMP_BONUS || 4);
@@ -1624,19 +1624,28 @@ function repairWindows1251Mojibake(value) {
   return decoded;
 }
 function decodeLegacyBonusText(value) {
-  const source = stringOr(value, "");
-  // Restored tooltip constants contain UTF-8 bytes decoded as Windows-1251.
-  // API strings can already be valid UTF-8, so accept the reversal only when
-  // every character maps losslessly and the resulting UTF-8 has no replacement.
-  if (!/[Р РЎ][^\s]/.test(source)) return source;
-  const bytes = [];
-  for (const character of source) {
-    const byte = WINDOWS_1251_ENCODER.get(character);
-    if (byte == null) return source;
-    bytes.push(byte);
+  let current = stringOr(value, "");
+  // Restored tooltip constants can contain one or two mojibake layers depending
+  // on which editor/write path touched server.js. Decode losslessly until the
+  // text becomes normal UTF-8 or no further safe reversal is possible.
+  for (let pass = 0; pass < 3; pass += 1) {
+    if (!/[Р РЎ][^\s]/.test(current)) break;
+    const bytes = [];
+    let canDecode = true;
+    for (const character of current) {
+      const byte = WINDOWS_1251_ENCODER.get(character);
+      if (byte == null) {
+        canDecode = false;
+        break;
+      }
+      bytes.push(byte);
+    }
+    if (!canDecode) break;
+    const decoded = Buffer.from(bytes).toString("utf8");
+    if (!decoded || decoded.includes("\ufffd") || decoded === current) break;
+    current = decoded;
   }
-  const decoded = Buffer.from(bytes).toString("utf8");
-  return decoded.includes("\ufffd") ? source : decoded;
+  return current;
 }
 
 function shortRoomValue(value, fallback, min = 0, max = 32767) {
@@ -2111,6 +2120,8 @@ const SET_BONUS_DEFINITIONS = [
   },
 ];
 
+const LEGACY_SET_BONUS_BY_ID = new Map(SET_BONUS_DEFINITIONS.map((definition) => [definition.id, definition]));
+
 const ASSEMBLAGE_BONUS_TEXTS = {
   1: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
   2: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
@@ -2193,10 +2204,14 @@ const RESTORED_SET_BONUS_DEFINITIONS = [
   { id: 36, code: "spy", required: ["1:business", "2:businessgoogles", "4:business", "5:business", "3:business", "6:business"] },
   { id: 37, code: "contranos", required: ["9:thanos", "2:thanos", "4:thanos", "5:thanos", "3:thanos", "6:thanos", "7:thanos"] },
   { id: 38, code: "blue_soldier", required: ["9:spec99", "1:ushanka2", "4:trooper2", "5:pant032", "3:glov022", "6:slip99", "7:rec2", "8:vodka"] },
-].map((definition) => ({
-  ...definition,
-  bonusText: ASSEMBLAGE_BONUS_TEXTS[definition.id] || "",
-}));
+].map((definition) => {
+  const legacy = LEGACY_SET_BONUS_BY_ID.get(definition.id) || null;
+  return {
+    ...(legacy || {}),
+    ...definition,
+    bonusText: legacy ? "" : (ASSEMBLAGE_BONUS_TEXTS[definition.id] || ""),
+  };
+});
 
 function normalizeSystemName(value, fallback) {
   const raw = stringOr(value, fallback);
