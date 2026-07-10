@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL, fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-10-clan-treasury-response-v32";
+const API_BUILD_ID = "railway-api-2026-07-10-clan-invite-direct-pg-v34";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -3980,6 +3980,51 @@ function clanInviteList(clan, targetStore = store) {
   return Object.values(clan.invites || {}).map((invite) => clanInvitePayload(invite, targetStore));
 }
 
+async function clanInviteListPostgres(clanId) {
+  const id = Number(clanId || 0);
+  if (!Number.isInteger(id) || id <= 0) return [];
+  const startedAt = Date.now();
+  try {
+    const result = await pgPool.query(
+      `SELECT ci.player_id, ci.created_at, p.level, p.name, p.exp
+       FROM clan_invites ci
+       JOIN clans c ON c.id = ci.clan_id AND c.deleted_at IS NULL
+       JOIN players p ON p.id = ci.player_id
+       WHERE ci.clan_id = $1
+       ORDER BY ci.created_at, ci.player_id`,
+      [id]
+    );
+
+    const memoryClan = clanById(id, { includeDeleted: true });
+    if (memoryClan) {
+      memoryClan.invites = {};
+      for (const row of result.rows) {
+        memoryClan.invites[String(row.player_id)] = {
+          playerId: Number(row.player_id),
+          createdAt: postgresTimestamp(row.created_at)
+        };
+      }
+    }
+
+    const invites = result.rows.map((row) => ({
+      uid: Number(row.player_id),
+      ul: Number(row.level || 1),
+      n: String(row.name || `Player ${row.player_id}`),
+      mlvl: 0,
+      m: 0,
+      e: 0,
+      ek: 0,
+      ue: Number(row.exp || 0),
+      date: formatClanDate(row.created_at)
+    }));
+    console.log(`[clan-invite] list clan=${id} invites=${invites.length} source=postgres duration=${Date.now() - startedAt}ms`);
+    return invites;
+  } catch (error) {
+    console.error(`[postgres] clan invite list failed clan=${id}`, error);
+    return null;
+  }
+}
+
 function clanEventPayload(event) {
   return {
     i: Number(event.id),
@@ -4664,9 +4709,140 @@ async function createClan(account, url) {
   });
 }
 
+async function joinClanPostgres(account, clanId) {
+  const id = Number(clanId || 0);
+  const playerId = Number(account.id || 0);
+  const startedAt = Date.now();
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const playerResult = await client.query(
+        "SELECT id, cckey, level, exp, name FROM players WHERE id = $1 FOR UPDATE",
+        [playerId]
+      );
+      const playerRow = playerResult.rows[0];
+      if (!playerRow || playerRow.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+      if (Number(playerRow.level || 1) < CLAN_JOIN_LEVEL) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
+      }
+
+      const clanResult = await client.query(
+        `SELECT id, access, access_level, max_members
+         FROM clans
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [id]
+      );
+      const clanRow = clanResult.rows[0];
+      if (!clanRow) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const membershipResult = await client.query(
+        `SELECT 1
+         FROM clan_members cm
+         JOIN clans c ON c.id = cm.clan_id
+         WHERE cm.player_id = $1 AND c.deleted_at IS NULL
+         LIMIT 1`,
+        [playerId]
+      );
+      if (membershipResult.rows.length) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
+      }
+      if (Number(clanRow.access || 0) === 0 || Number(clanRow.access_level || 0) > Number(playerRow.level || 0)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const memberCountResult = await client.query(
+        "SELECT COUNT(*)::int AS count FROM clan_members WHERE clan_id = $1",
+        [id]
+      );
+      if (Number(memberCountResult.rows[0]?.count || 0) >= Number(clanRow.max_members || CLAN_DEFAULT_MAX_MEMBERS)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
+      }
+
+      const existingInviteResult = await client.query(
+        "SELECT created_at FROM clan_invites WHERE clan_id = $1 AND player_id = $2",
+        [id, playerId]
+      );
+      const inviteCountResult = await client.query(
+        "SELECT COUNT(*)::int AS count FROM clan_invites WHERE player_id = $1",
+        [playerId]
+      );
+      if (!existingInviteResult.rows.length &&
+          Number(inviteCountResult.rows[0]?.count || 0) >= Number(account.clanMaxRequest || 10)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const insertResult = await client.query(
+        `INSERT INTO clan_invites (clan_id, player_id, created_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (clan_id, player_id) DO NOTHING
+         RETURNING created_at`,
+        [id, playerId]
+      );
+      let createdAt = insertResult.rows[0]?.created_at || existingInviteResult.rows[0]?.created_at;
+      if (!createdAt) {
+        const persistedInvite = await client.query(
+          "SELECT created_at FROM clan_invites WHERE clan_id = $1 AND player_id = $2",
+          [id, playerId]
+        );
+        createdAt = persistedInvite.rows[0]?.created_at;
+      }
+
+      await client.query("COMMIT");
+      committed = true;
+
+      const normalizedCreatedAt = postgresTimestamp(createdAt) || new Date().toISOString();
+      const memoryClan = clanById(id, { includeDeleted: true });
+      if (memoryClan) {
+        memoryClan.invites[String(playerId)] = {
+          playerId,
+          createdAt: normalizedCreatedAt
+        };
+      }
+      store.accounts[String(playerId)] = normalizeAccount({
+        ...account,
+        level: Number(playerRow.level || account.level || 1),
+        exp: Number(playerRow.exp || account.exp || 0),
+        name: String(playerRow.name || account.name || `Player ${playerId}`)
+      });
+
+      const inviteCount = Number(inviteCountResult.rows[0]?.count || 0) + (existingInviteResult.rows.length ? 0 : 1);
+      console.log(`[clan-invite] join player=${playerId} clan=${id} invites=${inviteCount} source=postgres duration=${Date.now() - startedAt}ms`);
+      return ok({ id });
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      console.error(`[postgres] clan invite join failed player=${playerId} clan=${id}`, error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 async function joinClan(account, url) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
+  if (pgPool) return await joinClanPostgres(account, clanId);
+  const clan = clanById(clanId);
   if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(account.level || 1) < CLAN_JOIN_LEVEL) return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
   if (playerClanRecord(account.id)) return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
@@ -4762,9 +4938,62 @@ function removeClanMember(account, url, eventType = CLAN_EVENT_TYPE.DELETE_MEMBE
   return ok();
 }
 
+async function deleteClanPostgres(account, clanId) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const clanResult = await client.query("SELECT * FROM clans WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [Number(clanId)]);
+      const clanRow = clanResult.rows[0];
+      if (!clanRow || Number(clanRow.owner_player_id || 0) !== Number(account.id)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const expiresAt = new Date(Date.now() + 1000).toISOString();
+      await client.query(
+        `INSERT INTO clan_events (clan_id, event_type, creator_player_id, data, expires_at, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, now())`,
+        [Number(clanId), CLAN_EVENT_TYPE.DELETE, Number(account.id), JSON.stringify({}), expiresAt]
+      );
+      await client.query("DELETE FROM clan_invites WHERE clan_id = $1", [Number(clanId)]);
+      await client.query("DELETE FROM clan_members WHERE clan_id = $1", [Number(clanId)]);
+      await client.query("UPDATE clans SET deleted_at = now(), updated_at = now() WHERE id = $1", [Number(clanId)]);
+      await client.query("COMMIT");
+
+      const clan = clanById(clanId, { includeDeleted: true });
+      if (clan) {
+        addClanEvent(clan, CLAN_EVENT_TYPE.DELETE, {}, Number(account.id));
+        clan.deletedAt = new Date().toISOString();
+        clan.members = {};
+        clan.invites = {};
+        clan.updatedAt = new Date().toISOString();
+      }
+      refreshAllAccountClanSummaries(store);
+      refreshAccountClan(account);
+      console.log(`[clan-delete] pg player=${account.id} clan=${clanId}`);
+      return clanBaseResponse(account, { id: 0, cinfo: {} });
+    } catch (error) {
+      try {
+        if (client) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      console.error("[postgres] clan delete failed", error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 function deleteClan(account, url) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
+  if (pgPool) return deleteClanPostgres(account, clanId);
+  const clan = clanById(clanId);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   addClanEvent(clan, CLAN_EVENT_TYPE.DELETE, {}, Number(account.id));
   clan.deletedAt = new Date().toISOString();
@@ -4772,7 +5001,8 @@ function deleteClan(account, url) {
   clan.invites = {};
   clan.updatedAt = new Date().toISOString();
   saveClanState();
-  return ok();
+  refreshAccountClan(account);
+  return clanBaseResponse(account, { id: 0, cinfo: {} });
 }
 
 function expandClan(account, url) {
@@ -4974,7 +5204,12 @@ async function routeClan(account, url, act, requestOrigin = null) {
       return ok({ mlist: clan ? clanMemberList(clan) : [] });
     }
     case "inv": {
-      const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
+      const clanId = Number(url.searchParams.get("cid") || 0);
+      if (pgPool) {
+        const invites = await clanInviteListPostgres(clanId);
+        return invites === null ? clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE) : ok({ inv: invites });
+      }
+      const clan = clanById(clanId, { includeDeleted: true });
       return ok({ inv: clan ? clanInviteList(clan) : [] });
     }
     case "arms":
