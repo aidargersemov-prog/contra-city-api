@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-10-bonus-parser-unicode-repair-v255";
+const BUILD_ID = "battle-server-2026-07-10-master-clan-live-sync-v256";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -9237,10 +9237,26 @@ async function handleMasterEvent(session, parsed) {
     if (!data?.raw) return [];
     const clanEventCode = Number(htGet(data, 0)?.value || 0);
     const clanId = Number(htGet(data, 1)?.value || 0);
+    const clanEventData = htGet(data, 2);
+    const subjectUserId = Number(htGet(clanEventData, 0)?.value || 0);
     const event = rawMasterEvent(209, userId, data.raw);
-    const sent = broadcastMasterLobbyEvent(209, userId, data.raw, userId);
-    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} peers=${sent}`);
-    return [event];
+    const targetSessions = new Set([session]);
+    for (const [playerId] of masterSessionsByPlayerId.entries()) {
+      for (const targetSession of activeMasterSessionsForUser(playerId)) {
+        targetSessions.add(targetSession);
+      }
+    }
+    let sent = 0;
+    let senderSent = 0;
+    let subjectSent = 0;
+    for (const targetSession of targetSessions) {
+      if (!sendReliableToSession(targetSession, event, targetSession.lastChannel || 0)) continue;
+      sent += 1;
+      if (targetSession === session) senderSent += 1;
+      if (subjectUserId > 0 && Number(targetSession.playerId || 0) === subjectUserId) subjectSent += 1;
+    }
+    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} subject=${subjectUserId || 0} sessions=${sent} sender=${senderSent} subjectSessions=${subjectSent}`);
+    return [];
   }
 
   if (eventCode === 210) {
