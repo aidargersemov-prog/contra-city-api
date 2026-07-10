@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-10-set-bonus-parser-repair-v253";
+const BUILD_ID = "battle-server-2026-07-10-bonus-parser-unicode-repair-v255";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -1625,29 +1625,28 @@ function repairWindows1251Mojibake(value) {
 }
 function decodeLegacyBonusText(value) {
   let current = stringOr(value, "");
-  // Restored tooltip constants can contain one or two mojibake layers depending
-  // on which editor/write path touched server.js. Decode losslessly until the
-  // text becomes normal UTF-8 or no further safe reversal is possible.
+  // Client-derived tooltip tables may contain one or more reversible
+  // Windows-1251/UTF-8 mojibake layers. Decode only lossless layers and
+  // stop before valid UTF-8 text; API-provided Unicode remains unchanged.
   for (let pass = 0; pass < 3; pass += 1) {
-    if (!/[Р РЎ][^\s]/.test(current)) break;
     const bytes = [];
-    let canDecode = true;
+    let reversible = true;
     for (const character of current) {
       const byte = WINDOWS_1251_ENCODER.get(character);
       if (byte == null) {
-        canDecode = false;
+        reversible = false;
         break;
       }
       bytes.push(byte);
     }
-    if (!canDecode) break;
+    if (!reversible) break;
+
     const decoded = Buffer.from(bytes).toString("utf8");
     if (!decoded || decoded.includes("\ufffd") || decoded === current) break;
     current = decoded;
   }
   return current;
 }
-
 function shortRoomValue(value, fallback, min = 0, max = 32767) {
   const number = Math.trunc(numberOr(value, fallback));
   return Math.max(min, Math.min(max, number));
@@ -2120,7 +2119,6 @@ const SET_BONUS_DEFINITIONS = [
   },
 ];
 
-const LEGACY_SET_BONUS_BY_ID = new Map(SET_BONUS_DEFINITIONS.map((definition) => [definition.id, definition]));
 
 const ASSEMBLAGE_BONUS_TEXTS = {
   1: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
@@ -2204,14 +2202,10 @@ const RESTORED_SET_BONUS_DEFINITIONS = [
   { id: 36, code: "spy", required: ["1:business", "2:businessgoogles", "4:business", "5:business", "3:business", "6:business"] },
   { id: 37, code: "contranos", required: ["9:thanos", "2:thanos", "4:thanos", "5:thanos", "3:thanos", "6:thanos", "7:thanos"] },
   { id: 38, code: "blue_soldier", required: ["9:spec99", "1:ushanka2", "4:trooper2", "5:pant032", "3:glov022", "6:slip99", "7:rec2", "8:vodka"] },
-].map((definition) => {
-  const legacy = LEGACY_SET_BONUS_BY_ID.get(definition.id) || null;
-  return {
-    ...(legacy || {}),
-    ...definition,
-    bonusText: legacy ? "" : (ASSEMBLAGE_BONUS_TEXTS[definition.id] || ""),
-  };
-});
+].map((definition) => ({
+  ...definition,
+  bonusText: ASSEMBLAGE_BONUS_TEXTS[definition.id] || "",
+}));
 
 function normalizeSystemName(value, fallback) {
   const raw = stringOr(value, fallback);
@@ -2809,31 +2803,31 @@ function addProtectionBonus(target, key, amount) {
 }
 
 const WEAR_PROTECTION_TERMS = [
-  { key: "automatic", pattern: /Р°РІС‚РѕРјР°С‚/ },
-  { key: "machinegun", pattern: /РїСѓР»РµРј/ },
-  { key: "pistol", pattern: /РїРёСЃС‚РѕР»РµС‚/ },
-  { key: "shotgun", pattern: /РґСЂРѕР±РѕРІ/ },
-  { key: "sniper", pattern: /СЃРЅР°Р№РїРµСЂ|Р°РЅР°РєРѕРЅРґ/ },
-  { key: "rocket", pattern: /СЂР°РєРµС‚|С‚СЂРѕР»Р»РµР±СѓР·/ },
-  { key: "grenade", pattern: /РіСЂР°РЅР°С‚РѕРј|РіСЂР°РЅР°С‚РёРЅ/ },
-  { key: "snow", pattern: /Р»РµРґРѕРј|СЃРЅРµРіРѕРј/ },
-  { key: "flamer", pattern: /РѕРіРЅРµРј|РїРѕРґР¶РёРіР°/ },
-  { key: "melee", pattern: /Р±Р»РёР¶РЅРµРіРѕ\s+Р±РѕСЏ|СЂСѓС‡РЅ|Р»РµР·РІРё/ },
+  { key: "automatic", pattern: /автомат/ },
+  { key: "machinegun", pattern: /пулем/ },
+  { key: "pistol", pattern: /пистолет/ },
+  { key: "shotgun", pattern: /дробов/ },
+  { key: "sniper", pattern: /снайпер|анаконд/ },
+  { key: "rocket", pattern: /ракет|троллебуз/ },
+  { key: "grenade", pattern: /гранатом|гранатин/ },
+  { key: "snow", pattern: /ледом|снегом/ },
+  { key: "flamer", pattern: /огнем|поджига/ },
+  { key: "melee", pattern: /ближнего\s+боя|ручн|лезви/ },
 ];
 
 const ALL_WEAR_PROTECTION_KEYS = WEAR_PROTECTION_TERMS.map((term) => term.key);
 const ALL_DAMAGE_RANGES = ["short", "medium", "long"];
 const WEAR_DAMAGE_TERMS = [
-  { types: [4], pattern: /Р°РІС‚РѕРјР°С‚/ },
-  { types: [6], pattern: /РїСѓР»РµРј/ },
-  { types: [3], pattern: /РїРёСЃС‚РѕР»РµС‚/ },
-  { types: [7], pattern: /РґСЂРѕР±РѕРІ/ },
-  { types: [10], pattern: /СЃРЅР°Р№РїРµСЂ|Р°РЅР°РєРѕРЅРґ/ },
-  { types: [8], pattern: /СЂР°РєРµС‚|С‚СЂРѕР»Р»РµР±СѓР·/ },
-  { types: [9, 15], pattern: /РіСЂР°РЅР°С‚РѕРј|РіСЂР°РЅР°С‚РёРЅ/ },
-  { types: [11], pattern: /Р»РµРґРѕРј|СЃРЅРµРіРѕРј/ },
-  { types: [5], pattern: /РѕРіРЅРµРј/ },
-  { types: [1, 2], pattern: /Р±Р»РёР¶РЅРµРіРѕ\s+Р±РѕСЏ|СЂСѓС‡РЅ|Р»РµР·РІРё/ },
+  { types: [4], pattern: /автомат/ },
+  { types: [6], pattern: /пулем/ },
+  { types: [3], pattern: /пистолет/ },
+  { types: [7], pattern: /дробов/ },
+  { types: [10], pattern: /снайпер|анаконд/ },
+  { types: [8], pattern: /ракет|троллебуз/ },
+  { types: [9, 15], pattern: /гранатом|гранатин/ },
+  { types: [11], pattern: /ледом|снегом/ },
+  { types: [5], pattern: /огнем/ },
+  { types: [1, 2], pattern: /ближнего\s+боя|ручн|лезви/ },
 ];
 
 function protectionKeyFromText(text) {
@@ -2843,7 +2837,7 @@ function protectionKeyFromText(text) {
 
 function protectionKeysFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (/РІСЃРµС…\s+С‚РёРїРѕРІ\s+(?:РѕСЂСѓР¶|РѕСЂСѓРґ)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
+  if (/всех\s+типов\s+(?:оруж|оруд)/.test(normalized)) return ALL_WEAR_PROTECTION_KEYS;
   const keys = WEAR_PROTECTION_TERMS
     .filter((term) => term.pattern.test(normalized))
     .map((term) => term.key);
@@ -2862,9 +2856,9 @@ function damageTypesFromText(text) {
 
 function damageRangeFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (/Р±Р»РёР¶РЅ/.test(normalized)) return "short";
-  if (/СЃСЂРµРґРЅ|СЃСЂРµРґ\./.test(normalized)) return "medium";
-  if (/РґР°Р»СЊРЅ/.test(normalized)) return "long";
+  if (/ближн/.test(normalized)) return "short";
+  if (/средн|сред\./.test(normalized)) return "medium";
+  if (/дальн/.test(normalized)) return "long";
   return "";
 }
 
@@ -2891,19 +2885,19 @@ function applyWearProtectionBonuses(modifiers, text) {
     }
 
     const lineRange = damageRangeFromText(line);
-    if (/Р·Р°С‰РёС‚/.test(line) && lineRange) rangeContext = lineRange;
-    if (/Р·Р°С‰РёС‚.*РѕС‚\s*:/.test(line)) {
+    if (/защит/.test(line) && lineRange) rangeContext = lineRange;
+    if (/защит.*от\s*:/.test(line)) {
       protectionList = true;
       continue;
     }
 
-    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*Р·Р°С‰РёС‚[Р°С‹]?\s+РѕС‚\s+(.+)/);
+    const prefixMatch = line.match(/([+-]?\d+)\s*%\s*защит[аы]?\s+от\s+(.+)/);
     if (prefixMatch) {
       addWearProtectionBonuses(modifiers, protectionKeysFromText(prefixMatch[2]), prefixMatch[1], lineRange);
       continue;
     }
 
-    const suffixMatch = line.match(/Р·Р°С‰РёС‚[Р°С‹]?\s+РѕС‚\s+(.+?)\s*([+-]?\d+)\s*%/);
+    const suffixMatch = line.match(/защит[аы]?\s+от\s+(.+?)\s*([+-]?\d+)\s*%/);
     if (suffixMatch) {
       addWearProtectionBonuses(modifiers, protectionKeysFromText(suffixMatch[1]), suffixMatch[2], lineRange);
       continue;
@@ -2935,16 +2929,16 @@ function applyWearDamageBonuses(modifiers, text) {
       protectionList = false;
       continue;
     }
-    if (/Р·Р°С‰РёС‚.*РѕС‚\s*:/.test(line)) {
+    if (/защит.*от\s*:/.test(line)) {
       protectionList = true;
       continue;
     }
-    if (/Р·Р°С‰РёС‚/.test(line)) continue;
-    if (protectionList && !/СѓСЂРѕРЅ/.test(line)) continue;
-    if (/СѓСЂРѕРЅ/.test(line)) protectionList = false;
+    if (/защит/.test(line)) continue;
+    if (protectionList && !/урон/.test(line)) continue;
+    if (/урон/.test(line)) protectionList = false;
 
     const lineRange = damageRangeFromText(line);
-    if (/СѓСЂРѕРЅ\s+РЅР°\s+/.test(line) && lineRange) rangeContext = lineRange;
+    if (/урон\s+на\s+/.test(line) && lineRange) rangeContext = lineRange;
 
     const amountMatch = line.match(/\+(\d+)\s*%?/);
     if (!amountMatch) continue;
@@ -2959,16 +2953,16 @@ function applyWearDamageBonuses(modifiers, text) {
 
 function shotgunJumpBonusFromText(text) {
   const normalized = stringOr(text, "").toLowerCase();
-  if (!/(РїСЂС‹Р¶|jump)/.test(normalized) || !/(РґСЂРѕР±РѕРІ|shotgun)/.test(normalized)) return 0;
-  if (/РѕРіСЂРѕРј|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
-  if (/РІС‹С€Рµ\s+СЃСЂРµРґРЅ|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
-  if (/РјР°Р»|РЅРµР±РѕР»СЊС€|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
-  if (/Р±РѕР»СЊС€|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
+  if (!/(прыж|jump)/.test(normalized) || !/(дробов|shotgun)/.test(normalized)) return 0;
+  if (/огром|huge/.test(normalized)) return SHOTGUN_RECOIL_HUGE_JUMP_BONUS;
+  if (/выше\s+средн|above\s+average/.test(normalized)) return SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS;
+  if (/мал|небольш|small/.test(normalized)) return SHOTGUN_RECOIL_SMALL_JUMP_BONUS;
+  if (/больш|big/.test(normalized)) return BIG_SHOTGUN_RECOIL_JUMP_BONUS;
   return SHOTGUN_RECOIL_JUMP_BONUS;
 }
 
 function applyJumpPercentBonuses(modifiers, text) {
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?РїСЂС‹Р¶/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?прыж/g)) {
     modifiers.jumpPercent += numberOr(match[1], 0);
   }
   for (const match of text.matchAll(/\+(\d+)\s*%\s*to\s+jump/g)) {
@@ -3009,31 +3003,31 @@ function applyWearTextBonuses(modifiers, item = {}, options = {}) {
   applyWearDamageBonuses(modifiers, text);
   applyJumpPercentBonuses(modifiers, text);
 
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?Р·РґРѕСЂРѕРІ(?:СЊСЋ|СЊСЏ|СЊРµ)?/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?здоров(?:ью|ья|ье)?/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/Р·РґРѕСЂРѕРІ(?:СЊРµ|СЊСЋ|СЊСЏ)?[ \t]*\+(\d+)[ \t]*%/g)) {
+  for (const match of text.matchAll(/здоров(?:ье|ью|ья)?[ \t]*\+(\d+)[ \t]*%/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/Р¶РёР·РЅ[СЊРё][ \t]*\+(\d+)[ \t]*%/g)) {
+  for (const match of text.matchAll(/жизн[ьи][ \t]*\+(\d+)[ \t]*%/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:Рє\s*)?Р¶РёР·РЅ[СЊРё]/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*(?:к\s*)?жизн[ьи]/g)) {
     modifiers.healthPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*Рє\s*Р·РґРѕСЂРѕРІ(?:СЊСЋ|СЊСЏ|СЊРµ)?/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*к\s*здоров(?:ью|ья|ье)?/g)) {
     modifiers.healthFlat += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*Рє\s*СЃРєРѕСЂРѕСЃС‚Рё/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*скорости/g)) {
     modifiers.speedPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*%\s*Рє\s*Р±СЂРѕРЅ[РµРёСЏ]/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*%\s*к\s*брон[еия]/g)) {
     modifiers.armorPercent += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/\+(\d+)\s*Рє\s*Р±СЂРѕРЅРµ/g)) {
+  for (const match of text.matchAll(/\+(\d+)\s*к\s*броне/g)) {
     modifiers.armorFlat += numberOr(match[1], 0);
   }
-  for (const match of text.matchAll(/Р±СЂРѕРЅ[СЏРµ][ \t]*\+(\d+)/g)) {
+  for (const match of text.matchAll(/брон[яе][ \t]*\+(\d+)/g)) {
     modifiers.armorFlat += numberOr(match[1], 0);
   }
   if (!options.suppressShotgunJump) {
