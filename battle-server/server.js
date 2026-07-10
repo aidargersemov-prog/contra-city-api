@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-10-master-clan-live-sync-v256";
+const BUILD_ID = "battle-server-2026-07-11-player-base-speed-15-v257";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -3216,11 +3216,11 @@ function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null)
   return normalizeMeleeWeaponStats(applyWeaponGameplayBonuses(merged, profile));
 }
 
-function playerRuntimeStats(profile = null) {
+function playerRuntimeStats(profile = null, options = {}) {
   const modifiers = gameplayModifiersForProfile(profile);
   const baseHealth = Number(process.env.DEFAULT_PLAYER_HEALTH || 100);
   const baseEnergy = Math.max(0, numberOr(process.env.DEFAULT_PLAYER_ENERGY, 0));
-  const baseSpeed10 = Number(process.env.DEFAULT_PLAYER_SPEED10 || 100);
+  const baseSpeed10 = Number(options.baseSpeed10 ?? process.env.DEFAULT_PLAYER_SPEED10 ?? 150);
   const baseJump = Number(process.env.DEFAULT_PLAYER_JUMP || 15);
   const calculatedHealth = Math.round((baseHealth + modifiers.healthFlat) * (1 + modifiers.healthPercent / 100));
   const maxHealth = Math.max(1, calculatedHealth, numberOr(modifiers.healthFloor, 0));
@@ -3243,7 +3243,10 @@ function playerRuntimeStats(profile = null) {
 }
 
 function sessionRuntimeStats(session = null) {
-  return playerRuntimeStats(session?.loadedProfile || null);
+  const baseSpeed10 = isZombieModeValue(roomMode(session))
+    ? Number(process.env.DEFAULT_ZOMBIE_PLAYER_SPEED10 || 100)
+    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 150);
+  return playerRuntimeStats(session?.loadedProfile || null, { baseSpeed10 });
 }
 
 function makeWeaponDictionaryRaw(profile = null, slotLimit = JOIN_LOADOUT_SLOT_LIMIT, options = {}) {
@@ -3356,7 +3359,7 @@ function makeDefaultWeaponDictionaryRaw() {
 }
 
 function makeActorInfoRaw(profile = null, options = {}) {
-  const stats = playerRuntimeStats(profile);
+  const stats = playerRuntimeStats(profile, options);
   const entries = [
     { key: rawByte(100), value: rawInt(stats.maxHealth) },
     { key: rawByte(99), value: rawInt(stats.maxEnergy) },
@@ -3687,7 +3690,7 @@ function actorListJoinResponsePacketBytes(actorId, actorRaw, roomRaw, channel = 
   return 12 + makeReliable(0, payload, channel).length;
 }
 
-function mandatoryLoadoutActorCandidates(incomingActor, profile) {
+function mandatoryLoadoutActorCandidates(incomingActor, profile, sharedOptions = {}) {
   const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
   return [
     { label: "full", options: { weaponSlotLimit: maxSlots, logCompact: false } },
@@ -3702,7 +3705,7 @@ function mandatoryLoadoutActorCandidates(incomingActor, profile) {
   ].map((candidate) => ({
     label: candidate.label,
     slotLimit: candidate.options.weaponSlotLimit,
-    raw: makeActorDataRaw(incomingActor, profile, candidate.options),
+    raw: makeActorDataRaw(incomingActor, profile, { ...candidate.options, ...sharedOptions }),
   }));
 }
 
@@ -3716,14 +3719,14 @@ function actorProfileHasEnhancers(label, enhancerCount) {
   return enhancerCount > 0 && INCLUDE_BATTLE_ENHANCERS && !profileLabel.includes("no-enhancers") && !profileLabel.startsWith("required-actor");
 }
 
-function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null, mode = "event") {
+function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw = null, mode = "event", sharedOptions = {}) {
   const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
   const wearCount = selectedWears(profile).length;
   const wearList = selectedWearSummary(profile);
   const enhancerCount = selectedEnhancers(profile).length;
   const enhancerList = selectedEnhancerSummary(profile);
   let fallback = null;
-  for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile)) {
+  for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile, sharedOptions)) {
     const eventBytes = actorJoinPacketBytes(actorId, candidate.raw, channel);
     const joinBytes = actorListJoinResponsePacketBytes(actorId, candidate.raw, roomRaw, channel);
     const bytes = mode === "join" ? joinBytes : eventBytes;
@@ -3747,12 +3750,16 @@ function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw =
 }
 
 function updateActorWireData(session, incomingActor, profile, channel = 0) {
+  const baseSpeed10 = isZombieModeValue(roomMode(session))
+    ? Number(process.env.DEFAULT_ZOMBIE_PLAYER_SPEED10 || 100)
+    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 150);
   session.actorJoinParam = incomingActor;
   session.actorRaw = makeActorDataRaw(incomingActor, profile, {
     weaponSlotLimit: FULL_LOADOUT_SLOT_LIMIT,
+    baseSpeed10,
   });
-  const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event");
-  const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join");
+  const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event", { baseSpeed10 });
+  const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join", { baseSpeed10 });
   session.peerActorRaw = peerActor.raw;
   session.peerActorLoadoutSlots = peerActor.slotLimit;
   session.peerActorRawBytes = peerActor.bytes;
