@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-11-daily-quest-event-id-v260";
+const BUILD_ID = "battle-server-2026-07-11-zombie-room-entry-speed-v261";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -18,6 +18,7 @@ const SOCIAL_MASTER_PORTS = new Set(
     .map((value) => Number(value.trim()))
     .filter(Boolean)
 );
+const PRIMARY_BATTLE_PORT = PORTS.find((port) => port !== GAME_MASTER_PORT && !SOCIAL_MASTER_PORTS.has(port)) || 5055;
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const ZOMBIE_MIN_PLAYERS = 2;
@@ -34,7 +35,7 @@ const ZOMBIE_REGULAR_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_REGULAR_R
 const ZOMBIE_REGULAR_REGEN_MAX = Math.max(ZOMBIE_REGULAR_REGEN_MIN, Number(process.env.ZOMBIE_REGULAR_REGEN_MAX || 35) || 35);
 const ZOMBIE_BOSS_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_BOSS_REGEN_MIN || 50) || 50);
 const ZOMBIE_BOSS_REGEN_MAX = Math.max(ZOMBIE_BOSS_REGEN_MIN, Number(process.env.ZOMBIE_BOSS_REGEN_MAX || 60) || 60);
-const ZOMBIE_UPDATE_REPAIR_DELAYS_MS = parseDelayList(process.env.ZOMBIE_UPDATE_REPAIR_DELAYS_MS || "350,1200,2500");
+const ZOMBIE_UPDATE_REPAIR_DELAYS_MS = parseDelayList(process.env.ZOMBIE_UPDATE_REPAIR_DELAYS_MS || "");
 const AUTO_SPAWN_RETRY_LIMIT = Number(process.env.AUTO_SPAWN_RETRY_LIMIT || 8);
 const AUTO_SPAWN_RETRY_MS = Number(process.env.AUTO_SPAWN_RETRY_MS || 250);
 const SPAWN_NO_MOVE_WARN_MS = Math.max(0, Number(process.env.SPAWN_NO_MOVE_WARN_MS || 2500));
@@ -360,7 +361,6 @@ const MAP_SPAWN_POINTS = {
     // Use the exported playable layer until a better original infection split is recovered.
     dm: [
       { x: 80.077, y: 10.966, z: 193.052, rotY: 60 },
-      { x: 65.359, y: -18.278, z: 131.071, rotY: 180 },
       { x: 49.396, y: -18.36, z: 122.169, rotY: 270 },
       { x: 78.51, y: -18.322, z: 130.862, rotY: 180 },
       { x: 102.706, y: -18.439, z: 121.382, rotY: 0 },
@@ -3220,7 +3220,7 @@ function playerRuntimeStats(profile = null, options = {}) {
   const modifiers = gameplayModifiersForProfile(profile);
   const baseHealth = Number(process.env.DEFAULT_PLAYER_HEALTH || 100);
   const baseEnergy = Math.max(0, numberOr(process.env.DEFAULT_PLAYER_ENERGY, 0));
-  const baseSpeed10 = Number(options.baseSpeed10 ?? process.env.DEFAULT_PLAYER_SPEED10 ?? 150);
+  const baseSpeed10 = Number(options.baseSpeed10 ?? process.env.DEFAULT_PLAYER_SPEED10 ?? 130);
   const baseJump = Number(process.env.DEFAULT_PLAYER_JUMP || 15);
   const calculatedHealth = Math.round((baseHealth + modifiers.healthFlat) * (1 + modifiers.healthPercent / 100));
   const maxHealth = Math.max(1, calculatedHealth, numberOr(modifiers.healthFloor, 0));
@@ -3245,7 +3245,7 @@ function playerRuntimeStats(profile = null, options = {}) {
 function sessionRuntimeStats(session = null) {
   const baseSpeed10 = isZombieModeValue(roomMode(session))
     ? Number(process.env.DEFAULT_ZOMBIE_PLAYER_SPEED10 || 100)
-    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 150);
+    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 130);
   return playerRuntimeStats(session?.loadedProfile || null, { baseSpeed10 });
 }
 
@@ -3752,7 +3752,7 @@ function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw =
 function updateActorWireData(session, incomingActor, profile, channel = 0) {
   const baseSpeed10 = isZombieModeValue(roomMode(session))
     ? Number(process.env.DEFAULT_ZOMBIE_PLAYER_SPEED10 || 100)
-    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 150);
+    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 130);
   session.actorJoinParam = incomingActor;
   session.actorRaw = makeActorDataRaw(incomingActor, profile, {
     weaponSlotLimit: FULL_LOADOUT_SLOT_LIMIT,
@@ -7211,15 +7211,6 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const originDistance = distanceBetweenPoints(origin, targetSession.lastTransform);
   const explosive = isExplosiveDamageWeapon(weaponType, launchMode);
   const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
-  if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
-    noteAntiCheatWeaponViolation(shooter, "damage", "melee-range", {
-      weaponType,
-      slot: weaponStateByType(shooter, weaponType)?.slot,
-    });
-    result.hit = false;
-    result.summary = `${targetActorId}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
-    return result;
-  }
   if (isZombieInfectionHit(shooter, targetSession, weaponType)) {
     const infectionProgress = noteZombieInfectionHit(shooter, targetSession);
     if (!infectionProgress.complete) {
@@ -7238,6 +7229,15 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.killed = true;
     result.killEvent = infection.event;
     result.summary = `${targetActorId}:infect=1:hits=${infectionProgress.hits}/${infectionProgress.required}:killer=${shooter.actorId}:ztype=${shooter.zombieType}:type=${targetSession.zombieType}:hp=${targetSession.health}:en=${targetSession.energy}:dist=${formatCaptureDistance(damageDistance)}:exp=${infection.expAwarded}:frag=${infection.fragInfo?.name || "zombie-infect"}`;
+    return result;
+  }
+  if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
+    noteAntiCheatWeaponViolation(shooter, "damage", "melee-range", {
+      weaponType,
+      slot: weaponStateByType(shooter, weaponType)?.slot,
+    });
+    result.hit = false;
+    result.summary = `${targetActorId}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
     return result;
   }
   const range = damageRangeName(damageDistance);
@@ -9022,7 +9022,11 @@ function masterSocialStateForUser(playerId) {
     return {
       status: 3,
       roomName: session.room.name || DEFAULT_ROOM,
-      serverId: `${PUBLIC_HOST}:${session.port || 5055}`,
+      // ServersList.ConnectFriend compares the social connection string with
+      // ServerItem.Ports[0]. Rooms are process-global across battle ports, so
+      // advertise the canonical first battle port rather than the incidental
+      // port used by this player's current session.
+      serverId: `${PUBLIC_HOST}:${PRIMARY_BATTLE_PORT}`,
       userOnline: Math.min(255, Math.max(0, Number(session.room.players?.size || 0))),
       userMax: Math.min(255, Math.max(0, Number(session.room.maxUsers || 0))),
     };
@@ -9398,6 +9402,11 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
           { key: 249, value: makeEmptyActorListRaw() },
           { key: 248, value: session.roomRaw },
         ]),
+        // MainNetworkController's friend/quick-connect branch waits for the
+        // lobby's first Event252 -> PhotonEvent86 before it calls JoinRoom.
+        // Photon sends the current room snapshot on lobby entry; requiring a
+        // manual OpRaiseEvent(86) here leaves QuickConnect stuck indefinitely.
+        makeRoomListEvent(session),
       ];
     }
 
