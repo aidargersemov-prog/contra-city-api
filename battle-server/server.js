@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-11-player-base-speed-15-v257";
+const BUILD_ID = "battle-server-2026-07-11-daily-quest-event-id-v260";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -5004,6 +5004,7 @@ function standardRoundWinner(room) {
 }
 
 function resetStandardPlayerForNextRound(playerSession) {
+  beginSessionMatchStats(playerSession);
   resetStandardRoundScore(playerSession);
   resetZombieInfectionProgress(playerSession);
   clearSpawnMoveWarningTimer(playerSession);
@@ -5211,6 +5212,7 @@ function clearZombieRestartTimer(room) {
 }
 
 function resetZombiePlayerForNextRound(playerSession) {
+  beginSessionMatchStats(playerSession);
   resetZombieRoundScore(playerSession);
   resetZombieInfectionProgress(playerSession);
   clearSpawnMoveWarningTimer(playerSession);
@@ -6869,6 +6871,7 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
     victimPlayerName: targetSession.playerName,
     killerActorId: shooter.actorId,
     victimActorId: targetSession.actorId,
+    victimZombieType: numberOr(targetSession.zombieType, 0),
     weaponId: numberOr(context.weaponId, context.weaponType),
     weaponType: context.weaponType,
     weaponSystemName: stringOr(context.weaponSystemName, "OHCA_Zombie"),
@@ -7033,6 +7036,7 @@ function applyImpactDotKill(effect, targetSession, damage) {
     victimPlayerName: targetSession.playerName,
     killerActorId: shooter.actorId,
     victimActorId: targetSession.actorId,
+    victimZombieType: numberOr(targetSession.zombieType, 0),
     weaponId: numberOr(effect.weaponId, effect.weaponType),
     weaponType: effect.weaponType,
     weaponSystemName: stringOr(effect.systemName, ""),
@@ -7325,6 +7329,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
       victimPlayerName: targetSession.playerName,
       killerActorId: shooter.actorId,
       victimActorId: targetSession.actorId,
+      victimZombieType: numberOr(targetSession.zombieType, 0),
       weaponId: numberOr(damageState?.weaponId, weaponType),
       weaponType,
       weaponSystemName: stringOr(damageState?.systemName, ""),
@@ -8909,6 +8914,14 @@ function emitAchievementEvents(sourceSession, achievements) {
 
 async function postBattleEvent(session, type, extra = {}) {
   if (!API_BASE_URL || typeof fetch !== "function") return;
+  session.battleEventSeq = numberOr(session.battleEventSeq, 0) + 1;
+  const dailyEventId = [
+    Number(session.playerId || 0),
+    Number(session.actorId || 0),
+    Number(session.matchStartedAt || 0),
+    session.battleEventSeq,
+    String(type || "event"),
+  ].join(":");
   try {
     const response = await fetch(`${API_BASE_URL}/battle/event`, {
       method: "POST",
@@ -8916,7 +8929,7 @@ async function postBattleEvent(session, type, extra = {}) {
         "content-type": "application/json",
         ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
       },
-      body: JSON.stringify(jsonForDb(session, { type, ...extra })),
+      body: JSON.stringify(jsonForDb(session, { type, ...extra, dailyEventId })),
     });
     if (!response.ok) {
       console.log(`[api] ${type} failed status=${response.status}`);
