@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#090b10">
-  <title>Contra City — Центр событий</title>
-  <meta name="description" content="Защищённая панель аудита и анализа событий Contra City">
+  <meta name="theme-color" content="#111318">
+  <title>Contra City — Логи игры</title>
+  <meta name="description" content="История событий игроков Contra City">
   <link rel="stylesheet" href="/styles.css">
   <script src="/config.js" defer></script>
   <script src="/app.js" defer></script>
@@ -15,24 +15,18 @@
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
   <section id="login-view" class="login-view">
-    <div class="login-noise"></div>
-    <div class="login-shell">
+    <div class="login-card">
       <div class="brand brand-login">
         <span class="brand-mark" aria-hidden="true">C</span>
-        <span><b>CONTRA CITY</b><small>SECURE OPS CENTER</small></span>
+        <span><b>CONTRA CITY</b><small>Логи игры</small></span>
       </div>
-      <div class="login-card">
-        <p class="eyebrow">ЗАЩИЩЁННЫЙ КОНТУР</p>
-        <h1>Центр игровых событий</h1>
-        <p class="login-copy">Мониторинг экономики, прогресса, кланов и подозрительной активности в реальном времени.</p>
-        <form id="login-form" autocomplete="on">
-          <label>Логин<input id="login-input" name="username" autocomplete="username" required maxlength="64" placeholder="admin"></label>
-          <label>Пароль<input id="password-input" name="password" type="password" autocomplete="current-password" required minlength="12" placeholder="••••••••••••"></label>
-          <button class="button primary wide" type="submit"><span>Войти в систему</span><span aria-hidden="true">→</span></button>
-          <p id="login-error" class="form-error" role="alert"></p>
-        </form>
-        <div class="secure-note"><span class="status-dot"></span> Все действия администраторов записываются</div>
-      </div>
+      <h1>Вход</h1>
+      <form id="login-form" autocomplete="on">
+        <label>Логин<input id="login-input" name="username" autocomplete="username" required maxlength="64"></label>
+        <label>Пароль<input id="password-input" name="password" type="password" autocomplete="current-password" required minlength="12"></label>
+        <button class="button primary wide" type="submit">Войти</button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
     </div>
   </section>
 
@@ -40,85 +34,116 @@
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">C</span>
-        <span><b>CONTRA CITY</b><small>OPS CENTER</small></span>
+        <span><b>CONTRA CITY</b><small>Логи игры</small></span>
       </div>
-      <nav class="main-nav" aria-label="Основная навигация">
-        <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌁</span><span>Обзор</span></button>
-        <button class="nav-item" data-view="events"><span class="nav-icon">≋</span><span>Все события</span><em id="nav-event-count">0</em></button>
-        <button class="nav-item" data-filter-category="session"><span class="nav-icon">↳</span><span>Входы и выходы</span></button>
-        <button class="nav-item" data-filter-category="economy"><span class="nav-icon">◈</span><span>Экономика</span></button>
-        <button class="nav-item" data-filter-category="clan"><span class="nav-icon">♜</span><span>Кланы</span></button>
-        <button class="nav-item" data-filter-category="progress"><span class="nav-icon">◎</span><span>Прогресс</span></button>
-        <button class="nav-item danger-nav" data-suspicious="true"><span class="nav-icon">△</span><span>Риск-центр</span><em id="nav-risk-count">0</em></button>
-        <button class="nav-item owner-only hidden" data-view="admins"><span class="nav-icon">⚿</span><span>Команда и права</span></button>
+      <nav class="main-nav" aria-label="Навигация">
+        <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span><span>Главная</span></button>
+        <button class="nav-item" data-view="events"><span class="nav-icon">≡</span><span>Все события</span><em id="nav-event-count">0</em></button>
+        <button class="nav-item" data-filter-category="session"><span class="nav-icon">↪</span><span>Входы и выходы</span></button>
+        <button class="nav-item" data-filter-category="economy"><span class="nav-icon">●</span><span>Покупки и монеты</span></button>
+        <button class="nav-item" data-filter-category="clan"><span class="nav-icon">♛</span><span>Кланы</span></button>
+        <button class="nav-item" data-filter-category="progress"><span class="nav-icon">✓</span><span>Задания и опыт</span></button>
+        <button class="nav-item danger-nav" data-suspicious="true"><span class="nav-icon">!</span><span>Подозрительное</span><em id="nav-risk-count">0</em></button>
+        <button class="nav-item owner-only hidden" data-view="admins"><span class="nav-icon">♟</span><span>Администраторы</span></button>
       </nav>
       <div class="sidebar-footer">
-        <div class="system-state"><span><i class="status-dot"></i> API онлайн</span><small id="sync-time">—</small></div>
-        <button id="logout-button" class="profile-button"><span class="avatar" id="admin-avatar">A</span><span><b id="admin-name">Администратор</b><small id="admin-role">—</small></span><span>↗</span></button>
+        <span id="sync-time" class="hidden">—</span>
+        <button id="logout-button" class="profile-button">
+          <span class="avatar" id="admin-avatar">A</span>
+          <span><b id="admin-name">Администратор</b><small id="admin-role">—</small></span>
+          <span>Выйти</span>
+        </button>
       </div>
     </aside>
 
     <main class="main-content">
       <header class="topbar">
         <button id="menu-button" class="icon-button menu-button" aria-label="Открыть меню">☰</button>
-        <div><p class="eyebrow" id="page-kicker">ОПЕРАТИВНАЯ СВОДКА</p><h1 id="page-title">Контроль событий</h1></div>
+        <h1 id="page-title">Главная</h1>
         <div class="topbar-actions">
-          <label class="live-toggle"><input id="auto-refresh" type="checkbox" checked><span></span>LIVE</label>
+          <input id="auto-refresh" class="hidden" type="checkbox" checked>
           <button id="refresh-button" class="icon-button" title="Обновить">↻</button>
-          <button id="export-button" class="button secondary export-capability">Экспорт CSV</button>
+          <button id="export-button" class="button secondary export-capability">Скачать логи</button>
         </div>
       </header>
 
       <div id="dashboard-view" class="content-view">
-        <section id="stat-grid" class="stat-grid" aria-label="Сводная статистика"></section>
+        <section id="stat-grid" class="stat-grid" aria-label="Статистика"></section>
+
         <section class="overview-grid">
           <article class="panel activity-panel">
-            <div class="panel-heading"><div><p class="eyebrow">ДИНАМИКА</p><h2>Пульс активности</h2></div><select id="stats-period" aria-label="Период статистики"><option value="1h">1 час</option><option value="24h" selected>24 часа</option><option value="7d">7 дней</option><option value="30d">30 дней</option></select></div>
-            <div id="activity-chart" class="activity-chart" aria-label="График активности"></div>
+            <div class="panel-heading">
+              <h2>Активность игроков</h2>
+              <select id="stats-period" aria-label="Период">
+                <option value="1h">1 час</option>
+                <option value="24h" selected>24 часа</option>
+                <option value="7d">7 дней</option>
+                <option value="30d">30 дней</option>
+              </select>
+            </div>
+            <div id="activity-chart" class="activity-chart" aria-label="Активность игроков"></div>
             <div id="category-legend" class="category-legend"></div>
           </article>
+
           <article class="panel risk-panel">
-            <div class="panel-heading"><div><p class="eyebrow danger-text">ТРЕБУЕТ ВНИМАНИЯ</p><h2>Риск-центр</h2></div><button class="text-button" data-suspicious="true">Смотреть все →</button></div>
+            <div class="panel-heading">
+              <h2>Подозрительные события</h2>
+              <button class="text-button" data-suspicious="true">Показать все</button>
+            </div>
             <div id="risk-list" class="risk-list"></div>
           </article>
         </section>
+
         <section class="panel clan-strip-panel">
-          <div class="panel-heading"><div><p class="eyebrow">КЛАНОВАЯ СЕТЬ</p><h2>Активные кланы</h2></div><button class="text-button" data-filter-category="clan">История кланов →</button></div>
+          <div class="panel-heading"><h2>Кланы</h2><button class="text-button" data-filter-category="clan">Все события кланов</button></div>
           <div id="clan-strip" class="clan-strip"></div>
         </section>
+
         <section class="panel latest-panel">
-          <div class="panel-heading"><div><p class="eyebrow">ПОСЛЕДНИЕ СОБЫТИЯ</p><h2>Живая лента</h2></div><span id="new-events-badge" class="new-events-badge hidden">0 новых</span></div>
+          <div class="panel-heading"><h2>Последние события</h2><span id="new-events-badge" class="new-events-badge hidden">0 новых</span></div>
           <div id="latest-events" class="event-list compact"></div>
         </section>
       </div>
 
       <div id="events-view" class="content-view hidden">
         <section class="event-toolbar">
-          <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Ник, ID, клан, событие или описание…" autocomplete="off"></label>
+          <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Ник, ID игрока, клан или событие" autocomplete="off"></label>
           <button id="filter-button" class="button secondary"><span>Фильтры</span><em id="filter-count" class="filter-count hidden">0</em></button>
         </section>
-        <div class="event-summary-line"><span>Найдено: <b id="event-total">0</b></span><span id="active-filter-label">Все категории</span></div>
+        <div class="event-summary-line"><span>Найдено: <b id="event-total">0</b></span><span id="active-filter-label">Все события</span></div>
         <section id="event-list" class="event-list"></section>
-        <nav id="pagination" class="pagination" aria-label="Пагинация"></nav>
+        <nav id="pagination" class="pagination" aria-label="Страницы"></nav>
       </div>
 
       <div id="admins-view" class="content-view hidden">
         <section class="admin-layout">
-          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">SERVER-SIDE RBAC</p><h2>Команда доступа</h2></div></div><div id="admin-list" class="admin-list"></div></article>
-          <article class="panel admin-form-panel"><p class="eyebrow">НОВЫЙ ДОСТУП</p><h2>Добавить сотрудника</h2><form id="admin-form"><label>Логин<input name="login" required maxlength="64"></label><label>Отображаемое имя<input name="displayName" required maxlength="80"></label><label>Роль<select name="role"><option value="head_admin">Главный администратор</option><option value="admin">Администратор</option><option value="moderator">Модератор</option><option value="viewer">Только просмотр</option></select></label><label>Временный пароль<input name="password" type="password" minlength="12" required></label><button class="button primary wide" type="submit">Выдать доступ</button></form></article>
+          <article class="panel">
+            <div class="panel-heading"><h2>Администраторы</h2></div>
+            <div id="admin-list" class="admin-list"></div>
+          </article>
+          <article class="panel admin-form-panel">
+            <h2>Добавить администратора</h2>
+            <form id="admin-form">
+              <label>Логин<input name="login" required maxlength="64"></label>
+              <label>Имя<input name="displayName" required maxlength="80"></label>
+              <label>Роль<select name="role"><option value="head_admin">Главный администратор</option><option value="admin">Администратор</option><option value="moderator">Модератор</option><option value="viewer">Только просмотр</option></select></label>
+              <label>Пароль<input name="password" type="password" minlength="12" required></label>
+              <button class="button primary wide" type="submit">Добавить</button>
+            </form>
+          </article>
         </section>
       </div>
     </main>
   </div>
 
   <aside id="filter-drawer" class="drawer" aria-hidden="true">
-    <div class="drawer-header"><div><p class="eyebrow">ТОЧНАЯ ВЫБОРКА</p><h2>Фильтры</h2></div><button class="icon-button drawer-close" aria-label="Закрыть">×</button></div>
+    <div class="drawer-header"><h2>Фильтры</h2><button class="icon-button drawer-close" aria-label="Закрыть">×</button></div>
     <form id="filter-form">
       <label>Период<select name="period"><option value="">Любое время</option><option value="1h">Последний час</option><option value="24h">24 часа</option><option value="7d">7 дней</option><option value="30d">30 дней</option></select></label>
       <div class="two-columns"><label>С даты<input name="dateFrom" type="datetime-local"></label><label>По дату<input name="dateTo" type="datetime-local"></label></div>
       <label>Категория<select name="category" id="filter-category"><option value="">Все категории</option></select></label>
-      <label>Тип события<select name="eventType" id="filter-event-type"><option value="">Все события</option></select></label>
-      <label>Важность<select name="severity"><option value="">Любая</option><option value="info">Информация</option><option value="notice">Заметное</option><option value="warning">Предупреждение</option><option value="critical">Критическое</option></select></label>
+      <label>Событие<select name="eventType" id="filter-event-type"><option value="">Все события</option></select></label>
+      <label>Важность<select name="severity"><option value="">Любая</option><option value="info">Обычное</option><option value="notice">Важное</option><option value="warning">Предупреждение</option><option value="critical">Критическое</option></select></label>
       <label>Проверка<select name="reviewStatus"><option value="">Любой статус</option><option value="unchecked">Не проверено</option><option value="checked">Проверено</option><option value="suspicious">Подозрительно</option><option value="violation">Нарушение</option></select></label>
       <label class="check-line"><input name="suspicious" type="checkbox"><span>Только подозрительные</span></label>
       <div class="drawer-actions"><button type="button" id="reset-filters" class="button ghost">Сбросить</button><button type="submit" class="button primary">Применить</button></div>

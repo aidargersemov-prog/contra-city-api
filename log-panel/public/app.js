@@ -70,7 +70,12 @@ async function api(path, options = {}) {
     }
   }
   const headers = { ...(options.body ? { "content-type": "application/json" } : {}), ...(state.token ? { authorization: `Bearer ${state.token}` } : {}) };
-  const response = await fetch(url, { method: options.method || "GET", headers, body: options.body ? JSON.stringify(options.body) : undefined });
+  let response;
+  try {
+    response = await fetch(url, { method: options.method || "GET", headers, body: options.body ? JSON.stringify(options.body) : undefined });
+  } catch {
+    throw new Error("Не удалось подключиться к серверу");
+  }
   const data = await response.json().catch(() => ({ ok: false, error: "invalid_response" }));
   if (response.status === 401 && !path.endsWith("/auth/login")) {
     signOut(false);
@@ -84,11 +89,11 @@ function errorLabel(code) {
   const labels = {
     invalid_credentials: "Неверный логин или пароль",
     login_rate_limited: "Слишком много попыток. Подождите 15 минут",
-    origin_not_allowed: "Домен панели не разрешён в API",
-    postgres_required: "Панель требует PostgreSQL",
+    origin_not_allowed: "Сайт не подключён к серверу",
+    postgres_required: "Логи временно недоступны",
     forbidden: "Недостаточно прав",
     admin_password_length: "Пароль должен содержать минимум 12 символов",
-    admin_logs_failed: "Ошибка API панели"
+    admin_logs_failed: "Не удалось загрузить логи"
   };
   return labels[code] || code || "Неизвестная ошибка";
 }
@@ -136,7 +141,7 @@ function renderEventRows(events, compact = false) {
     const type = TYPE_LABELS[event.eventType] || event.eventType.replaceAll("_", " ");
     return `<article class="event-row category-${escapeHtml(category)} ${event.suspicious ? "suspicious" : ""}" data-event-id="${event.id}" tabindex="0">
       <span class="event-icon">${escapeHtml(CATEGORY_ICONS[category] || "·")}</span>
-      <span class="event-person" ${event.playerId ? `data-player-id="${event.playerId}"` : ""}><b>${escapeHtml(event.playerName || (event.playerId ? `Игрок #${event.playerId}` : "Система"))}</b><small>${event.playerId ? `ID ${event.playerId}` : escapeHtml(event.source)}</small></span>
+      <span class="event-person" ${event.playerId ? `data-player-id="${event.playerId}"` : ""}><b>${escapeHtml(event.playerName || (event.playerId ? `Игрок #${event.playerId}` : "Игра"))}</b><small>${event.playerId ? `ID ${event.playerId}` : "Событие игры"}</small></span>
       <span class="event-clan" ${event.clanId ? `data-clan-id="${event.clanId}"` : ""}><b>${escapeHtml(event.clanName || "Без клана")}</b><small>${event.clanId ? `КЛАН #${event.clanId}` : "—"}</small></span>
       <span class="event-description"><span class="event-type">${escapeHtml(type)}</span><p>${escapeHtml(event.description)}</p></span>
       <span class="event-value ${event.suspicious ? "risk-flag" : ""}">${escapeHtml(eventValue(event))}</span>
@@ -276,7 +281,7 @@ async function openPlayer(playerId) {
   try {
     const data = await api(`/admin/logs/players/${playerId}`, { query: { pageSize: 50 } });
     const p = data.profile;
-    showModal(`<div class="modal-header"><div><p class="eyebrow">ИГРОК #${p.id}</p><h2>${escapeHtml(p.name)}</h2></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
+    showModal(`<div class="modal-header"><div><h2>${escapeHtml(p.name)}</h2><p class="modal-subtitle">Игрок #${p.id}</p></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
       <div class="profile-summary"><div class="mini-stat"><span>УРОВЕНЬ</span><b>${formatNumber(p.level)}</b></div><div class="mini-stat"><span>ОПЫТ</span><b>${formatNumber(p.exp)}</b></div><div class="mini-stat"><span>БАЛАНС</span><b>${formatNumber(p.money)}</b></div><div class="mini-stat"><span>КЛАН</span><b>${escapeHtml(p.clan_name || "—")}</b></div><div class="mini-stat"><span>ПОСЛЕДНЯЯ АКТИВНОСТЬ</span><b>${escapeHtml(relativeTime(p.last_seen_at))}</b></div></div>
       <div class="detail-grid"><div class="detail-box"><span>ПОСЛЕДНИЙ ВХОД</span><code>${escapeHtml(formatDate(p.last_login_at))}</code></div><div class="detail-box"><span>ПОСЛЕДНИЙ ВЫХОД</span><code>${escapeHtml(formatDate(p.last_logout_at))}</code></div><div class="detail-box"><span>ПОСЛЕДНИЙ IP</span><code>${escapeHtml(p.last_ip_address || "нет данных")}</code></div><div class="detail-box"><span>УСТРОЙСТВО</span><code>${escapeHtml(p.last_device || "нет данных")}</code></div></div>
       <h3 class="section-title">Полная история · ${formatNumber(data.events.total)} событий</h3><div class="event-list">${renderEventRows(data.events.items)}</div>
@@ -289,7 +294,7 @@ async function openClan(clanId) {
   try {
     const data = await api(`/admin/logs/clans/${clanId}`, { query: { pageSize: 50 } });
     const c = data.profile;
-    showModal(`<div class="modal-header"><div><p class="eyebrow">КЛАН #${c.id} · ${escapeHtml(c.tag || "БЕЗ ТЕГА")}</p><h2>${escapeHtml(c.name)}</h2></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
+    showModal(`<div class="modal-header"><div><h2>${escapeHtml(c.name)}</h2><p class="modal-subtitle">Клан #${c.id}${c.tag ? ` · ${escapeHtml(c.tag)}` : ""}</p></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
       <div class="profile-summary"><div class="mini-stat"><span>УРОВЕНЬ</span><b>${formatNumber(c.level)}</b></div><div class="mini-stat"><span>ОПЫТ</span><b>${formatNumber(c.exp)}</b></div><div class="mini-stat"><span>КАЗНА</span><b>${formatNumber(c.money)}</b></div><div class="mini-stat"><span>УЧАСТНИКИ</span><b>${formatNumber(c.members)} / ${formatNumber(c.max_members)}</b></div><div class="mini-stat"><span>ВЛАДЕЛЕЦ</span><b>${escapeHtml(c.owner_name || `#${c.owner_player_id}`)}</b></div></div>
       <h3 class="section-title">Состав клана</h3><table class="member-table"><thead><tr><th>Игрок</th><th>Уровень</th><th>Роль</th><th>Вклад</th><th>Активность</th></tr></thead><tbody>${data.members.map((m) => `<tr><td><button class="text-button" data-player-id="${m.id}">${escapeHtml(m.name)} #${m.id}</button></td><td>${formatNumber(m.level)}</td><td>${escapeHtml(m.role)}</td><td>${formatNumber(m.money)}</td><td>${escapeHtml(relativeTime(m.last_seen_at))}</td></tr>`).join("")}</tbody></table>
       <h3 class="section-title">История клана · ${formatNumber(data.events.total)} событий</h3><div class="event-list">${renderEventRows(data.events.items)}</div>
@@ -307,14 +312,14 @@ async function openEvent(eventId) {
     return;
   }
   const canReview = state.admin.permissions.includes("review");
-  showModal(`<div class="modal-header"><div><p class="eyebrow">СОБЫТИЕ #${event.id} · ${escapeHtml(event.source)}</p><h2>${escapeHtml(TYPE_LABELS[event.eventType] || event.eventType)}</h2></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
+  showModal(`<div class="modal-header"><div><h2>${escapeHtml(TYPE_LABELS[event.eventType] || event.eventType)}</h2><p class="modal-subtitle">Событие #${event.id}</p></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
     <div class="profile-summary"><div class="mini-stat"><span>ИГРОК</span><b>${escapeHtml(event.playerName || "—")}</b></div><div class="mini-stat"><span>ID</span><b>${event.playerId || "—"}</b></div><div class="mini-stat"><span>КЛАН</span><b>${escapeHtml(event.clanName || "—")}</b></div><div class="mini-stat"><span>ВАЖНОСТЬ</span><b>${escapeHtml(event.severity)}</b></div><div class="mini-stat"><span>ВРЕМЯ</span><b>${escapeHtml(formatDate(event.createdAt, true))}</b></div></div>
     <p>${escapeHtml(event.description)}</p><div class="detail-grid"><div class="detail-box"><span>СТАРОЕ ЗНАЧЕНИЕ</span><code>${escapeHtml(JSON.stringify(event.oldValue, null, 2) || "—")}</code></div><div class="detail-box"><span>НОВОЕ ЗНАЧЕНИЕ</span><code>${escapeHtml(JSON.stringify(event.newValue, null, 2) || "—")}</code></div><div class="detail-box"><span>IP / УСТРОЙСТВО</span><code>${escapeHtml(`${event.ipAddress || "—"}\n${event.device || "—"}`)}</code></div><div class="detail-box"><span>МЕТАДАННЫЕ</span><code>${escapeHtml(JSON.stringify(event.metadata, null, 2) || "—")}</code></div></div>
     ${canReview ? `<form id="review-form" class="review-form" data-event-id="${event.id}"><label>Решение<div class="review-options">${["unchecked","checked","suspicious","violation"].map((status) => `<label class="review-choice"><input type="radio" name="reviewStatus" value="${status}" ${event.reviewStatus === status ? "checked" : ""}>${reviewLabel(status)}</label>`).join("")}</div></label><label>Заметка администратора<textarea name="adminNote" maxlength="2000" placeholder="Контекст проверки, доказательства, решение…">${escapeHtml(event.adminNote || "")}</textarea></label><button class="button primary" type="submit">Сохранить проверку</button></form>` : `<div class="detail-box"><span>РЕЗУЛЬТАТ ПРОВЕРКИ</span><code>${escapeHtml(reviewLabel(event.reviewStatus))}\n${escapeHtml(event.adminNote || "Без заметки")}</code></div>`}
   </div>`);
 }
 
-function openModalLoading(title) { showModal(`<div class="modal-header"><div><p class="eyebrow">ЗАГРУЗКА ДАННЫХ</p><h2>${escapeHtml(title)}</h2></div><button class="modal-close">×</button></div><div class="modal-body"><div class="skeleton"></div><br><div class="skeleton"></div></div>`); }
+function openModalLoading(title) { showModal(`<div class="modal-header"><h2>${escapeHtml(title)}</h2><button class="modal-close">×</button></div><div class="modal-body"><div class="skeleton"></div><br><div class="skeleton"></div></div>`); }
 function showModalError(message) { showModal(`<div class="modal-header"><h2>Ошибка</h2><button class="modal-close">×</button></div><div class="modal-body"><div class="empty-state">${escapeHtml(message)}</div></div>`); }
 function showModal(html) { $("#detail-content").innerHTML = `<div class="modal-shell">${html}</div>`; const modal = $("#detail-modal"); if (!modal.open) modal.showModal(); }
 
@@ -330,10 +335,8 @@ function switchView(view) {
   $$(".content-view").forEach((node) => node.classList.add("hidden"));
   $(`#${view}-view`)?.classList.remove("hidden");
   $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
-  const titles = { dashboard: ["ОПЕРАТИВНАЯ СВОДКА", "Контроль событий"], events: ["ЖУРНАЛ АУДИТА", "Все игровые события"], admins: ["УПРАВЛЕНИЕ ДОСТУПОМ", "Команда и права"] };
-  const [kicker, title] = titles[view] || titles.dashboard;
-  $("#page-kicker").textContent = kicker;
-  $("#page-title").textContent = title;
+  const titles = { dashboard: "Главная", events: "Все события", admins: "Администраторы" };
+  $("#page-title").textContent = titles[view] || titles.dashboard;
   $("#sidebar").classList.remove("open");
   if (view === "events") loadEvents();
   if (view === "admins") loadAdmins();
