@@ -2,10 +2,13 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { URL, fileURLToPath } from "node:url";
+import { createAdminLogsApi } from "./admin-logs/admin-api.js";
+import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-11-daily-quest-dedupe-v40";
+const API_BUILD_ID = "railway-api-2026-07-12-admin-audit-panel-v42";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -59,6 +62,42 @@ const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESS
 const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
+const requestAuditContext = new AsyncLocalStorage();
+
+function currentAuditContext() {
+  return requestAuditContext.getStore() || {};
+}
+
+async function auditGameEvent(db, event) {
+  if (!db?.query) return null;
+  const context = currentAuditContext();
+  return writeAuditEvent(db, {
+    ipAddress: context.ipAddress || "",
+    device: context.device || "",
+    source: context.source || "game_api",
+    ...event
+  });
+}
+
+async function recordPlayerAccess(account, req, kind, source) {
+  if (!pgPool || !account?.id) return;
+  const ipAddress = requestClientIp(req);
+  const device = String(req.headers["user-agent"] || "").slice(0, 300);
+  try {
+    await touchPlayerActivity(pgPool, { playerId: account.id, kind, ipAddress, device, source });
+    await writeAuditEvent(pgPool, {
+      playerId: account.id,
+      eventType: kind === "logout" ? "player_logout" : "player_login",
+      category: "session",
+      description: kind === "logout" ? "Игрок вышел" : "Игрок вошёл",
+      source,
+      ipAddress,
+      device
+    });
+  } catch (error) {
+    console.error(`[admin-logs] player access audit failed player=${account.id} kind=${kind}`, error);
+  }
+}
 
 function safeTokenEquals(left, right) {
   const a = Buffer.from(String(left || ""), "utf8");
@@ -76,10 +115,11 @@ function requestClientIp(req) {
 
 function requestRatePolicy(pathname) {
   if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
+  if (pathname === "/admin/logs/auth/login") return { windowMs: 15 * 60 * 1000, limit: 20 };
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/social") {
+  if (pathname === "/battle/event" || pathname === "/battle/social" || pathname === "/battle/clan-events") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -1818,6 +1858,18 @@ async function savePostgresStore(nextStore) {
 
 let store = await initStore();
 
+const adminLogsApi = createAdminLogsApi({
+  getPool: () => pgPool,
+  readJsonBody,
+  requestIp: requestClientIp,
+  onPlayerChanged: async (playerId) => {
+    if (!pgPool) return;
+    const fresh = await loadPostgresAccount(playerId);
+    if (fresh) store.accounts[String(playerId)] = fresh;
+  }
+});
+const adminLogsStatus = await adminLogsApi.initialize();
+
 function canonicalWeaponForRawItem(item) {
   if (Number(item?.itype || 0) !== 1) return null;
   const rawId = Number(item?.w_id ?? item?.id);
@@ -2720,7 +2772,7 @@ function levelStateForExp(totalExp, currentLevel = START_LEVEL) {
   };
 }
 
-async function awardPlayerExperience(client, playerId, amount) {
+async function awardPlayerExperience(client, playerId, amount, source = "game_api") {
   const id = Number(playerId || 0);
   const expGain = statNumber(amount, 0);
   if (!Number.isInteger(id) || id <= 0 || expGain <= 0) return null;
@@ -2749,6 +2801,18 @@ async function awardPlayerExperience(client, playerId, amount) {
   }
 
   console.log(`[battle-exp] player=${id} add=${expGain} exp=${oldExp}->${next.exp} level=${oldLevel}->${next.level} next=${next.expMax}`);
+  await writeAuditEvent(client, {
+    playerId: id,
+    eventType: next.level !== oldLevel ? "level_change" : "experience_change",
+    category: "progress",
+    severity: next.level !== oldLevel ? "notice" : "info",
+    description: next.level !== oldLevel
+      ? `Уровень изменён: ${oldLevel} → ${next.level}`
+      : `Начислено ${expGain} опыта`,
+    oldValue: { exp: oldExp, level: oldLevel },
+    newValue: { exp: next.exp, level: next.level, delta: expGain },
+    source
+  });
   return {
     gained: expGain,
     expBefore: oldExp,
@@ -3202,6 +3266,18 @@ async function syncPostgresAchievements(client, playerId) {
     console.log(`[achievements] baseline player=${account.id} completed=${completedCount} catalog=${achievementCatalog.length}`);
   } else if (newlyCompleted.length) {
     console.log(`[achievements] unlock player=${account.id} count=${newlyCompleted.length} ids=${newlyCompleted.map((item) => item.i).join(",")}`);
+  }
+  for (const achievement of newlyCompleted) {
+    await writeAuditEvent(client, {
+      playerId: account.id,
+      eventType: "achievement_complete",
+      category: "progress",
+      severity: "notice",
+      description: `Выполнено достижение #${achievement.i}`,
+      newValue: { current: achievement.currentValue, target: achievement.maxValue, reward: achievement.reward },
+      source: "battle_server",
+      metadata: { achievementId: achievement.id, originalId: achievement.i }
+    });
   }
   return newlyCompleted;
 }
@@ -3956,6 +4032,69 @@ async function battleSocialRequest(body) {
     return list;
   }
   return { ok: false, error: "unknown_action", status: 400 };
+}
+
+async function battleClanTreasuryEvents(body) {
+  const afterId = Math.max(0, Math.trunc(Number(body?.afterId || 0)));
+  const limit = Math.max(1, Math.min(200, Math.trunc(Number(body?.limit || 100))));
+  const initialize = body?.initialize === true;
+  if (initialize) {
+    const cursor = pgPool
+      ? Number((await pgPool.query(
+          "SELECT COALESCE(MAX(id), 0)::int AS id FROM clan_treasury_events WHERE event_type = $1",
+          [CLAN_TREASURY_EVENT_TYPE.ADD]
+        )).rows[0]?.id || 0)
+      : Object.values(store.clans?.byId || {})
+          .flatMap((clan) => clan?.treasuryEvents || [])
+          .filter((event) => Number(event?.type) === CLAN_TREASURY_EVENT_TYPE.ADD)
+          .reduce((max, event) => Math.max(max, Number(event?.id || 0)), 0);
+    return { ok: true, initialized: true, cursor, events: [] };
+  }
+  let events;
+
+  if (pgPool) {
+    const result = await pgPool.query(
+      `SELECT id, clan_id, player_id, player_name, money, event_type, created_at
+       FROM clan_treasury_events
+       WHERE id > $1 AND event_type = $2
+       ORDER BY id ASC
+       LIMIT $3`,
+      [afterId, CLAN_TREASURY_EVENT_TYPE.ADD, limit]
+    );
+    events = result.rows.map((row) => ({
+      id: Number(row.id),
+      clanId: Number(row.clan_id),
+      playerId: Number(row.player_id || 0),
+      playerName: String(row.player_name || ""),
+      money: Number(row.money || 0),
+      type: Number(row.event_type || 0),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || "")
+    }));
+  } else {
+    events = Object.values(store.clans?.byId || {})
+      .flatMap((clan) => clan?.treasuryEvents || [])
+      .map(normalizeClanTreasuryRecord)
+      .filter(Boolean)
+      .filter((event) => Number(event.id) > afterId)
+      .filter((event) => Number(event.type) === CLAN_TREASURY_EVENT_TYPE.ADD)
+      .sort((left, right) => Number(left.id) - Number(right.id))
+      .slice(0, limit)
+      .map((event) => ({
+        id: Number(event.id),
+        clanId: Number(event.clanId),
+        playerId: Number(event.playerId || 0),
+        playerName: String(event.playerName || ""),
+        money: Number(event.money || 0),
+        type: Number(event.type || 0),
+        createdAt: String(event.createdAt || "")
+      }));
+  }
+
+  const cursor = events.length > 0 ? Number(events[events.length - 1].id) : afterId;
+  if (events.length > 0) {
+    console.log(`[clan-live] treasury-feed after=${afterId} events=${events.length} cursor=${cursor}`);
+  }
+  return { ok: true, cursor, events };
 }
 
 function clanMemberAccountPayload(member, targetStore = store) {
@@ -5594,9 +5733,104 @@ function deleteClanEvent(account, url) {
   return ok({ cid: Number(clan.id), eid: eventId });
 }
 
+function clanAuditSnapshot(clan, account = null) {
+  if (!clan) return null;
+  return {
+    id: Number(clan.id),
+    name: String(clan.name || ""),
+    tag: String(clan.tag || ""),
+    ownerPlayerId: Number(clan.ownerPlayerId || 0),
+    money: Number(clan.money || 0),
+    level: Number(clan.level || 1),
+    exp: Number(clan.exp || 0),
+    members: Object.keys(clan.members || {}).length,
+    maxMembers: Number(clan.maxMembers || 0),
+    armId: Number(clan.armId || 0),
+    access: Number(clan.access || 0),
+    accessLevel: Number(clan.accessLevel || 0),
+    playerBalance: account ? Number(account.money || 0) : undefined
+  };
+}
+
+async function auditClanMutation(account, url, act, response, beforeClan, beforePlayerMoney) {
+  if (!pgPool || response?.result !== true) return;
+  const requestedClanId = Number(url.searchParams.get("cid") || response.id || beforeClan?.id || 0);
+  const afterClanRecord = clanById(requestedClanId, { includeDeleted: true });
+  const afterClan = clanAuditSnapshot(afterClanRecord, account);
+  const targetPlayerId = Number(url.searchParams.get("uid") || account.id || 0);
+  const money = Number(url.searchParams.get("money") || 0);
+  const config = {
+    create: ["clan_create", "clan", `Создан клан ${afterClan?.name || response.id || ""}`],
+    del: ["clan_delete", "clan", `Удалён клан ${beforeClan?.name || requestedClanId}`],
+    join: ["clan_join_request", "clan", `Подана заявка на вступление в клан #${requestedClanId}`],
+    accept: ["clan_join", "clan", `Игрок #${targetPlayerId} принят в клан`],
+    reject: ["clan_join_reject", "clan", `Заявка игрока #${targetPlayerId} отклонена`],
+    remove: ["clan_member_remove", "clan", `Игрок #${targetPlayerId} исключён из клана`],
+    leave: ["clan_leave", "clan", "Игрок вышел из клана"],
+    amoney: ["clan_treasury_deposit", "economy", `Внесено ${money} монет в казну клана`],
+    cname: ["clan_rename", "clan", `Клан переименован: ${beforeClan?.name || ""} → ${afterClan?.name || ""}`],
+    ctag: ["clan_tag_change", "clan", `Изменён тег клана: ${beforeClan?.tag || ""} → ${afterClan?.tag || ""}`],
+    carm: ["clan_emblem_change", "clan", "Изменена эмблема клана"],
+    cowner: ["clan_owner_change", "clan", `Переданы права владельца игроку #${Number(url.searchParams.get("nid") || 0)}`],
+    expand: ["clan_capacity_change", "clan", "Увеличено максимальное число участников"],
+    bench: ["clan_purchase", "clan", "Куплен клановый усилитель"],
+    curl: ["clan_profile_change", "clan", "Изменена ссылка клана"],
+    cdesc: ["clan_profile_change", "clan", "Изменено описание клана"],
+    caccess: ["clan_access_change", "clan", "Изменён режим доступа клана"],
+    caccesslvl: ["clan_access_change", "clan", "Изменён минимальный уровень вступления"],
+    ckoef: ["clan_exp_share_change", "clan", "Изменён коэффициент опыта участника"],
+    buyReq: ["clan_request_limit_purchase", "economy", "Куплены дополнительные заявки в кланы"]
+  }[act];
+  if (!config) return;
+  const subjectPlayerId = ["accept", "reject", "remove"].includes(act) ? targetPlayerId : Number(account.id);
+  await auditGameEvent(pgPool, {
+    playerId: subjectPlayerId,
+    clanId: requestedClanId || afterClan?.id || beforeClan?.id,
+    clanName: afterClan?.name || beforeClan?.name || "",
+    eventType: config[0],
+    category: config[1],
+    severity: ["del", "remove", "cowner"].includes(act) ? "warning" : "notice",
+    description: config[2],
+    oldValue: beforeClan ? { ...beforeClan, playerBalance: beforePlayerMoney } : { playerBalance: beforePlayerMoney },
+    newValue: afterClan || { playerBalance: Number(account.money || 0) },
+    metadata: { act, actorPlayerId: Number(account.id), requestedClanId }
+  });
+}
+
 async function routeClan(account, url, act, requestOrigin = null) {
   ensureClanStore();
   account = ensureClanAccount(account);
+
+  const mutationHandlers = {
+    create: () => createClan(account, url),
+    del: () => deleteClan(account, url),
+    join: () => joinClan(account, url),
+    accept: () => acceptClanInvite(account, url),
+    reject: () => rejectClanInvite(account, url),
+    buyReq: () => buyClanRequests(account),
+    expand: () => expandClan(account, url),
+    remove: () => removeClanMember(account, url, CLAN_EVENT_TYPE.DELETE_MEMBER),
+    leave: () => removeClanMember(account, url, CLAN_EVENT_TYPE.LEAVE_MEMBER),
+    bench: () => buyClanEnhancer(account, url),
+    cname: () => changeClanName(account, url),
+    ctag: () => changeClanTag(account, url),
+    carm: () => changeClanArm(account, url),
+    curl: () => changeClanText(account, url, "homepage"),
+    cdesc: () => changeClanText(account, url, "desc"),
+    cowner: () => changeClanOwner(account, url),
+    caccess: () => changeClanAccess(account, url, "access"),
+    caccesslvl: () => changeClanAccess(account, url, "accessLevel"),
+    amoney: () => addClanMoney(account, url),
+    ckoef: () => changeClanKoef(account, url)
+  };
+  if (mutationHandlers[act]) {
+    const currentClan = playerClanRecord(account.id) || clanById(url.searchParams.get("cid"), { includeDeleted: true });
+    const beforeClan = clanAuditSnapshot(currentClan, account);
+    const beforePlayerMoney = Number(account.money || 0);
+    const response = await mutationHandlers[act]();
+    await auditClanMutation(account, url, act, response, beforeClan, beforePlayerMoney);
+    return response;
+  }
 
   switch (act) {
     case "g":
@@ -5822,6 +6056,15 @@ async function buyItemPostgres(account, item, price) {
           JSON.stringify(itemData)
         ]
       );
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "purchase",
+        category: itemType === 1 ? "weapons" : itemType === 3 ? "clothes" : "inventory",
+        description: `Покупка ${itemData.name || itemData.sn || inventoryItemKey(itemData)} за ${price} монет`,
+        oldValue: { balance: money },
+        newValue: { balance: nextMoney, itemKey: inventoryItemKey(itemData), itemId: inventoryItemId(itemData), itemType },
+        metadata: { price: Number(price), item: itemData }
+      });
       await client.query("COMMIT");
 
       const fresh = await loadPostgresAccount(account.id);
@@ -5931,6 +6174,16 @@ async function buyTimedItemPostgres(account, item, duration, price, dailyQuestId
           { type: dailySourceType, id: String(purchase.rows[0].id) }
         );
       }
+
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "purchase",
+        category: Number(itemData?.itype || 0) === 4 ? "taunts" : "enhancers",
+        description: `Покупка ${itemData.name || itemData.sn || itemKey} на ${duration} за ${price} монет`,
+        oldValue: { balance: money, item: jsonValue(existing.rows[0]?.item_data, null) },
+        newValue: { balance: nextMoney, item: itemData },
+        metadata: { price: Number(price), duration, itemKey }
+      });
 
       await client.query("COMMIT");
 
@@ -6082,6 +6335,17 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
         new Date(),
         { type: "weapon-upgrade-purchase", id: String(purchase.rows[0].id) }
       );
+
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "weapon_upgrade",
+        category: "workshop",
+        severity: "notice",
+        description: `Улучшение оружия ${itemData.name || itemData.sn || itemKey} за ${price} монет`,
+        oldValue: { balance: money, item: existingItem },
+        newValue: { balance: nextMoney, item: itemData },
+        metadata: { price: Number(price), itemKey, upgradeId: inventoryItemId(itemData) }
+      });
 
       await client.query("COMMIT");
 
@@ -6403,11 +6667,21 @@ async function changeName(account, url) {
   if (initialSetRequested && !account.namePending) return { result: false, names: [], err: [{ n: 1 }] };
   if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
   if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
+  const previousName = account.name;
   account.name = name;
   if (initialSetRequested) account.namePending = false;
   persist(account);
   refreshAllAccountClanSummaries(store);
   saveStore(store);
+  await auditGameEvent(pgPool, {
+    playerId: account.id,
+    eventType: "player_name_change",
+    category: "profile",
+    severity: "notice",
+    description: `Ник изменён: ${previousName} → ${account.name}`,
+    oldValue: { name: previousName },
+    newValue: { name: account.name }
+  });
   return ok({
     names: [],
     name: account.name,
@@ -6472,6 +6746,16 @@ async function buyAbilityPostgres(account, url) {
            updated_at = now()`,
         [Number(account.id), Number(next.i), Number(next.l)]
       );
+
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "purchase",
+        category: "abilities",
+        description: `Покупка способности #${next.i}, уровень ${next.l} за ${price} монет`,
+        oldValue: { balance: money, ability: abilities.find((owned) => Number(owned.i) === id) || null },
+        newValue: { balance: nextMoney, ability: { id: Number(next.i), level: Number(next.l) } },
+        metadata: { price: Number(price) }
+      });
 
       await client.query("COMMIT");
 
@@ -6790,6 +7074,17 @@ async function incrementDailyQuestProgressWithClient(client, playerId, questIds,
      RETURNING slot, quest_id, target, progress, difficulty`,
     [id, date, acceptedIds, increment]
   );
+  for (const row of result.rows) {
+    await writeAuditEvent(client, {
+      playerId: id,
+      eventType: "daily_quest_progress",
+      category: "progress",
+      description: `Прогресс ежедневного задания #${row.quest_id}: ${row.progress}/${row.target}`,
+      newValue: { questId: Number(row.quest_id), progress: Number(row.progress), target: Number(row.target), increment },
+      source: source?.type ? "battle_server" : "game_api",
+      metadata: { sourceType, sourceId, difficulty: row.difficulty, slot: Number(row.slot) }
+    });
+  }
   return result.rows;
 }
 
@@ -6825,6 +7120,7 @@ async function claimDailyQuest(account, url, now = new Date()) {
   const client = await pgPool.connect();
   try {
     await client.query("BEGIN");
+    const oldMoney = Number(account.money || 0);
     const result = await client.query(
       `SELECT quest_id, target, progress, reward_exp, reward_coins, claimed
        FROM daily_quests
@@ -6842,7 +7138,7 @@ async function claimDailyQuest(account, url, now = new Date()) {
       await client.query("ROLLBACK");
       return { result: false, error: "daily_incomplete" };
     }
-    const expState = await awardPlayerExperience(client, account.id, quest.reward_exp);
+    const expState = await awardPlayerExperience(client, account.id, quest.reward_exp, "daily_quest");
     const moneyResult = await client.query(
       `UPDATE players SET money = money + $2, updated_at = now() WHERE id = $1 RETURNING money`,
       [Number(account.id), Number(quest.reward_coins)]
@@ -6852,6 +7148,17 @@ async function claimDailyQuest(account, url, now = new Date()) {
        WHERE player_id = $1 AND quest_date = $2::date AND slot = $3`,
       [Number(account.id), date, slot]
     );
+    const nextMoney = Number(moneyResult.rows[0]?.money || oldMoney);
+    await auditGameEvent(client, {
+      playerId: account.id,
+      eventType: "daily_quest_claim",
+      category: "progress",
+      severity: "notice",
+      description: `Выполнено ежедневное задание #${quest.quest_id}`,
+      oldValue: { balance: oldMoney, exp: expState?.expBefore ?? account.exp },
+      newValue: { balance: nextMoney, exp: expState?.exp ?? account.exp, rewardExp: Number(quest.reward_exp), rewardCoins: Number(quest.reward_coins) },
+      metadata: { date, slot, questId: Number(quest.quest_id) }
+    });
     await client.query("COMMIT");
     account.money = Number(moneyResult.rows[0]?.money || account.money || 0);
     if (expState) {
@@ -7383,7 +7690,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
         nuts
       });
       if (expAwarded > 0) {
-        const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded);
+        const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded, "battle_server");
         if (expResult) {
           details.expAwarded = expAwarded;
           details.expResult = expResult;
@@ -7609,6 +7916,72 @@ async function recordBattleEvent(event) {
       }
     }
 
+    const remoteIp = String(event.playerData?.remote || details.remote || "").slice(0, 128);
+    if (type === "join" || type === "leave") {
+      await touchPlayerActivity(client, {
+        playerId,
+        kind: type === "join" ? "login" : "logout",
+        ipAddress: remoteIp,
+        source: "battle_server"
+      });
+      await writeAuditEvent(client, {
+        playerId,
+        playerName: event.playerName,
+        eventType: type === "join" ? "player_login" : "player_logout",
+        category: "session",
+        severity: "info",
+        description: type === "join" ? `Игрок вошёл в бой ${roomName}` : `Игрок вышел из боя ${roomName}`,
+        source: "battle_server",
+        ipAddress: remoteIp,
+        metadata: { roomName, mapName, mode, actorId, serverPort }
+      });
+    }
+    if (type === "summary") {
+      await writeAuditEvent(client, {
+        playerId,
+        playerName: event.playerName,
+        eventType: "statistics_change",
+        category: "battle",
+        description: `Обновлена статистика матча на карте ${mapName}`,
+        newValue: details,
+        source: "battle_server",
+        metadata: { roomName, mapName, mode }
+      });
+    }
+    if (type === "death" || type === "score") {
+      const killerId = Number(event.killerPlayerId || details.killerPlayerId || 0);
+      const victimId = Number(event.victimPlayerId || details.victimPlayerId || 0);
+      const combatValue = {
+        roomName,
+        mapName,
+        mode,
+        weaponId: Number(event.weaponId || details.weaponId || 0),
+        hitZone: Number(event.hitZone || details.hitZone || 0),
+        killerPlayerId: killerId,
+        victimPlayerId: victimId
+      };
+      if (killerId > 0 && killerId !== victimId) {
+        await writeAuditEvent(client, {
+          playerId: killerId,
+          eventType: "battle_kill",
+          category: "battle",
+          description: `Убийство игрока #${victimId} на карте ${mapName}`,
+          newValue: combatValue,
+          source: "battle_server"
+        });
+      }
+      if (victimId > 0) {
+        await writeAuditEvent(client, {
+          playerId: victimId,
+          eventType: "battle_death",
+          category: "battle",
+          description: `Смерть от игрока #${killerId} на карте ${mapName}`,
+          newValue: combatValue,
+          source: "battle_server"
+        });
+      }
+    }
+
     await client.query("COMMIT");
     return { ok: true, storage: "postgres", roomId, type, achievements };
   } catch (error) {
@@ -7632,6 +8005,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const requestOrigin = requestPublicOrigin(req, url);
+
+  if (await adminLogsApi.handle(req, res, url)) {
+    return;
+  }
 
   if (url.pathname === "/" || url.pathname === "/auth") {
     sendHtml(res, "<h1>Contra City legacy API</h1><p>API online.</p>");
@@ -7705,6 +8082,17 @@ const server = http.createServer(async (req, res) => {
       }
       const removed = await resetLauncherDeviceBinding(ccid);
       console.log(`[launcher-device] admin reset player=${ccid} removed=${removed}`);
+      await writeAuditEvent(pgPool, {
+        playerId: ccid,
+        eventType: "admin_device_reset",
+        category: "security",
+        severity: "warning",
+        description: `Администратор сбросил привязку устройства: ${removed ? "удалена" : "не найдена"}`,
+        source: "legacy_admin_token",
+        ipAddress: requestClientIp(req),
+        device: String(req.headers["user-agent"] || "").slice(0, 300),
+        newValue: { removed }
+      });
       sendJson(res, { ok: true, ccid, removed });
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "device_reset_failed" }, 500);
@@ -7756,6 +8144,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const launcherSession = createLauncherSession(account);
+    await recordPlayerAccess(account, req, "login", "launcher_session");
     sendJson(res, {
       result: true,
       ccid: account.id,
@@ -7773,6 +8162,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { result: false, error: "invalid_session" }, 403);
       return;
     }
+    await recordPlayerAccess(account, req, "login", "web_session");
     sendJson(res, {
       result: true,
       ...sessionPayload(account, requestOrigin)
@@ -7786,6 +8176,7 @@ const server = http.createServer(async (req, res) => {
       sendHtml(res, "<h1>Contra City login</h1><p>Ссылка входа недействительна.</p>", 403);
       return;
     }
+    await recordPlayerAccess(account, req, "login", "login_link");
     sendHtml(
       res,
       `<h1>Contra City login</h1><p>Ссылка активна для ${escapeHtml(account.name)} (#${account.id}).</p>`,
@@ -7808,7 +8199,13 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { result: false, error: "1" }, 403);
       return;
     }
-    sendJson(res, await routeAjax(url, account, requestOrigin), 200, { "Set-Cookie": cookieHeaders(account) });
+    const auditContext = {
+      ipAddress: requestClientIp(req),
+      device: String(req.headers["user-agent"] || "").slice(0, 300),
+      source: "game_api"
+    };
+    const payload = await requestAuditContext.run(auditContext, () => routeAjax(url, account, requestOrigin));
+    sendJson(res, payload, 200, { "Set-Cookie": cookieHeaders(account) });
     return;
   }
 
@@ -7832,6 +8229,25 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "battle_social_failed" }, 500);
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/clan-events") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      sendJson(res, await battleClanTreasuryEvents(body));
+    } catch (error) {
+      console.error("[clan-live] treasury-feed failed", error);
+      sendJson(res, { ok: false, error: error.message || "clan_treasury_feed_failed" }, 500);
     }
     return;
   }
@@ -7878,6 +8294,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Contra City legacy API listening on ${PORT} build=${API_BUILD_ID}`);
+  if (!adminLogsStatus?.configured) console.warn(`[admin-logs] owner account is not configured reason=${adminLogsStatus?.reason || "unknown"}`);
+  else console.log(`[admin-logs] owner ready id=${adminLogsStatus.ownerId}`);
   if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
   if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
   if (!CREATE_CODE) console.warn("[security] CREATE_CODE is not set; /create account creation is disabled.");
