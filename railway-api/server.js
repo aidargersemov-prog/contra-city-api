@@ -8,7 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-12-admin-audit-panel-v42";
+const API_BUILD_ID = "railway-api-2026-07-12-clan-treasury-canonical-live-v44";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -4038,6 +4038,64 @@ async function battleClanTreasuryEvents(body) {
   const afterId = Math.max(0, Math.trunc(Number(body?.afterId || 0)));
   const limit = Math.max(1, Math.min(200, Math.trunc(Number(body?.limit || 100))));
   const initialize = body?.initialize === true;
+  const exactEventId = Math.max(0, Math.trunc(Number(body?.eventId || 0)));
+  const expectedClanId = Math.max(0, Math.trunc(Number(body?.clanId || 0)));
+  const expectedPlayerId = Math.max(0, Math.trunc(Number(body?.playerId || 0)));
+
+  if (exactEventId > 0) {
+    if (expectedClanId <= 0 || expectedPlayerId <= 0) {
+      return { ok: false, error: "invalid_clan_treasury_event_identity" };
+    }
+
+    let exactEvent = null;
+    if (pgPool) {
+      const result = await pgPool.query(
+        `SELECT id, clan_id, player_id, player_name, money, event_type, created_at
+         FROM clan_treasury_events
+         WHERE id = $1 AND clan_id = $2 AND player_id = $3 AND event_type = $4
+         LIMIT 1`,
+        [exactEventId, expectedClanId, expectedPlayerId, CLAN_TREASURY_EVENT_TYPE.ADD]
+      );
+      const row = result.rows[0];
+      if (row) {
+        exactEvent = {
+          id: Number(row.id),
+          clanId: Number(row.clan_id),
+          playerId: Number(row.player_id || 0),
+          playerName: String(row.player_name || ""),
+          money: Number(row.money || 0),
+          type: Number(row.event_type || 0),
+          createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || "")
+        };
+      }
+    } else {
+      exactEvent = Object.values(store.clans?.byId || {})
+        .flatMap((clan) => clan?.treasuryEvents || [])
+        .map(normalizeClanTreasuryRecord)
+        .filter(Boolean)
+        .find((event) => (
+          Number(event.id) === exactEventId &&
+          Number(event.clanId) === expectedClanId &&
+          Number(event.playerId) === expectedPlayerId &&
+          Number(event.type) === CLAN_TREASURY_EVENT_TYPE.ADD
+        )) || null;
+      if (exactEvent) {
+        exactEvent = {
+          id: Number(exactEvent.id),
+          clanId: Number(exactEvent.clanId),
+          playerId: Number(exactEvent.playerId || 0),
+          playerName: String(exactEvent.playerName || ""),
+          money: Number(exactEvent.money || 0),
+          type: Number(exactEvent.type || 0),
+          createdAt: String(exactEvent.createdAt || "")
+        };
+      }
+    }
+
+    console.log(`[clan-live] treasury-exact event=${exactEventId} clan=${expectedClanId} player=${expectedPlayerId} found=${exactEvent ? 1 : 0}`);
+    return { ok: true, cursor: exactEventId, events: exactEvent ? [exactEvent] : [] };
+  }
+
   if (initialize) {
     const cursor = pgPool
       ? Number((await pgPool.query(
@@ -4275,10 +4333,7 @@ function clanTreasuryAddResponse(account, clan, eventId) {
   refreshAccountClan(account);
   return ok({
     id: Number(eventId),
-    cid: Number(clan.id),
-    vcur: Number(account.money || 0),
-    vc: Number(clan.money || 0),
-    cinfo: clanPayload(clan, { full: true })
+    cid: Number(clan.id)
   });
 }
 
