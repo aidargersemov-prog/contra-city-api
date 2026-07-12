@@ -223,6 +223,12 @@ function eventFilterSql(url, { includePagination = true } = {}) {
     if (convert === Number && (!Number.isInteger(value) || value <= 0)) continue;
     addFilter(conditions, values, sql, value);
   }
+  const categories = cleanText(url.searchParams.get("categories"), 300)
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => /^[a-z0-9_]{1,50}$/i.test(value))
+    .slice(0, 20);
+  if (categories.length) addFilter(conditions, values, "e.category = ANY(?::text[])", categories);
   const suspicious = url.searchParams.get("suspicious");
   if (suspicious === "true" || suspicious === "false") addFilter(conditions, values, "e.suspicious = ?", suspicious === "true");
   const from = cleanText(url.searchParams.get("dateFrom") || dateFromPeriod(url.searchParams.get("period")), 40);
