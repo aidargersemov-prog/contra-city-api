@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-12-zombie-active-round-spectator-v264";
+const BUILD_ID = "battle-server-2026-07-12-clan-treasury-canonical-live-v265";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -22,6 +22,7 @@ const PRIMARY_BATTLE_PORT = PORTS.find((port) => port !== GAME_MASTER_PORT && !S
 const CLAN_TREASURY_POLL_MS = Math.max(250, Number(process.env.CLAN_TREASURY_POLL_MS || 750));
 const CLAN_TREASURY_POLL_LIMIT = Math.max(1, Math.min(200, Number(process.env.CLAN_TREASURY_POLL_LIMIT || 100)));
 const CLAN_TREASURY_EVENT_ADD = 17;
+const CLAN_TREASURY_RECORD_ADD = 1;
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const PLAYER_BASE_SPEED10 = 130;
@@ -160,7 +161,7 @@ const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.e
 const sessions = new Map();
 const rooms = new Map();
 const masterSessionsByPlayerId = new Map();
-const deliveredClanTreasuryEvents = new Map();
+const clanTreasuryLiveEvents = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
 const udpRateByIp = new Map();
@@ -9023,21 +9024,32 @@ function clanTreasuryDeliveryKey(clanId, eventId) {
   return `${normalizedClanId}:${normalizedEventId}`;
 }
 
-function hasDeliveredClanTreasuryEvent(clanId, eventId) {
+function cachedClanTreasuryEvent(clanId, eventId) {
   const key = clanTreasuryDeliveryKey(clanId, eventId);
-  return Boolean(key) && deliveredClanTreasuryEvents.has(key);
+  return key ? clanTreasuryLiveEvents.get(key) || null : null;
 }
 
-function rememberDeliveredClanTreasuryEvent(clanId, eventId, source) {
-  const key = clanTreasuryDeliveryKey(clanId, eventId);
-  if (!key) return false;
-  deliveredClanTreasuryEvents.set(key, { at: Date.now(), source: String(source || "unknown") });
-  while (deliveredClanTreasuryEvents.size > 4096) {
-    const oldest = deliveredClanTreasuryEvents.keys().next().value;
-    if (!oldest) break;
-    deliveredClanTreasuryEvents.delete(oldest);
+function rememberClanTreasuryEvent(prepared) {
+  const key = clanTreasuryDeliveryKey(prepared?.clanId, prepared?.eventId);
+  if (!key) return null;
+  let state = clanTreasuryLiveEvents.get(key);
+  if (!state) {
+    state = {
+      prepared,
+      deliveredSessions: new WeakSet(),
+      at: Date.now(),
+    };
+    clanTreasuryLiveEvents.set(key, state);
+  } else {
+    state.prepared = prepared;
+    state.at = Date.now();
   }
-  return true;
+  while (clanTreasuryLiveEvents.size > 4096) {
+    const oldest = clanTreasuryLiveEvents.keys().next().value;
+    if (!oldest) break;
+    clanTreasuryLiveEvents.delete(oldest);
+  }
+  return state;
 }
 
 function activeMasterSessionList() {
@@ -9070,33 +9082,81 @@ function makeServerClanTreasuryEvent(item) {
     eventId,
     clanId,
     playerId,
+    playerName,
     money,
     payload: rawMasterEvent(209, playerId, envelope),
   };
 }
 
-function pushServerClanTreasuryEvent(item) {
-  const prepared = makeServerClanTreasuryEvent(item);
-  if (!prepared) return { processed: true, sent: 0, invalid: true };
-  if (hasDeliveredClanTreasuryEvent(prepared.clanId, prepared.eventId)) {
-    console.log(`[master-social] clan-treasury-push duplicate clan=${prepared.clanId} event=${prepared.eventId} source=feed`);
-    return { processed: true, sent: 0, duplicate: true };
-  }
-
-  const targetSessions = activeMasterSessionList();
-  if (targetSessions.length === 0) {
-    console.log(`[master-social] clan-treasury-push skipped clan=${prepared.clanId} event=${prepared.eventId} reason=no-master-sessions`);
-    return { processed: true, sent: 0, noSessions: true };
+function deliverClanTreasuryEvent(prepared, targetSessions, source = "server-feed") {
+  const state = rememberClanTreasuryEvent(prepared);
+  if (!state) return { processed: true, sent: 0, invalid: true };
+  const sessionsToNotify = Array.from(targetSessions || activeMasterSessionList());
+  if (sessionsToNotify.length === 0) {
+    console.log(`[master-social] clan-treasury cached clan=${prepared.clanId} event=${prepared.eventId} source=${source} reason=no-master-sessions`);
+    return { processed: true, sent: 0, skipped: 0, failed: 0, noSessions: true };
   }
 
   let sent = 0;
-  for (const targetSession of targetSessions) {
-    if (sendReliableToSession(targetSession, prepared.payload, targetSession.lastChannel || 0)) sent += 1;
+  let skipped = 0;
+  let failed = 0;
+  for (const targetSession of sessionsToNotify) {
+    if (!targetSession || typeof targetSession !== "object") continue;
+    if (state.deliveredSessions.has(targetSession)) {
+      skipped += 1;
+      continue;
+    }
+    if (!sendReliableToSession(targetSession, prepared.payload, targetSession.lastChannel || 0)) {
+      failed += 1;
+      continue;
+    }
+    state.deliveredSessions.add(targetSession);
+    sent += 1;
   }
-  if (sent <= 0) return { processed: false, sent: 0, retry: true };
-  rememberDeliveredClanTreasuryEvent(prepared.clanId, prepared.eventId, "server-feed");
-  console.log(`[master-social] clan-treasury-push clan=${prepared.clanId} event=${prepared.eventId} player=${prepared.playerId} money=${prepared.money} sessions=${sent} source=server-feed`);
-  return { processed: true, sent };
+
+  console.log(`[master-social] clan-treasury-deliver clan=${prepared.clanId} event=${prepared.eventId} player=${prepared.playerId} money=${prepared.money} sessions=${sent} skipped=${skipped} failed=${failed} source=${source}`);
+  return {
+    processed: failed === 0 || sent > 0 || skipped > 0,
+    sent,
+    skipped,
+    failed,
+  };
+}
+
+function pushServerClanTreasuryEvent(item, options = {}) {
+  const prepared = makeServerClanTreasuryEvent(item);
+  if (!prepared) return { processed: true, sent: 0, invalid: true };
+  return deliverClanTreasuryEvent(
+    prepared,
+    options.targetSessions || null,
+    String(options.source || "server-feed")
+  );
+}
+
+async function loadCommittedClanTreasuryEvent(eventId, clanId, playerId) {
+  const cached = cachedClanTreasuryEvent(clanId, eventId);
+  if (cached?.prepared) return cached.prepared;
+  if (!API_TOKEN) return null;
+
+  const response = await postApiJson("/battle/clan-events", {
+    eventId,
+    clanId,
+    playerId,
+  });
+  if (!response || response.ok === false || !Array.isArray(response.events)) {
+    throw new Error(response?.error || "invalid-clan-treasury-exact-response");
+  }
+  const item = response.events[0];
+  if (!item) return null;
+  if (
+    Number(item.id) !== Number(eventId) ||
+    Number(item.clanId) !== Number(clanId) ||
+    Number(item.playerId) !== Number(playerId) ||
+    Number(item.type) !== CLAN_TREASURY_RECORD_ADD
+  ) {
+    throw new Error("clan-treasury-exact-identity-mismatch");
+  }
+  return item;
 }
 
 async function runClanTreasuryLivePoll() {
@@ -9397,10 +9457,35 @@ async function handleMasterEvent(session, parsed) {
     const treasuryEventId = clanEventCode === CLAN_TREASURY_EVENT_ADD
       ? Number(htGet(clanEventData, 3)?.value || 0)
       : 0;
-    if (treasuryEventId > 0 && hasDeliveredClanTreasuryEvent(clanId, treasuryEventId)) {
-      console.log(`[master-social] clan-event duplicate user=${userId} clan=${clanId} code=${clanEventCode} event=${treasuryEventId} source=client`);
+
+    if (clanEventCode === CLAN_TREASURY_EVENT_ADD) {
+      if (clanId <= 0 || treasuryEventId <= 0 || subjectUserId !== userId) {
+        console.log(`[master-social] clan-treasury-signal rejected user=${userId} clan=${clanId} event=${treasuryEventId || 0} subject=${subjectUserId || 0} reason=invalid-identity`);
+        return [];
+      }
+
+      let committedEvent = null;
+      try {
+        committedEvent = await loadCommittedClanTreasuryEvent(treasuryEventId, clanId, userId);
+      } catch (error) {
+        console.log(`[master-social] clan-treasury-signal failed user=${userId} clan=${clanId} event=${treasuryEventId} ${error.message}`);
+      }
+      if (!committedEvent) {
+        console.log(`[master-social] clan-treasury-signal pending user=${userId} clan=${clanId} event=${treasuryEventId} source=client`);
+        void runClanTreasuryLivePoll();
+        return [];
+      }
+
+      const targetSessions = new Set([session]);
+      for (const targetSession of activeMasterSessionList()) targetSessions.add(targetSession);
+      const delivery = pushServerClanTreasuryEvent(committedEvent, {
+        targetSessions,
+        source: "client-commit-signal",
+      });
+      console.log(`[master-social] clan-treasury-signal user=${userId} clan=${clanId} event=${treasuryEventId} sessions=${delivery.sent || 0} skipped=${delivery.skipped || 0} failed=${delivery.failed || 0} canonical=database`);
       return [];
     }
+
     const event = rawMasterEvent(209, userId, data.raw);
     const targetSessions = new Set([session]);
     for (const [playerId] of masterSessionsByPlayerId.entries()) {
@@ -9417,10 +9502,7 @@ async function handleMasterEvent(session, parsed) {
       if (targetSession === session) senderSent += 1;
       if (subjectUserId > 0 && Number(targetSession.playerId || 0) === subjectUserId) subjectSent += 1;
     }
-    if (treasuryEventId > 0 && sent > 0) {
-      rememberDeliveredClanTreasuryEvent(clanId, treasuryEventId, "client-event209");
-    }
-    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} event=${treasuryEventId || 0} subject=${subjectUserId || 0} sessions=${sent} sender=${senderSent} subjectSessions=${subjectSent}`);
+    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} subject=${subjectUserId || 0} sessions=${sent} sender=${senderSent} subjectSessions=${subjectSent}`);
     return [];
   }
 
@@ -10184,7 +10266,7 @@ async function handleUdp(port, socket, msg, rinfo) {
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
-console.log(`[config] clanTreasuryServerPush=${API_TOKEN ? "on" : "off-token-missing"} poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
+console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=exact-event poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
