@@ -67,7 +67,8 @@ const server = http.createServer((req, res) => {
       return;
     }
     const type = CONTENT_TYPES.get(path.extname(resolved).toLowerCase()) || "application/octet-stream";
-    send(res, 200, body, type, /\.(css|js|png|ico)$/.test(resolved) ? "public, max-age=3600" : "no-store");
+    const cache = /\.(png|ico)$/.test(resolved) ? "public, max-age=3600" : "no-cache";
+    send(res, 200, body, type, cache);
   });
 });
 
