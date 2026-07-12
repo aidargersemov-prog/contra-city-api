@@ -39,10 +39,10 @@
       <nav class="main-nav" aria-label="Навигация">
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌂</span><span>Главная</span></button>
         <button class="nav-item" data-view="events"><span class="nav-icon">≡</span><span>Все события</span><em id="nav-event-count">0</em></button>
-        <button class="nav-item" data-filter-category="session"><span class="nav-icon">↪</span><span>Входы и выходы</span></button>
-        <button class="nav-item" data-filter-category="economy"><span class="nav-icon">●</span><span>Покупки и монеты</span></button>
-        <button class="nav-item" data-filter-category="clan"><span class="nav-icon">♛</span><span>Кланы</span></button>
-        <button class="nav-item" data-filter-category="progress"><span class="nav-icon">✓</span><span>Задания и опыт</span></button>
+        <button class="nav-item" data-filter-categories="session" data-page-title="Входы и выходы"><span class="nav-icon">↪</span><span>Входы и выходы</span></button>
+        <button class="nav-item" data-filter-categories="economy,weapons,workshop,clothes,taunts,enhancers,abilities,inventory" data-page-title="Покупки и монеты"><span class="nav-icon">●</span><span>Покупки и монеты</span></button>
+        <button class="nav-item" data-filter-categories="clan" data-page-title="Кланы"><span class="nav-icon">♛</span><span>Кланы</span></button>
+        <button class="nav-item" data-filter-categories="progress" data-page-title="Задания и опыт"><span class="nav-icon">✓</span><span>Задания и опыт</span></button>
         <button class="nav-item danger-nav" data-suspicious="true"><span class="nav-icon">!</span><span>Подозрительное</span><em id="nav-risk-count">0</em></button>
         <button class="nav-item owner-only hidden" data-view="admins"><span class="nav-icon">♟</span><span>Администраторы</span></button>
       </nav>
@@ -61,7 +61,6 @@
         <button id="menu-button" class="icon-button menu-button" aria-label="Открыть меню">☰</button>
         <h1 id="page-title">Главная</h1>
         <div class="topbar-actions">
-          <input id="auto-refresh" class="hidden" type="checkbox" checked>
           <button id="refresh-button" class="icon-button" title="Обновить">↻</button>
           <button id="export-button" class="button secondary export-capability">Скачать логи</button>
         </div>

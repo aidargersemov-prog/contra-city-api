@@ -25,7 +25,10 @@ const TYPE_LABELS = {
   experience_change: "Изменение опыта", level_change: "Новый уровень", statistics_change: "Статистика",
   battle_kill: "Убийство", battle_death: "Смерть", balance_change: "Изменение баланса",
   inventory_change: "Изменение инвентаря", admin_punishment: "Наказание", admin_login: "Вход администратора",
-  admin_permissions_change: "Права администратора", admin_device_reset: "Сброс устройства"
+  admin_permissions_change: "Права администратора", admin_device_reset: "Сброс устройства",
+  player_state_change: "Изменение игрока", clan_state_change: "Изменение клана",
+  clan_treasury_spend: "Расходы клана", clan_owner_change: "Новый владелец клана",
+  clan_tag_change: "Новый тег клана", clan_access_change: "Настройки клана"
 };
 const CATEGORY_ICONS = {
   session: "↳", economy: "◈", weapons: "⌁", workshop: "⌁", clothes: "◇", taunts: "☺",
@@ -46,7 +49,6 @@ const state = {
   pageSize: 30,
   filters: {},
   search: "",
-  refreshTimer: null,
   latestEventId: 0
 };
 
@@ -125,6 +127,7 @@ function eventValue(event) {
   const newBalance = Number(event.newValue?.balance);
   if (Number.isFinite(oldBalance) && Number.isFinite(newBalance)) {
     const delta = newBalance - oldBalance;
+    if (delta === 0) return "";
     return `${delta > 0 ? "+" : ""}${formatNumber(delta)}`;
   }
   const price = event.metadata?.price;
@@ -132,6 +135,20 @@ function eventValue(event) {
   if (event.newValue?.rewardCoins) return `+${formatNumber(event.newValue.rewardCoins)}`;
   if (event.newValue?.delta) return `${Number(event.newValue.delta) > 0 ? "+" : ""}${formatNumber(event.newValue.delta)}`;
   return event.severity === "critical" ? "КРИТИЧНО" : event.suspicious ? "РИСК" : "";
+}
+
+function eventDescription(event) {
+  const changedFields = Array.isArray(event.metadata?.changedFields) ? event.metadata.changedFields : [];
+  if (event.eventType === "player_state_change") {
+    const labels = {
+      balance: "баланс", experience: "опыт", level: "уровень", statistics: "статистика",
+      view: "одежда", weapons: "выбранное оружие", taunts: "насмешки"
+    };
+    const changes = changedFields.map((field) => labels[field]).filter(Boolean);
+    return changes.length ? `Изменено: ${changes.join(", ")}` : "Изменены данные игрока";
+  }
+  if (event.eventType === "clan_state_change") return "Изменены данные клана";
+  return event.description;
 }
 
 function renderEventRows(events, compact = false) {
@@ -143,7 +160,7 @@ function renderEventRows(events, compact = false) {
       <span class="event-icon">${escapeHtml(CATEGORY_ICONS[category] || "·")}</span>
       <span class="event-person" ${event.playerId ? `data-player-id="${event.playerId}"` : ""}><b>${escapeHtml(event.playerName || (event.playerId ? `Игрок #${event.playerId}` : "Игра"))}</b><small>${event.playerId ? `ID ${event.playerId}` : "Событие игры"}</small></span>
       <span class="event-clan" ${event.clanId ? `data-clan-id="${event.clanId}"` : ""}><b>${escapeHtml(event.clanName || "Без клана")}</b><small>${event.clanId ? `КЛАН #${event.clanId}` : "—"}</small></span>
-      <span class="event-description"><span class="event-type">${escapeHtml(type)}</span><p>${escapeHtml(event.description)}</p></span>
+      <span class="event-description"><span class="event-type">${escapeHtml(type)}</span><p>${escapeHtml(eventDescription(event))}</p></span>
       <span class="event-value ${event.suspicious ? "risk-flag" : ""}">${escapeHtml(eventValue(event))}</span>
       <time class="event-time" datetime="${escapeHtml(event.createdAt)}">${escapeHtml(formatDate(event.createdAt, true))}${event.reviewStatus !== "unchecked" ? `<br>${escapeHtml(reviewLabel(event.reviewStatus))}` : ""}</time>
     </article>`;
@@ -170,7 +187,6 @@ function signOut(callApi = true) {
   state.token = "";
   state.admin = null;
   sessionStorage.removeItem("cc_log_token");
-  clearInterval(state.refreshTimer);
   $("#app-view").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
   $("#password-input").value = "";
@@ -191,7 +207,6 @@ async function boot() {
 
 async function loadInitialData() {
   await Promise.all([loadMeta(), loadStats()]);
-  startAutoRefresh();
 }
 
 async function loadMeta() {
@@ -330,13 +345,18 @@ async function loadAdmins() {
   } catch (error) { toast(error.message, "error"); }
 }
 
-function switchView(view) {
+function setActiveNav(activeNode) {
+  $$(".nav-item").forEach((node) => node.classList.toggle("active", node === activeNode));
+}
+
+function switchView(view, options = {}) {
   state.currentView = view;
   $$(".content-view").forEach((node) => node.classList.add("hidden"));
   $(`#${view}-view`)?.classList.remove("hidden");
-  $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === view));
   const titles = { dashboard: "Главная", events: "Все события", admins: "Администраторы" };
-  $("#page-title").textContent = titles[view] || titles.dashboard;
+  const activeNode = options.nav || $(`.nav-item[data-view="${view}"]`);
+  setActiveNav(activeNode);
+  $("#page-title").textContent = options.title || titles[view] || titles.dashboard;
   $("#sidebar").classList.remove("open");
   if (view === "events") loadEvents();
   if (view === "admins") loadAdmins();
@@ -356,17 +376,10 @@ function applyFiltersFromForm() {
   $("#filter-count").textContent = count;
   $("#filter-count").classList.toggle("hidden", count === 0);
   $("#active-filter-label").textContent = count ? `Активных фильтров: ${count}` : "Все категории";
+  setActiveNav($(".nav-item[data-view=\"events\"]"));
+  $("#page-title").textContent = "Все события";
   closeFilters();
   loadEvents();
-}
-
-function startAutoRefresh() {
-  clearInterval(state.refreshTimer);
-  state.refreshTimer = setInterval(() => {
-    if (!$("#auto-refresh").checked || document.hidden) return;
-    if (state.currentView === "dashboard") loadStats(true);
-    if (state.currentView === "events") loadEvents(true);
-  }, 10000);
 }
 
 async function exportCsv() {
@@ -453,11 +466,49 @@ function bindUi() {
     const eventNode = event.target.closest("[data-event-id]");
     if (eventNode) { openEvent(eventNode.dataset.eventId); return; }
     const nav = event.target.closest(".nav-item[data-view]");
-    if (nav) { switchView(nav.dataset.view); return; }
+    if (nav) {
+      if (nav.dataset.view === "events") {
+        state.filters = {};
+        state.search = "";
+        state.page = 1;
+        $("#search-input").value = "";
+        $("#filter-form").reset();
+        $("#filter-count").classList.add("hidden");
+        $("#active-filter-label").textContent = "Все события";
+      }
+      switchView(nav.dataset.view, { nav });
+      return;
+    }
+    const categoryGroup = event.target.closest(".nav-item[data-filter-categories]");
+    if (categoryGroup) {
+      state.filters = { categories: categoryGroup.dataset.filterCategories };
+      state.search = "";
+      state.page = 1;
+      $("#search-input").value = "";
+      $("#filter-form").reset();
+      $("#filter-count").classList.add("hidden");
+      $("#active-filter-label").textContent = categoryGroup.dataset.pageTitle;
+      switchView("events", { nav: categoryGroup, title: categoryGroup.dataset.pageTitle });
+      return;
+    }
     const category = event.target.closest("[data-filter-category]");
-    if (category) { state.filters = { category: category.dataset.filterCategory }; state.page = 1; switchView("events"); return; }
+    if (category) {
+      state.filters = { category: category.dataset.filterCategory };
+      state.page = 1;
+      const matchingNav = $(`.nav-item[data-filter-categories="${category.dataset.filterCategory}"]`);
+      const title = matchingNav?.dataset.pageTitle || "Все события";
+      $("#active-filter-label").textContent = title;
+      switchView("events", { nav: matchingNav || $(".nav-item[data-view=\"events\"]"), title });
+      return;
+    }
     const suspicious = event.target.closest("[data-suspicious]");
-    if (suspicious) { state.filters = { suspicious: "true" }; state.page = 1; switchView("events"); }
+    if (suspicious) {
+      state.filters = { suspicious: "true" };
+      state.page = 1;
+      const riskNav = $(".nav-item[data-suspicious=\"true\"]");
+      $("#active-filter-label").textContent = "Подозрительные события";
+      switchView("events", { nav: riskNav, title: "Подозрительные события" });
+    }
   });
 }
 
