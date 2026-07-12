@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-11-zombie-room-entry-speed-v261";
+const BUILD_ID = "battle-server-2026-07-12-zombie-active-round-spectator-v264";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -19,8 +19,12 @@ const SOCIAL_MASTER_PORTS = new Set(
     .filter(Boolean)
 );
 const PRIMARY_BATTLE_PORT = PORTS.find((port) => port !== GAME_MASTER_PORT && !SOCIAL_MASTER_PORTS.has(port)) || 5055;
+const CLAN_TREASURY_POLL_MS = Math.max(250, Number(process.env.CLAN_TREASURY_POLL_MS || 750));
+const CLAN_TREASURY_POLL_LIMIT = Math.max(1, Math.min(200, Number(process.env.CLAN_TREASURY_POLL_LIMIT || 100)));
+const CLAN_TREASURY_EVENT_ADD = 17;
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
+const PLAYER_BASE_SPEED10 = 130;
 const ZOMBIE_MIN_PLAYERS = 2;
 const ZOMBIE_BOSS_INFECTION_MS = 10000;
 const ZOMBIE_ROUND_RESTART_MS = 10500;
@@ -156,10 +160,15 @@ const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.e
 const sessions = new Map();
 const rooms = new Map();
 const masterSessionsByPlayerId = new Map();
+const deliveredClanTreasuryEvents = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
 const udpRateByIp = new Map();
 const tcpConnectionsByIp = new Map();
+let clanTreasuryPollCursor = 0;
+let clanTreasuryPollInitialized = false;
+let clanTreasuryPollInFlight = false;
+let clanTreasuryPollLastErrorAt = 0;
 
 function allowUdpPacket(rinfo, byteLength) {
   const address = String(rinfo?.address || "unknown");
@@ -3220,7 +3229,7 @@ function playerRuntimeStats(profile = null, options = {}) {
   const modifiers = gameplayModifiersForProfile(profile);
   const baseHealth = Number(process.env.DEFAULT_PLAYER_HEALTH || 100);
   const baseEnergy = Math.max(0, numberOr(process.env.DEFAULT_PLAYER_ENERGY, 0));
-  const baseSpeed10 = Number(options.baseSpeed10 ?? process.env.DEFAULT_PLAYER_SPEED10 ?? 130);
+  const baseSpeed10 = Number(options.baseSpeed10 ?? PLAYER_BASE_SPEED10);
   const baseJump = Number(process.env.DEFAULT_PLAYER_JUMP || 15);
   const calculatedHealth = Math.round((baseHealth + modifiers.healthFlat) * (1 + modifiers.healthPercent / 100));
   const maxHealth = Math.max(1, calculatedHealth, numberOr(modifiers.healthFloor, 0));
@@ -3243,10 +3252,7 @@ function playerRuntimeStats(profile = null, options = {}) {
 }
 
 function sessionRuntimeStats(session = null) {
-  const baseSpeed10 = isZombieModeValue(roomMode(session))
-    ? Number(process.env.DEFAULT_ZOMBIE_PLAYER_SPEED10 || 100)
-    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 130);
-  return playerRuntimeStats(session?.loadedProfile || null, { baseSpeed10 });
+  return playerRuntimeStats(session?.loadedProfile || null, { baseSpeed10: PLAYER_BASE_SPEED10 });
 }
 
 function makeWeaponDictionaryRaw(profile = null, slotLimit = JOIN_LOADOUT_SLOT_LIMIT, options = {}) {
@@ -3750,9 +3756,7 @@ function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw =
 }
 
 function updateActorWireData(session, incomingActor, profile, channel = 0) {
-  const baseSpeed10 = isZombieModeValue(roomMode(session))
-    ? Number(process.env.DEFAULT_ZOMBIE_PLAYER_SPEED10 || 100)
-    : Number(process.env.DEFAULT_PLAYER_SPEED10 || 130);
+  const baseSpeed10 = PLAYER_BASE_SPEED10;
   session.actorJoinParam = incomingActor;
   session.actorRaw = makeActorDataRaw(incomingActor, profile, {
     weaponSlotLimit: FULL_LOADOUT_SLOT_LIMIT,
@@ -5470,17 +5474,23 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
   return sent;
 }
 
-function maybeAppendZombieLateJoinSpawn(session, responses, channel = 0) {
+function keepZombieLateJoinSpectator(session) {
   const room = session?.room;
-  if (!isZombieRoom(room) || !Array.isArray(responses)) return false;
+  if (!isZombieRoom(room)) return false;
   if (zombieModeForRoom(room) < ZOMBIE_MODE.BOSS_INFECTION || session.spawned) return false;
-  session.team = HUMAN_TEAM;
+  session.team = -1;
   session.zombieType = ZOMBIE_TYPE.HUMAN;
-  const spawnEvent = buildSpawnEvent(session, HUMAN_TEAM, "zombie-late-join");
-  responses.push(spawnEvent);
-  sendZombiePayloadToReadyRoom(room, spawnEvent, channel, session, []);
-  const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-late-join");
-  console.log(`[zombie] late-join spawn actor=${session.actorId} room=${room.name} mode=${zombieModeForRoom(room)} repairTargets=${repairTargets}`);
+  session.spawned = false;
+  session.dead = true;
+  session.moveSeen = false;
+  session.moveCount = 0;
+  session.waitingSelfSpawnMove = false;
+  session.lastTransform = null;
+  session.pendingSpawnBroadcast = null;
+  clearSpawnStallRecovery(session);
+  clearSpawnMoveWarningTimer(session);
+  clearSpawnSelfRetryTimers(session);
+  console.log(`[zombie] late-join spectator actor=${session.actorId} room=${room.name} mode=${zombieModeForRoom(room)} spawn=deferred-next-round`);
   return true;
 }
 
@@ -8118,6 +8128,7 @@ function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round
   const normalizedWinner = Number(winnerTeam) === HUMAN_TEAM ? HUMAN_TEAM : ZOMBIE_TEAM;
   let posted = 0;
   for (const playerSession of zombieRoomPlayers(room)) {
+    if (!playerSession.spawned || ![ZOMBIE_TEAM, HUMAN_TEAM].includes(Number(playerSession.team))) continue;
     const won = Number(playerSession.team || 0) === normalizedWinner;
     if (postSessionBattleSummary(playerSession, reason, { won, eventData: { roundWinner: normalizedWinner } })) posted += 1;
   }
@@ -9004,6 +9015,126 @@ function rawMasterEvent(eventCode, actorId, dataRaw) {
   return rawEvent(eventCode, entries);
 }
 
+function clanTreasuryDeliveryKey(clanId, eventId) {
+  const normalizedClanId = Number(clanId || 0);
+  const normalizedEventId = Number(eventId || 0);
+  if (!Number.isInteger(normalizedClanId) || normalizedClanId <= 0) return "";
+  if (!Number.isInteger(normalizedEventId) || normalizedEventId <= 0) return "";
+  return `${normalizedClanId}:${normalizedEventId}`;
+}
+
+function hasDeliveredClanTreasuryEvent(clanId, eventId) {
+  const key = clanTreasuryDeliveryKey(clanId, eventId);
+  return Boolean(key) && deliveredClanTreasuryEvents.has(key);
+}
+
+function rememberDeliveredClanTreasuryEvent(clanId, eventId, source) {
+  const key = clanTreasuryDeliveryKey(clanId, eventId);
+  if (!key) return false;
+  deliveredClanTreasuryEvents.set(key, { at: Date.now(), source: String(source || "unknown") });
+  while (deliveredClanTreasuryEvents.size > 4096) {
+    const oldest = deliveredClanTreasuryEvents.keys().next().value;
+    if (!oldest) break;
+    deliveredClanTreasuryEvents.delete(oldest);
+  }
+  return true;
+}
+
+function activeMasterSessionList() {
+  const result = new Set();
+  for (const [playerId] of masterSessionsByPlayerId.entries()) {
+    for (const session of activeMasterSessionsForUser(playerId)) result.add(session);
+  }
+  return Array.from(result);
+}
+
+function makeServerClanTreasuryEvent(item) {
+  const eventId = Number(item?.id || 0);
+  const clanId = Number(item?.clanId || 0);
+  const playerId = Number(item?.playerId || 0);
+  const money = Number(item?.money || 0);
+  const playerName = String(item?.playerName || "");
+  if (!eventId || !clanId || !playerId || money <= 0) return null;
+  const clanData = rawHashtable([
+    { key: rawByte(0), value: rawInt(playerId) },
+    { key: rawByte(1), value: rawInt(money) },
+    { key: rawByte(2), value: rawString(playerName) },
+    { key: rawByte(3), value: rawInt(eventId) },
+  ]);
+  const envelope = rawHashtable([
+    { key: rawByte(0), value: rawInt(CLAN_TREASURY_EVENT_ADD) },
+    { key: rawByte(1), value: rawInt(clanId) },
+    { key: rawByte(2), value: clanData },
+  ]);
+  return {
+    eventId,
+    clanId,
+    playerId,
+    money,
+    payload: rawMasterEvent(209, playerId, envelope),
+  };
+}
+
+function pushServerClanTreasuryEvent(item) {
+  const prepared = makeServerClanTreasuryEvent(item);
+  if (!prepared) return { processed: true, sent: 0, invalid: true };
+  if (hasDeliveredClanTreasuryEvent(prepared.clanId, prepared.eventId)) {
+    console.log(`[master-social] clan-treasury-push duplicate clan=${prepared.clanId} event=${prepared.eventId} source=feed`);
+    return { processed: true, sent: 0, duplicate: true };
+  }
+
+  const targetSessions = activeMasterSessionList();
+  if (targetSessions.length === 0) {
+    console.log(`[master-social] clan-treasury-push skipped clan=${prepared.clanId} event=${prepared.eventId} reason=no-master-sessions`);
+    return { processed: true, sent: 0, noSessions: true };
+  }
+
+  let sent = 0;
+  for (const targetSession of targetSessions) {
+    if (sendReliableToSession(targetSession, prepared.payload, targetSession.lastChannel || 0)) sent += 1;
+  }
+  if (sent <= 0) return { processed: false, sent: 0, retry: true };
+  rememberDeliveredClanTreasuryEvent(prepared.clanId, prepared.eventId, "server-feed");
+  console.log(`[master-social] clan-treasury-push clan=${prepared.clanId} event=${prepared.eventId} player=${prepared.playerId} money=${prepared.money} sessions=${sent} source=server-feed`);
+  return { processed: true, sent };
+}
+
+async function runClanTreasuryLivePoll() {
+  if (clanTreasuryPollInFlight || !API_TOKEN || CLAN_TREASURY_POLL_MS <= 0) return;
+  clanTreasuryPollInFlight = true;
+  try {
+    const response = await postApiJson("/battle/clan-events", {
+      afterId: clanTreasuryPollCursor,
+      initialize: !clanTreasuryPollInitialized,
+      limit: CLAN_TREASURY_POLL_LIMIT,
+    });
+    if (!response || response.ok === false || !Array.isArray(response.events)) {
+      throw new Error(response?.error || "invalid-clan-treasury-feed");
+    }
+    if (!clanTreasuryPollInitialized) {
+      clanTreasuryPollCursor = Math.max(0, Number(response.cursor || 0));
+      clanTreasuryPollInitialized = true;
+      console.log(`[master-social] clan-treasury-poll initialized cursor=${clanTreasuryPollCursor}`);
+      return;
+    }
+    for (const item of response.events) {
+      const eventId = Number(item?.id || 0);
+      if (!Number.isInteger(eventId) || eventId <= clanTreasuryPollCursor) continue;
+      const result = pushServerClanTreasuryEvent(item);
+      if (!result.processed) break;
+      clanTreasuryPollCursor = eventId;
+    }
+  } catch (error) {
+    const now = Date.now();
+    if (now - clanTreasuryPollLastErrorAt >= 30000) {
+      clanTreasuryPollLastErrorAt = now;
+      console.log(`[master-social] clan-treasury-poll failed after=${clanTreasuryPollCursor} ${error.message}`);
+    }
+  } finally {
+    clanTreasuryPollInFlight = false;
+  }
+}
+
 function isMasterSocialPort(port) {
   return SOCIAL_MASTER_PORTS.has(Number(port || 0));
 }
@@ -9263,6 +9394,13 @@ async function handleMasterEvent(session, parsed) {
     const clanId = Number(htGet(data, 1)?.value || 0);
     const clanEventData = htGet(data, 2);
     const subjectUserId = Number(htGet(clanEventData, 0)?.value || 0);
+    const treasuryEventId = clanEventCode === CLAN_TREASURY_EVENT_ADD
+      ? Number(htGet(clanEventData, 3)?.value || 0)
+      : 0;
+    if (treasuryEventId > 0 && hasDeliveredClanTreasuryEvent(clanId, treasuryEventId)) {
+      console.log(`[master-social] clan-event duplicate user=${userId} clan=${clanId} code=${clanEventCode} event=${treasuryEventId} source=client`);
+      return [];
+    }
     const event = rawMasterEvent(209, userId, data.raw);
     const targetSessions = new Set([session]);
     for (const [playerId] of masterSessionsByPlayerId.entries()) {
@@ -9279,7 +9417,10 @@ async function handleMasterEvent(session, parsed) {
       if (targetSession === session) senderSent += 1;
       if (subjectUserId > 0 && Number(targetSession.playerId || 0) === subjectUserId) subjectSent += 1;
     }
-    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} subject=${subjectUserId || 0} sessions=${sent} sender=${senderSent} subjectSessions=${subjectSent}`);
+    if (treasuryEventId > 0 && sent > 0) {
+      rememberDeliveredClanTreasuryEvent(clanId, treasuryEventId, "client-event209");
+    }
+    console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} event=${treasuryEventId || 0} subject=${subjectUserId || 0} sessions=${sent} sender=${senderSent} subjectSessions=${subjectSent}`);
     return [];
   }
 
@@ -9552,7 +9693,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (isZombieRoom(session.room)) {
       const zombieStarted = maybeStartZombieRound(session.room, channel, "post-gamestate", session, responses);
       if (!zombieStarted) {
-        maybeAppendZombieLateJoinSpawn(session, responses, channel);
+        keepZombieLateJoinSpectator(session);
       }
       if (!session.spawned) {
         console.log(`[zombie] waiting actor=${session.actorId} ready=${zombieReadyPlayers(session.room).length}/${ZOMBIE_MIN_PLAYERS} mode=${zombieModeForRoom(session.room)}`);
@@ -10043,12 +10184,17 @@ async function handleUdp(port, socket, msg, rinfo) {
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
+console.log(`[config] clanTreasuryServerPush=${API_TOKEN ? "on" : "off-token-missing"} poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
 if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
+const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREASURY_POLL_MS);
+if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
+const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
+if (typeof clanTreasuryInitialPoll.unref === "function") clanTreasuryInitialPoll.unref();
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
