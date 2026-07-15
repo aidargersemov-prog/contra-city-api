@@ -3859,7 +3859,7 @@ async function postApiJson(path, body) {
       ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
     },
     body: JSON.stringify(body || {}),
-  });
+  }, `POST ${path}`);
   if (!response.ok) throw new Error(`status=${response.status}`);
   return response.json();
 }
@@ -4052,7 +4052,7 @@ function updateActorWireData(session, incomingActor, profile, channel = 0) {
   session.actorRaw = makeActorDataRaw(incomingActor, profile, {
     weaponSlotLimit: FULL_LOADOUT_SLOT_LIMIT,
     baseSpeed10,
-  }, `POST ${path}`);
+  });
   const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event", { baseSpeed10 });
   const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join", { baseSpeed10 });
   session.peerActorRaw = peerActor.raw;
@@ -4704,33 +4704,6 @@ function sendActiveRoomPickupsToSession(session, channel = 0, reason = "post-spa
   return count;
 }
 
-function queuePostSpawnPickupSync(session, reason = "post-spawn") {
-  if (!ENABLE_MAP_PICKUPS || !session?.room) return;
-  session.pendingPickupSync = {
-    reason,
-    afterMoveCount: Math.max(2, (Number(session.moveCount) || 0) + 1),
-  };
-}
-
-function appendActiveRoomPickupEvents(session, commands, channel = 0, reason = "post-spawn-response") {
-  if (!Array.isArray(commands)) return 0;
-  const payloads = [];
-  const count = appendActiveRoomPickupPayloads(session, payloads, channel, reason);
-  for (const payload of payloads) {
-    commands.push(...makeReliableCommandsForPayload(session, payload, channel));
-  }
-  return count;
-}
-
-function maybeAppendPostSpawnPickupSync(session, commands, channel = 0) {
-  const pending = session?.pendingPickupSync;
-  if (!pending || !ENABLE_MAP_PICKUPS) return;
-  if (!session.spawned || session.dead || !session.gameStateRequested) return;
-  if ((Number(session.moveCount) || 0) < Number(pending.afterMoveCount || 0)) return;
-  appendActiveRoomPickupEvents(session, commands, channel, pending.reason || "post-spawn-response");
-  session.pendingPickupSync = null;
-}
-
 function sendReliablePayloadsToSession(targetSession, payloads, channel = 0) {
   if (!targetSession?.socket || !targetSession?.rinfo || !Array.isArray(payloads)) return false;
   const reliablePayloads = payloads.filter(Boolean);
@@ -4890,26 +4863,6 @@ function sendReliableToWholeRoom(room, payload, channel = 0, options = {}) {
     if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
   }
   return sent;
-}
-
-function maybeAppendRespawnItems(session, commands, channel) {
-  if (!ENABLE_MAP_PICKUPS || !session?.room?.items || ITEM_RESPAWN_MS <= 0) return;
-  const now = Date.now();
-  for (const item of session.room.items.values()) {
-    if (!item.picked || !item.nextRespawnAt || now < item.nextRespawnAt) continue;
-    item.picked = false;
-    item.nextRespawnAt = 0;
-    markRoomItemHiddenForAll(session.room, item.id);
-    const spawnItemEvent = buildSpawnItemEvent(item);
-    commands.push(...makeReliableCommandsForPayload(session, spawnItemEvent, channel));
-    markSessionItemVisible(session, item.id);
-    queuePickupSpawnRepair(session, [item.id], channel, "item-respawn");
-    broadcastReliableToRoom(session, spawnItemEvent, channel, "item-respawn", {
-      requireLiveReady: false,
-      markItemVisibleId: item.id,
-    });
-    console.log(`[event] item-respawn id=${item.id} type=${item.type} subType=${item.subType ?? 0} value=${item.value} pos=${fmtPoint(item)}`);
-  }
 }
 
 function distanceSquared(left, right) {
@@ -5151,7 +5104,6 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   session.dead = false;
   session.moveSeen = false;
   session.moveCount = 0;
-  session.pendingPickupSync = null;
   clearPickupSpawnRepairTimers(session);
   session.visibleItemIds = new Set();
   session.waitingSelfSpawnMove = true;
@@ -5375,7 +5327,6 @@ function resetStandardPlayerForNextRound(playerSession) {
   clearPickupSpawnRepairTimers(playerSession);
   clearSpawnStallRecovery(playerSession);
   clearPendingSpawnBroadcast(playerSession);
-  playerSession.pendingPickupSync = null;
   playerSession.visibleItemIds = new Set();
   playerSession.team = normalizeTeamForRoom(playerSession, playerSession.team);
   playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
@@ -5583,7 +5534,6 @@ function resetZombiePlayerForNextRound(playerSession) {
   clearPickupSpawnRepairTimers(playerSession);
   clearSpawnStallRecovery(playerSession);
   clearPendingSpawnBroadcast(playerSession);
-  playerSession.pendingPickupSync = null;
   playerSession.visibleItemIds = new Set();
   playerSession.team = HUMAN_TEAM;
   playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
@@ -8547,7 +8497,6 @@ function resetSessionRoomProgress(session) {
   session.zombieType = ZOMBIE_TYPE.HUMAN;
   session.lastTransform = null;
   clearPendingSpawnBroadcast(session);
-  session.pendingPickupSync = null;
   resetSessionMatchStats(session);
   clearOutboundReliableState(session);
 }
@@ -10579,7 +10528,6 @@ async function handleUdp(port, socket, msg, rinfo) {
       deferredJoinActorIds: new Set(),
       peerSpawnTimers: new Set(),
       pendingSpawnBroadcast: null,
-      pendingPickupSync: null,
       pickupSpawnRepairTimers: new Set(),
       lastChannel: 0,
       port,
