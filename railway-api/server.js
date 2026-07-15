@@ -8,7 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-12-clan-treasury-canonical-live-v44";
+const API_BUILD_ID = "railway-api-2026-07-15-daily-quest-removed-v45";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -37,7 +37,6 @@ const SHOP_PRICE = 100;
 const BATTLE_HOST = process.env.BATTLE_HOST || "";
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
-const DAILY_QUEST_SEED_SECRET = process.env.DAILY_QUEST_SEED_SECRET || DEFAULT_KEY;
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
 const MAX_REQUEST_URL_BYTES = Math.max(1024, Number(process.env.MAX_REQUEST_URL_BYTES || 16384));
 const HTTP_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15000));
@@ -3976,13 +3975,6 @@ async function mutateBattleSocial(action, userId, targetId) {
           await client.query("DELETE FROM player_friends WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)", [id, target]);
         }
 
-        if (becameAccepted) {
-          const pairId = `${Math.min(id, target)}:${Math.max(id, target)}`;
-          const source = { type: "friend-accepted", id: pairId };
-          await incrementDailyQuestProgressWithClient(client, id, 20, 1, new Date(), source);
-          await incrementDailyQuestProgressWithClient(client, target, 20, 1, new Date(), source);
-        }
-
         await client.query("COMMIT");
         return { ok: true, becameAccepted };
       } catch (error) {
@@ -4696,14 +4688,6 @@ async function addClanMoneyPostgres(account, clanId, money) {
         `INSERT INTO clan_treasury_events (id, clan_id, player_id, player_name, money, event_type, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [eventId, Number(clanId), Number(account.id), playerName, money, CLAN_TREASURY_EVENT_TYPE.ADD, createdAt]
-      );
-      await incrementDailyQuestProgressWithClient(
-        client,
-        account.id,
-        21,
-        money,
-        new Date(createdAt),
-        { type: "clan-treasury", id: String(eventId) }
       );
       await client.query("COMMIT");
       committed = true;
@@ -6168,7 +6152,7 @@ async function buyItem(account, item) {
   return ok({ req: "", vcur: account.money });
 }
 
-async function buyTimedItemPostgres(account, item, duration, price, dailyQuestId = 0, dailySourceType = "") {
+async function buyTimedItemPostgres(account, item, duration, price) {
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
@@ -6206,10 +6190,10 @@ async function buyTimedItemPostgres(account, item, duration, price, dailyQuestId
            updated_at = now()`,
         [Number(account.id), itemKey, Number(itemData?.itype || 0), JSON.stringify(itemData)]
       );
-      const purchase = await client.query(
+      await client.query(
         `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
          VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)
-         RETURNING id`,
+        `,
         [
           Number(account.id),
           itemKey,
@@ -6219,17 +6203,6 @@ async function buyTimedItemPostgres(account, item, duration, price, dailyQuestId
           JSON.stringify(itemData)
         ]
       );
-      if (dailyQuestId > 0) {
-        await incrementDailyQuestProgressWithClient(
-          client,
-          account.id,
-          dailyQuestId,
-          1,
-          new Date(),
-          { type: dailySourceType, id: String(purchase.rows[0].id) }
-        );
-      }
-
       await auditGameEvent(client, {
         playerId: account.id,
         eventType: "purchase",
@@ -6291,7 +6264,7 @@ async function buyTaunt(account, item, duration) {
   const selectedDuration = normalizeShopDuration(duration);
   const price = shopDurationPrice(item, selectedDuration);
   if (pgPool) {
-    return buyTimedItemPostgres(account, item, selectedDuration, price, 18, "taunt-purchase");
+    return buyTimedItemPostgres(account, item, selectedDuration, price);
   }
   if (account.money < price) return { result: false, err: [2] };
   if (!Array.isArray(account.inventory)) account.inventory = [];
@@ -6369,10 +6342,10 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
            updated_at = now()`,
         [Number(account.id), itemKey, Number(itemData?.itype || 0), JSON.stringify(itemData)]
       );
-      const purchase = await client.query(
+      await client.query(
         `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
          VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)
-         RETURNING id`,
+        `,
         [
           Number(account.id),
           itemKey,
@@ -6382,15 +6355,6 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
           JSON.stringify(itemData)
         ]
       );
-      await incrementDailyQuestProgressWithClient(
-        client,
-        account.id,
-        19,
-        1,
-        new Date(),
-        { type: "weapon-upgrade-purchase", id: String(purchase.rows[0].id) }
-      );
-
       await auditGameEvent(client, {
         playerId: account.id,
         eventType: "weapon_upgrade",
@@ -6848,390 +6812,6 @@ async function buyAbility(account, url) {
   return ok({ req: "" });
 }
 
-const DAILY_QUEST_DEFINITIONS = [
-  { id: 1, title: "Убить N игроков в пах", ranges: { easy: [3, 9], medium: [10, 19], hard: [20, 37] } },
-  { id: 2, title: "Убить N игроков в голову", ranges: { easy: [4, 11], medium: [12, 24], hard: [25, 46] } },
-  { id: 3, title: "Убить N игроков", ranges: { easy: [12, 27], medium: [28, 53], hard: [54, 91] } },
-  { id: 4, title: "Убить N игроков из автомата", ranges: { easy: [8, 19], medium: [20, 39], hard: [40, 68] } },
-  { id: 5, title: "Убить N игроков из снайперской винтовки", ranges: { easy: [4, 12], medium: [13, 27], hard: [28, 49] } },
-  { id: 6, title: "Убить N игроков из дробовика", ranges: { easy: [7, 17], medium: [18, 36], hard: [37, 64] } },
-  { id: 7, title: "Убить N игроков из гранатомёта", ranges: { easy: [4, 11], medium: [12, 25], hard: [26, 44] } },
-  { id: 8, title: "Убить N игроков из пистолета", ranges: { easy: [7, 18], medium: [19, 37], hard: [38, 66] } },
-  { id: 9, title: "Убить N игроков битой", ranges: { easy: [2, 7], medium: [8, 16], hard: [17, 31] } },
-  { id: 10, title: "Победить N раз в режиме «Захват флага»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 9] } },
-  { id: 11, title: "Победить N раз в режиме «Контроль точек»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 9] } },
-  { id: 12, title: "Победить N раз в режиме «Каждый за себя»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 10] } },
-  { id: 13, title: "Победить N раз в режиме «Командный бой»", ranges: { easy: [1, 3], medium: [4, 6], hard: [7, 11] } },
-  { id: 14, title: "Победить N раз в режиме «Заражение»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 9] } },
-  { id: 15, title: "Убить N зомби-боссов", ranges: { easy: [1, 1], medium: [2, 3], hard: [4, 7] } },
-  { id: 16, title: "Убить N зомби", ranges: { easy: [19, 47], medium: [48, 96], hard: [97, 173] } },
-  { id: 17, title: "Выполнить достижение", ranges: { easy: [1, 1], medium: [1, 1], hard: [1, 1] } },
-  { id: 18, title: "Купить насмешку", ranges: { easy: [1, 1], medium: [1, 1], hard: [1, 1] } },
-  { id: 19, title: "Улучшить оружие в мастерской N раз", ranges: { easy: [1, 1], medium: [2, 2], hard: [3, 4] } },
-  { id: 20, title: "Добавить N игроков в товарищи", ranges: { easy: [1, 1], medium: [2, 3], hard: [4, 6] } },
-  { id: 21, title: "Внести N монет в казну клана", ranges: { easy: [137, 493], medium: [517, 1489], hard: [1513, 3479] } },
-  { id: 22, title: "Победить N раз на карте «Урбан»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 10] } },
-  { id: 23, title: "Победить N раз на карте «Зона-Z»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 10] } },
-  { id: 24, title: "Победить N раз на карте «Форпост»", ranges: { easy: [1, 2], medium: [3, 5], hard: [6, 10] } },
-];
-
-function dailyQuestMoscowDate(now = new Date()) {
-  return new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
-
-function dailyQuestResetAt(dateKey) {
-  return new Date(`${dateKey}T21:00:00.000Z`).toISOString();
-}
-
-function dailyQuestRandom(accountId, dateKey) {
-  const digest = crypto.createHmac("sha256", DAILY_QUEST_SEED_SECRET)
-    .update(`${accountId}:${dateKey}:daily-quests-v1`)
-    .digest();
-  let state = digest.readUInt32LE(0) || 0x6d2b79f5;
-  return () => {
-    state ^= state << 13;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    return (state >>> 0) / 0x100000000;
-  };
-}
-
-function dailyQuestInteger(random, min, max) {
-  return min + Math.floor(random() * (max - min + 1));
-}
-
-function dailyQuestDifficultyPack(random) {
-  const roll = random();
-  const pack = roll < 0.45
-    ? ["easy", "easy", "medium"]
-    : roll < 0.75
-      ? ["easy", "medium", "hard"]
-      : roll < 0.92
-        ? ["medium", "medium", "hard"]
-        : ["hard", "hard", "hard"];
-  for (let index = pack.length - 1; index > 0; index -= 1) {
-    const swap = dailyQuestInteger(random, 0, index);
-    [pack[index], pack[swap]] = [pack[swap], pack[index]];
-  }
-  return pack;
-}
-
-function dailyQuestReward(difficulty, target) {
-  const multiplier = difficulty === "hard" ? 3 : difficulty === "medium" ? 1.75 : 1;
-  return {
-    exp: Math.max(100, Math.round((160 + Math.sqrt(target) * 24) * multiplier / 10) * 10),
-    coins: Math.max(75, Math.round((90 + Math.sqrt(target) * 16) * multiplier / 5) * 5),
-  };
-}
-
-function dailyQuestMapAvailable(questId) {
-  const systemName = ({ 22: "Inferno", 23: "Zombi", 24: "ArenaRing" })[Number(questId)];
-  return Boolean(systemName && maps.some((map) => String(map.n || "").toLowerCase() === systemName.toLowerCase()));
-}
-
-function dailyQuestModeAvailable(questId) {
-  const mode = ({ 10: MAP_MODE_CAPTURE_THE_FLAG, 11: MAP_MODE_CONTROL_POINTS, 12: MAP_MODE_DEATHMATCH, 13: MAP_MODE_TEAM_DEATHMATCH, 14: MAP_MODE_ZOMBIE })[Number(questId)];
-  return Boolean(mode && maps.some((map) => (Number(map.m || 0) & mode) === mode));
-}
-
-function dailyQuestEligibilityForAccount(account) {
-  const clanId = Number(account?.clan?.cid ?? account?.clan?.id ?? 0);
-  return {
-    hasClan: clanId > 0,
-    hasIncompleteAchievements: achievementCatalog.length > 0,
-    canBuyTaunt: shopTaunts.length > 0,
-  };
-}
-
-function dailyQuestDefinitionEligible(definition, eligibility = {}) {
-  const id = Number(definition?.id || 0);
-  if (id === 17 && !eligibility.hasIncompleteAchievements) return false;
-  if (id === 18 && !eligibility.canBuyTaunt) return false;
-  if (id === 21 && !eligibility.hasClan) return false;
-  if (id >= 22 && id <= 24 && !dailyQuestMapAvailable(id)) return false;
-  if (id >= 10 && id <= 14 && !dailyQuestModeAvailable(id)) return false;
-  return true;
-}
-
-async function dailyQuestEligibilityWithClient(client, playerId) {
-  const id = Number(playerId || 0);
-  const clan = await client.query("SELECT 1 FROM clan_members WHERE player_id = $1 LIMIT 1", [id]);
-  let hasIncompleteAchievements = false;
-  if (achievementCatalog.length > 0) {
-    const completed = await client.query(
-      `SELECT COUNT(DISTINCT achievement_id)::int AS count
-       FROM player_achievements
-       WHERE player_id = $1 AND claimed_value > 0 AND achievement_id = ANY($2::bigint[])`,
-      [id, [...achievementCatalogIds]]
-    );
-    hasIncompleteAchievements = Number(completed.rows[0]?.count || 0) < achievementCatalog.length;
-  }
-  return {
-    hasClan: clan.rowCount > 0,
-    hasIncompleteAchievements,
-    canBuyTaunt: shopTaunts.length > 0,
-  };
-}
-
-function dailyQuestPayload(account, now = new Date(), eligibility = dailyQuestEligibilityForAccount(account)) {
-  const date = dailyQuestMoscowDate(now);
-  const random = dailyQuestRandom(account.id, date);
-  const pool = DAILY_QUEST_DEFINITIONS.filter((definition) => dailyQuestDefinitionEligible(definition, eligibility));
-  if (pool.length < 3) throw new Error(`daily eligible pool ${pool.length}/3`);
-  const difficulties = dailyQuestDifficultyPack(random);
-  const quests = [];
-  for (let slot = 0; slot < 3; slot += 1) {
-    const definitionIndex = dailyQuestInteger(random, 0, pool.length - 1);
-    const definition = pool.splice(definitionIndex, 1)[0];
-    const difficulty = difficulties[slot];
-    const [min, max] = definition.ranges[difficulty];
-    const target = dailyQuestInteger(random, min, max);
-    quests.push({
-      slot,
-      id: definition.id,
-      icon: definition.id,
-      difficulty,
-      target,
-      progress: 0,
-      claimed: false,
-      title: definition.title.replace("N", String(target)),
-      reward: dailyQuestReward(difficulty, target),
-    });
-  }
-  return ok({ date, resetAt: dailyQuestResetAt(date), quests });
-}
-
-function dailyQuestDefinition(questId) {
-  return DAILY_QUEST_DEFINITIONS.find((definition) => definition.id === Number(questId)) || null;
-}
-
-function dailyQuestRowPayload(row) {
-  const definition = dailyQuestDefinition(row.quest_id);
-  const target = Number(row.target || 1);
-  return {
-    slot: Number(row.slot),
-    id: Number(row.quest_id),
-    icon: Number(row.quest_id),
-    difficulty: String(row.difficulty),
-    target,
-    progress: Math.min(target, Math.max(0, Number(row.progress || 0))),
-    claimed: Boolean(row.claimed),
-    title: String(definition?.title || "").replace("N", String(target)),
-    reward: {
-      exp: Number(row.reward_exp || 0),
-      coins: Number(row.reward_coins || 0),
-    },
-  };
-}
-
-async function ensureDailyQuestAssignments(account, now = new Date()) {
-  if (!pgPool) return dailyQuestPayload(account, now);
-  const date = dailyQuestMoscowDate(now);
-  const client = await pgPool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("SELECT id FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-    const existing = await client.query(
-      `SELECT slot, quest_id, difficulty, target, progress, reward_exp, reward_coins, claimed
-       FROM daily_quests
-       WHERE player_id = $1 AND quest_date = $2::date
-       ORDER BY slot`,
-      [Number(account.id), date]
-    );
-    if (existing.rows.length === 3) {
-      await client.query("COMMIT");
-      return ok({ date, resetAt: dailyQuestResetAt(date), quests: existing.rows.map(dailyQuestRowPayload) });
-    }
-    const eligibility = await dailyQuestEligibilityWithClient(client, account.id);
-    const generated = dailyQuestPayload(account, now, eligibility);
-    for (const quest of generated.quests) {
-      await client.query(
-        `INSERT INTO daily_quests
-           (player_id, quest_date, slot, quest_id, difficulty, target, progress, reward_exp, reward_coins, claimed)
-         VALUES ($1, $2::date, $3, $4, $5, $6, 0, $7, $8, FALSE)
-         ON CONFLICT (player_id, quest_date, slot) DO NOTHING`,
-        [Number(account.id), date, quest.slot, quest.id, quest.difficulty, quest.target, quest.reward.exp, quest.reward.coins]
-      );
-    }
-    const result = await client.query(
-      `SELECT slot, quest_id, difficulty, target, progress, reward_exp, reward_coins, claimed
-       FROM daily_quests
-       WHERE player_id = $1 AND quest_date = $2::date
-       ORDER BY slot`,
-      [Number(account.id), date]
-    );
-    if (result.rows.length !== 3) throw new Error(`daily assignment row count ${result.rows.length}/3`);
-    await client.query("COMMIT");
-    return ok({ date, resetAt: dailyQuestResetAt(date), quests: result.rows.map(dailyQuestRowPayload) });
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function ensureDailyQuestAssignmentsWithClient(client, playerId, now = new Date()) {
-  const id = Number(playerId || 0);
-  if (!Number.isInteger(id) || id <= 0) return null;
-  const date = dailyQuestMoscowDate(now);
-  const existing = await client.query(
-    `SELECT COUNT(*)::int AS count FROM daily_quests WHERE player_id = $1 AND quest_date = $2::date`,
-    [id, date]
-  );
-  if (Number(existing.rows[0]?.count || 0) === 3) return date;
-  const eligibility = await dailyQuestEligibilityWithClient(client, id);
-  const generated = dailyQuestPayload({ id }, now, eligibility);
-  for (const quest of generated.quests) {
-    await client.query(
-      `INSERT INTO daily_quests
-         (player_id, quest_date, slot, quest_id, difficulty, target, progress, reward_exp, reward_coins, claimed)
-       VALUES ($1, $2::date, $3, $4, $5, $6, 0, $7, $8, FALSE)
-       ON CONFLICT (player_id, quest_date, slot) DO NOTHING`,
-      [id, generated.date, quest.slot, quest.id, quest.difficulty, quest.target, quest.reward.exp, quest.reward.coins]
-    );
-  }
-  return generated.date;
-}
-
-async function incrementDailyQuestProgressWithClient(client, playerId, questIds, amount = 1, now = new Date(), source = null) {
-  const id = Number(playerId || 0);
-  const ids = [...new Set((Array.isArray(questIds) ? questIds : [questIds]).map(Number).filter((value) => value >= 1 && value <= 24))];
-  const increment = Math.max(0, Math.trunc(Number(amount || 0)));
-  if (!Number.isInteger(id) || id <= 0 || ids.length === 0 || increment <= 0) return [];
-  const date = await ensureDailyQuestAssignmentsWithClient(client, id, now);
-  const sourceType = String(source?.type || "").trim();
-  const sourceId = String(source?.id || "").trim();
-  let acceptedIds = ids;
-  if (sourceType && sourceId) {
-    acceptedIds = [];
-    for (const questId of ids) {
-      const event = await client.query(
-        `INSERT INTO daily_quest_events
-           (player_id, quest_date, quest_id, source_type, source_id, amount)
-         SELECT $1, $2::date, $3, $4, $5, $6
-         WHERE EXISTS (
-           SELECT 1 FROM daily_quests
-           WHERE player_id = $1 AND quest_date = $2::date AND quest_id = $3 AND claimed = FALSE
-         )
-         ON CONFLICT (player_id, quest_date, quest_id, source_type, source_id) DO NOTHING
-         RETURNING quest_id`,
-        [id, date, questId, sourceType, sourceId, increment]
-      );
-      if (event.rowCount > 0) acceptedIds.push(questId);
-    }
-  }
-  if (acceptedIds.length === 0) return [];
-  const result = await client.query(
-    `UPDATE daily_quests
-     SET progress = LEAST(target, progress + $4), updated_at = now()
-     WHERE player_id = $1 AND quest_date = $2::date AND quest_id = ANY($3::smallint[]) AND claimed = FALSE
-     RETURNING slot, quest_id, target, progress, difficulty`,
-    [id, date, acceptedIds, increment]
-  );
-  for (const row of result.rows) {
-    await writeAuditEvent(client, {
-      playerId: id,
-      eventType: "daily_quest_progress",
-      category: "progress",
-      description: `Прогресс ежедневного задания #${row.quest_id}: ${row.progress}/${row.target}`,
-      newValue: { questId: Number(row.quest_id), progress: Number(row.progress), target: Number(row.target), increment },
-      source: source?.type ? "battle_server" : "game_api",
-      metadata: { sourceType, sourceId, difficulty: row.difficulty, slot: Number(row.slot) }
-    });
-  }
-  return result.rows;
-}
-
-async function incrementDailyQuestProgress(playerId, questIds, amount = 1, now = new Date(), source = null) {
-  const id = Number(playerId || 0);
-  const ids = [...new Set((Array.isArray(questIds) ? questIds : [questIds]).map(Number).filter((value) => value >= 1 && value <= 24))];
-  const increment = Math.max(0, Math.trunc(Number(amount || 0)));
-  if (!pgPool || !Number.isInteger(id) || id <= 0 || ids.length === 0 || increment <= 0) return [];
-  const client = await pgPool.connect();
-  try {
-    await client.query("BEGIN");
-    const rows = await incrementDailyQuestProgressWithClient(client, id, ids, increment, now, source);
-    await client.query("COMMIT");
-    const date = dailyQuestMoscowDate(now);
-    for (const row of rows) {
-      console.log(`[daily-quest] progress player=${id} date=${date} quest=${row.quest_id} slot=${row.slot} add=${increment} progress=${row.progress}/${row.target} difficulty=${row.difficulty}`);
-    }
-    return rows;
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function claimDailyQuest(account, url, now = new Date()) {
-  const slot = Number(url.searchParams.get("slot"));
-  if (!Number.isInteger(slot) || slot < 0 || slot > 2) return { result: false, error: "daily_slot" };
-  await ensureDailyQuestAssignments(account, now);
-  if (!pgPool) return { result: false, error: "daily_storage" };
-  const date = dailyQuestMoscowDate(now);
-  const client = await pgPool.connect();
-  try {
-    await client.query("BEGIN");
-    const oldMoney = Number(account.money || 0);
-    const result = await client.query(
-      `SELECT quest_id, target, progress, reward_exp, reward_coins, claimed
-       FROM daily_quests
-       WHERE player_id = $1 AND quest_date = $2::date AND slot = $3
-       FOR UPDATE`,
-      [Number(account.id), date, slot]
-    );
-    const quest = result.rows[0];
-    if (!quest) throw new Error("daily quest missing");
-    if (quest.claimed) {
-      await client.query("ROLLBACK");
-      return { result: false, error: "daily_claimed" };
-    }
-    if (Number(quest.progress) < Number(quest.target)) {
-      await client.query("ROLLBACK");
-      return { result: false, error: "daily_incomplete" };
-    }
-    const expState = await awardPlayerExperience(client, account.id, quest.reward_exp, "daily_quest");
-    const moneyResult = await client.query(
-      `UPDATE players SET money = money + $2, updated_at = now() WHERE id = $1 RETURNING money`,
-      [Number(account.id), Number(quest.reward_coins)]
-    );
-    await client.query(
-      `UPDATE daily_quests SET claimed = TRUE, updated_at = now()
-       WHERE player_id = $1 AND quest_date = $2::date AND slot = $3`,
-      [Number(account.id), date, slot]
-    );
-    const nextMoney = Number(moneyResult.rows[0]?.money || oldMoney);
-    await auditGameEvent(client, {
-      playerId: account.id,
-      eventType: "daily_quest_claim",
-      category: "progress",
-      severity: "notice",
-      description: `Выполнено ежедневное задание #${quest.quest_id}`,
-      oldValue: { balance: oldMoney, exp: expState?.expBefore ?? account.exp },
-      newValue: { balance: nextMoney, exp: expState?.exp ?? account.exp, rewardExp: Number(quest.reward_exp), rewardCoins: Number(quest.reward_coins) },
-      metadata: { date, slot, questId: Number(quest.quest_id) }
-    });
-    await client.query("COMMIT");
-    account.money = Number(moneyResult.rows[0]?.money || account.money || 0);
-    if (expState) {
-      account.level = expState.level;
-      account.exp = expState.exp;
-      account.expMin = expState.expMin;
-      account.expMax = expState.expMax;
-    }
-    console.log(`[daily-quest] claim player=${account.id} date=${date} slot=${slot} quest=${quest.quest_id} exp=${quest.reward_exp} coins=${quest.reward_coins}`);
-    return ok({ slot, claimed: true, reward: { exp: Number(quest.reward_exp), coins: Number(quest.reward_coins) }, vcur: account.money, exp: expState });
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   const { page, act } = normalizedAjaxRoute(url);
   let account = resolvedAccount || accountFrom(url);
@@ -7242,13 +6822,6 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
 
   if (page === "auth" && act === "g") {
     return ok({ user_id: String(account.id), key: account.key });
-  }
-
-  if (page === "daily" && act === "get") {
-    return await ensureDailyQuestAssignments(account);
-  }
-  if (page === "daily" && act === "claim") {
-    return await claimDailyQuest(account, url);
   }
 
   if (page === "account") {
@@ -7792,79 +7365,6 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
   }
 }
 
-function dailyQuestWeaponKillId(weaponType) {
-  switch (Number(weaponType || 0)) {
-    case 1:
-    case 2: return 9;
-    case 3: return 8;
-    case 4: return 4;
-    case 7: return 6;
-    case 9: return 7;
-    case 10: return 5;
-    default: return 0;
-  }
-}
-
-function dailyQuestModeWinId(mode) {
-  switch (normalizeStatsMode(mode)) {
-    case MAP_MODE_DEATHMATCH: return 12;
-    case MAP_MODE_TEAM_DEATHMATCH: return 13;
-    case MAP_MODE_CAPTURE_THE_FLAG: return 10;
-    case MAP_MODE_CONTROL_POINTS: return 11;
-    case MAP_MODE_ZOMBIE: return 14;
-    default: return 0;
-  }
-}
-
-function dailyQuestMapWinId(mapName) {
-  const normalized = String(mapName || "")
-    .trim()
-    .replace(/\.unity3d$/i, "")
-    .toLowerCase();
-  switch (normalized) {
-    case "inferno": return 22;
-    case "zombi": return 23;
-    case "arenaring": return 24;
-    default: return 0;
-  }
-}
-
-async function recordDailyQuestBattleProgress(client, event, type, playerId, mode, details) {
-  const dailySourceId = String(event.dailyEventId || details.dailyEventId || "").trim();
-  const dailySource = dailySourceId ? { type: `battle-${type}`, id: dailySourceId } : null;
-  if (type === "death") {
-    const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
-    const victimPlayerId = Number(event.victimPlayerId || details.victimPlayerId || 0);
-    if (killerPlayerId <= 0 || killerPlayerId === victimPlayerId) return;
-    const victimZombieType = Number(event.victimZombieType ?? details.victimZombieType ?? 0);
-    const fragType = String(event.fragType || details.fragType || "");
-    if (fragType === "zombie-infect") return;
-    if (victimZombieType > 0) {
-      const zombieQuestIds = [16];
-      if (victimZombieType === 2) zombieQuestIds.push(15);
-      await incrementDailyQuestProgressWithClient(client, killerPlayerId, zombieQuestIds, 1, new Date(), dailySource);
-      return;
-    }
-    const hitZone = Number(event.hitZone ?? details.hitZone ?? 0);
-    const weaponType = Number(event.weaponType || details.weaponType || 0);
-    const questIds = [3];
-    if (hitZone === 32) questIds.push(2);
-    if (hitZone === 16) questIds.push(1);
-    const weaponQuestId = dailyQuestWeaponKillId(weaponType);
-    if (weaponQuestId) questIds.push(weaponQuestId);
-    await incrementDailyQuestProgressWithClient(client, killerPlayerId, questIds, 1, new Date(), dailySource);
-    return;
-  }
-
-  if (type === "summary" && Boolean(event.won ?? details.won)) {
-    const questIds = [
-      dailyQuestModeWinId(mode),
-      dailyQuestMapWinId(event.mapName || event.map || details.mapName || details.map),
-    ].filter(Boolean);
-    if (questIds.length > 0) await incrementDailyQuestProgressWithClient(client, playerId, questIds, 1, new Date(), dailySource);
-  }
-}
-
 async function recordBattleEvent(event) {
   const account = ensureDesktopAccount();
   if (!pgPool) {
@@ -7952,8 +7452,6 @@ async function recordBattleEvent(event) {
     }
 
     await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
-    await recordDailyQuestBattleProgress(client, event, type, playerId, mode, details);
-
     const achievements = [];
     const achievementPlayerIds = new Set();
     if (type === "death" || type === "score") {
@@ -7966,9 +7464,6 @@ async function recordBattleEvent(event) {
     for (const achievementPlayerId of achievementPlayerIds) {
       const newlyCompleted = await syncPostgresAchievements(client, achievementPlayerId);
       achievements.push(...newlyCompleted);
-      if (newlyCompleted.length > 0) {
-        await incrementDailyQuestProgressWithClient(client, achievementPlayerId, 17, newlyCompleted.length);
-      }
     }
 
     const remoteIp = String(event.playerData?.remote || details.remote || "").slice(0, 128);
@@ -8335,7 +7830,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
       schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/daily_quests/daily_quest_events"
+        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events"
         : "accounts-json",
       accounts: Object.keys(store.accounts).length,
       databaseUrlConfigured: Boolean(DATABASE_URL)
