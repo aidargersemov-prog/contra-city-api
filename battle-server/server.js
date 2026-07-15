@@ -792,7 +792,8 @@ function sessionHasRebindableIdentity(session) {
   const generation = Number(session.reliableGeneration || 0);
   if (Number(session.transportGeneration || 0) !== generation) return false;
   if (session.joinInProgress || session.listLobby || session.isMasterSession) return true;
-  return Boolean(session.room?.players?.get?.(session.actorId) === session);
+  if (session.room?.players?.get?.(session.actorId) === session) return true;
+  return session.verifySeq != null;
 }
 
 function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
@@ -1233,6 +1234,7 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
 
   const responses = await handleOperation(port, socket, rinfo, session, parsed, channel);
   const reliableCommands = responses.flatMap((response) => makeReliableCommandsForPayload(session, response, channel));
+  if (photonEventCode(parsed) === 84) session.peerSnapshotReady = true;
   if (SHOT_LOCAL_RESPONSE_TRACE && photonEventCode(parsed) === 97) {
     console.log(`[sync] shot-response actor=${session.actorId} ${describeShotRequest(parsed)} responses=${responses.length} commands=${reliableCommands.length} bytes=${commandBytes(reliableCommands)} seq=${reliableCommandSeqSummary(reliableCommands)} channel=${channel}`);
   }
@@ -1310,10 +1312,7 @@ async function executeInboundReliableRequest(session, request) {
         request.channel,
       );
   const promise = Promise.resolve().then(buildRequest)
-    .then((commands) => {
-      if (photonEventCode(request.parsed) === 84) session.peerSnapshotReady = true;
-      return cacheReliableResponse(session, cacheKey, commands);
-    })
+    .then((commands) => cacheReliableResponse(session, cacheKey, commands))
     .catch((error) => {
       console.log(`[reliable] operation failed actor=${session.actorId || 0} channel=${request.channel} seq=${request.startSeq} ${error.stack || error.message}`);
       return cacheReliableResponse(session, cacheKey, []);
@@ -4694,9 +4693,14 @@ function appendActiveRoomPickupPayloads(session, payloads, channel = 0, reason =
 }
 
 function sendActiveRoomPickupsToSession(session, channel = 0, reason = "post-spawn") {
+  const visibleBefore = new Set(ensureSessionVisibleItemIds(session));
   const payloads = [];
   const count = appendActiveRoomPickupPayloads(session, payloads, channel, reason);
-  if (!count || !sendReliablePayloadsToSession(session, payloads, channel)) return 0;
+  if (!count) return 0;
+  if (!sendReliablePayloadsToSession(session, payloads, channel)) {
+    session.visibleItemIds = visibleBefore;
+    return 0;
+  }
   return count;
 }
 
