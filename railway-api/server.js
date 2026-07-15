@@ -8,7 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-15-daily-quest-removed-v45";
+const API_BUILD_ID = "railway-api-2026-07-16-player-facing-cloudfront-v46";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -25,7 +25,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://dii1ba1dxl2lq.cloudfront.net").replace(/\/+$/, "");
 const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
