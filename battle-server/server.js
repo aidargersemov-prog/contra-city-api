@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-15-desync-hardening-v271";
+const BUILD_ID = "battle-server-2026-07-15-reliable-retry-smoothing-v272";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -94,6 +94,8 @@ const OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS = Math.max(OUTBOUND_RELIABLE_RECO
 const OUTBOUND_RELIABLE_MAX_RTO_MS = Math.max(OUTBOUND_RELIABLE_INITIAL_RTO_MS, Number(process.env.OUTBOUND_RELIABLE_MAX_RTO_MS || 4000));
 const OUTBOUND_RELIABLE_MAX_PENDING = Math.max(128, Number(process.env.OUTBOUND_RELIABLE_MAX_PENDING || 2048));
 const OUTBOUND_RELIABLE_SWEEP_MS = Math.max(25, Number(process.env.OUTBOUND_RELIABLE_SWEEP_MS || 50));
+const OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS || 16));
+const RELIABLE_REPLAY_LOG_INTERVAL_MS = Math.max(250, Number(process.env.RELIABLE_REPLAY_LOG_INTERVAL_MS || 1000));
 const RELIABLE_RESPONSE_CACHE_TTL_MS = Math.max(
   OUTBOUND_RELIABLE_DISCONNECT_MS + OUTBOUND_RELIABLE_RECOVERY_GRACE_MS,
   Number(process.env.RELIABLE_RESPONSE_CACHE_TTL_MS || 60000),
@@ -1120,17 +1122,20 @@ function clearOutboundReliableState(session) {
   session.outboundReliableOverflowLogAt = 0;
 }
 
-function sendOutboundReliableRetry(session, entry) {
-  if (!session || !entry?.socket || !entry?.rinfo || !entry.command) return false;
-  const sentTime = photonNow();
-  const packet = Buffer.concat([
-    makeHeader(session.peerId, 1, sentTime, session.challenge),
-    entry.command,
-  ]);
+function sendOutboundReliableRetryBatch(session, entries) {
+  if (!session || !Array.isArray(entries) || entries.length === 0) return false;
+  const commands = entries.map((entry) => entry?.command).filter(Boolean);
+  if (commands.length === 0) return false;
+  const socket = session.socket || entries.find((entry) => entry?.socket)?.socket;
+  const rinfo = session.rinfo || entries.find((entry) => entry?.rinfo)?.rinfo;
+  if (!socket || !rinfo) return false;
   try {
-    entry.socket.send(packet, entry.rinfo.port, entry.rinfo.address);
+    // ENet already supports several reliable commands in one datagram. Reuse
+    // the normal packet splitter so a stalled peer cannot make the retry sweep
+    // emit one UDP datagram (and one synchronous log line) per pending event.
+    sendPacket(socket, rinfo, session, commands);
   } catch (error) {
-    console.log(`[warn] reliable-retry failed actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} reason=${error.message}`);
+    console.log(`[warn] reliable-retry-batch failed actor=${session.actorId || 0} commands=${commands.length} reason=${error.message}`);
     return false;
   }
   return true;
@@ -1143,16 +1148,25 @@ function runOutboundReliableRetries() {
     const pending = session?.outboundReliable;
     if (!(pending instanceof Map)) continue;
     if (!(session.outboundReliableRecoveryByChannel instanceof Map)) session.outboundReliableRecoveryByChannel = new Map();
+    const retryBudget = Math.max(1, Math.min(OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS, MAX_ENET_COMMANDS_PER_PACKET));
+    const retryEntries = [];
     for (const [key, entry] of pending.entries()) {
       if (now - entry.lastSentAt <= entry.roundTripTimeout) continue;
+      const channelRecoveryStartedAt = Number(session.outboundReliableRecoveryByChannel.get(entry.channel) || 0);
+      if (channelRecoveryStartedAt && !entry.recoveryStartedAt) {
+        entry.recoveryStartedAt = channelRecoveryStartedAt;
+      }
       const normalRetryExpired = (
         entry.sentCount > OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE ||
         now - entry.firstSentAt > OUTBOUND_RELIABLE_DISCONNECT_MS
       );
       if (normalRetryExpired && !entry.recoveryStartedAt) {
-        entry.recoveryStartedAt = now;
-        session.outboundReliableRecoveryByChannel.set(entry.channel, now);
-        console.log(`[recovery] reliable-channel actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms transportIdle=${now - numberOr(session.lastSeenAt, 0)}ms`);
+        const recoveryStartedAt = Number(session.outboundReliableRecoveryByChannel.get(entry.channel) || 0) || now;
+        entry.recoveryStartedAt = recoveryStartedAt;
+        if (!channelRecoveryStartedAt) {
+          session.outboundReliableRecoveryByChannel.set(entry.channel, recoveryStartedAt);
+          console.log(`[recovery] reliable-channel actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms transportIdle=${now - numberOr(session.lastSeenAt, 0)}ms pending=${pending.size}`);
+        }
       }
       if (entry.recoveryStartedAt) {
         const recoveryAge = now - entry.recoveryStartedAt;
@@ -1166,11 +1180,34 @@ function runOutboundReliableRetries() {
           continue;
         }
       }
-      if (!sendOutboundReliableRetry(session, entry)) continue;
-      entry.sentCount += 1;
-      entry.lastSentAt = now;
-      entry.roundTripTimeout = Math.min(OUTBOUND_RELIABLE_MAX_RTO_MS, entry.roundTripTimeout * 2);
-      console.log(`[retry] reliable actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} type=${entry.commandType} count=${entry.sentCount} next=${entry.roundTripTimeout}ms pending=${pending.size}${entry.recoveryStartedAt ? ` recoveryAge=${now - entry.recoveryStartedAt}ms` : ""}`);
+      if (retryEntries.length < retryBudget) retryEntries.push(entry);
+    }
+    if (retryEntries.length > 0 && sendOutboundReliableRetryBatch(session, retryEntries)) {
+      const retrySummaryByChannel = new Map();
+      for (const entry of retryEntries) {
+        entry.sentCount += 1;
+        entry.lastSentAt = now;
+        entry.roundTripTimeout = Math.min(OUTBOUND_RELIABLE_MAX_RTO_MS, entry.roundTripTimeout * 2);
+        const summary = retrySummaryByChannel.get(entry.channel) || {
+          firstSeq: entry.reliableSeq,
+          lastSeq: entry.reliableSeq,
+          commands: 0,
+          maxCount: 0,
+          maxRto: 0,
+          recoveryStartedAt: 0,
+        };
+        summary.lastSeq = entry.reliableSeq;
+        summary.commands += 1;
+        summary.maxCount = Math.max(summary.maxCount, entry.sentCount);
+        summary.maxRto = Math.max(summary.maxRto, entry.roundTripTimeout);
+        if (entry.recoveryStartedAt) {
+          summary.recoveryStartedAt = summary.recoveryStartedAt || entry.recoveryStartedAt;
+        }
+        retrySummaryByChannel.set(entry.channel, summary);
+      }
+      for (const [channel, summary] of retrySummaryByChannel.entries()) {
+        console.log(`[retry] reliable-batch actor=${session.actorId || 0} channel=${channel} seq=${summary.firstSeq}-${summary.lastSeq} commands=${summary.commands} count<=${summary.maxCount} next<=${summary.maxRto}ms pending=${pending.size}${summary.recoveryStartedAt ? ` recoveryAge=${now - summary.recoveryStartedAt}ms` : ""}`);
+      }
     }
     if (session.outboundReliableOverflowAt) {
       const overflowAge = now - session.outboundReliableOverflowAt;
@@ -1375,6 +1412,22 @@ function enqueueInboundReliableRequest(session, request) {
   drainInboundReliableChannel(session, state);
   if (startSeq !== state.expectedSeq) armInboundReliableGapWarning(session, state);
   return { status: startSeq === state.expectedSeq ? "ready" : "buffered", expectedSeq: state.expectedSeq };
+}
+
+function logReliableReplay(session, channel, reliableSeq, cachedLength, fragmentStart = null) {
+  if (!(session.reliableReplayLogState instanceof Map)) session.reliableReplayLogState = new Map();
+  const targetChannel = normalizeChannelId(channel, 0);
+  const replayKind = cachedLength > 0 ? "response" : "ack-only";
+  const logKey = `${targetChannel}:${replayKind}:${fragmentStart == null ? "command" : "fragment"}`;
+  const now = Date.now();
+  const previous = session.reliableReplayLogState.get(logKey);
+  if (!previous || now - previous.lastLogAt >= RELIABLE_REPLAY_LOG_INTERVAL_MS) {
+    const repeats = (previous?.suppressed || 0) + 1;
+    console.log(`[state] reliable replay actor=${session.actorId || 0} channel=${targetChannel} seq=${reliableSeq} cached=${cachedLength} repeats=${repeats}${fragmentStart == null ? "" : ` fragmentStart=${fragmentStart}`}`);
+    session.reliableReplayLogState.set(logKey, { lastLogAt: now, suppressed: 0 });
+    return;
+  }
+  previous.suppressed += 1;
 }
 
 function reliableFragmentCacheKey(session, channel, fragmentStartSeq) {
@@ -8266,6 +8319,7 @@ function resetReliableDedupe(session, reason = "reset", options = {}) {
   const fragments = session.reliableFragments?.size || 0;
   session.reliableResponses?.clear?.();
   session.reliableFragments?.clear?.();
+  session.reliableReplayLogState = new Map();
   if (options.clearInFlight !== false) {
     session.reliableInFlight?.clear?.();
   }
@@ -10518,6 +10572,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       reliableResponses: new Map(),
       reliableInFlight: new Map(),
       reliableFragments: new Map(),
+      reliableReplayLogState: new Map(),
       reliableGeneration: 0,
       transportGeneration: 0,
       endpointGeneration: 0,
@@ -10664,7 +10719,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       if (cachedResponse) {
         const cached = cachedResponse;
         commands.push(...cached);
-        console.log(`[state] reliable replay seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
+        logReliableReplay(session, channel, reliableSeq, cached.length, commandType === 0x08 ? fragment.startSeq : null);
         offset = commandEnd;
         continue;
       }
@@ -10743,7 +10798,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} apiTimeout=${API_REQUEST_TIMEOUT_MS}ms initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} peerRespawnFallback=${PEER_RESPAWN_FALLBACK_MS}ms reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms/recovery${OUTBOUND_RELIABLE_RECOVERY_GRACE_MS}ms/activeMax${OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS}ms pendingMax=${OUTBOUND_RELIABLE_MAX_PENDING} responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms/${RELIABLE_RESPONSE_CACHE_MAX_ENTRIES} inboundOrder=channel-sequence/${INBOUND_RELIABLE_MAX_PENDING} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms atomicProfileJoin=required joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=off interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=immediate-after-spawn pickupRespawn=room-scheduler pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-until-snapshot" : "channel1-unreliable-animation+weapon-until-snapshot") : "blocked"} peerLiveGate=gamestate-snapshot-ready spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms/current-generation gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} apiTimeout=${API_REQUEST_TIMEOUT_MS}ms initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} peerRespawnFallback=${PEER_RESPAWN_FALLBACK_MS}ms reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms/recovery${OUTBOUND_RELIABLE_RECOVERY_GRACE_MS}ms/activeMax${OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS}ms pendingMax=${OUTBOUND_RELIABLE_MAX_PENDING} retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep replayLog=${RELIABLE_REPLAY_LOG_INTERVAL_MS}ms responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms/${RELIABLE_RESPONSE_CACHE_MAX_ENTRIES} inboundOrder=channel-sequence/${INBOUND_RELIABLE_MAX_PENDING} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms atomicProfileJoin=required joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=off interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=immediate-after-spawn pickupRespawn=room-scheduler pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-until-snapshot" : "channel1-unreliable-animation+weapon-until-snapshot") : "blocked"} peerLiveGate=gamestate-snapshot-ready spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms/current-generation gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
