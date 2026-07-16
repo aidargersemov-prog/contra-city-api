@@ -8,7 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-16-player-facing-cloudfront-v46";
+const API_BUILD_ID = "railway-api-2026-07-16-origin-load-shed-audit-v48";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -39,16 +39,37 @@ const BATTLE_HOST = process.env.BATTLE_HOST || "";
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
+const CLOUDFRONT_ORIGIN_SECRET = process.env.CLOUDFRONT_ORIGIN_SECRET || "";
+const CLOUDFRONT_ORIGIN_HEADER = String(process.env.CLOUDFRONT_ORIGIN_HEADER || "x-contra-origin").toLowerCase();
+const ORIGIN_GUARD_MODE = ["off", "audit", "enforce"].includes(String(process.env.ORIGIN_GUARD_MODE || "").toLowerCase())
+  ? String(process.env.ORIGIN_GUARD_MODE).toLowerCase()
+  : (CLOUDFRONT_ORIGIN_SECRET ? "enforce" : "audit");
 const MAX_REQUEST_URL_BYTES = Math.max(1024, Number(process.env.MAX_REQUEST_URL_BYTES || 16384));
 const HTTP_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15000));
 const HTTP_HEADERS_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 10000));
 const HTTP_KEEP_ALIVE_TIMEOUT_MS = Math.max(1000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 5000));
-const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
-const RATE_LIMIT_REQUESTS = Math.max(30, Number(process.env.RATE_LIMIT_REQUESTS || 600));
-const BATTLE_RATE_LIMIT_REQUESTS = Math.max(60000, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
-const TRUST_PROXY_HEADERS = Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_PROJECT_ID) ||
-  process.env.TRUST_PROXY_HEADERS === "1";
+const RATE_LIMIT_WINDOW_MS = Math.max(250, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
+const RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.RATE_LIMIT_REQUESTS || 600));
+const BATTLE_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
+const ACCOUNT_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.ACCOUNT_RATE_LIMIT_REQUESTS || 1200));
+const SESSION_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.SESSION_RATE_LIMIT_REQUESTS || 900));
+const DEVICE_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.DEVICE_RATE_LIMIT_REQUESTS || 900));
+const RATE_LIMIT_BUCKET_CAP = Math.max(128, Number(process.env.RATE_LIMIT_BUCKET_CAP || 8192));
+const MAX_HTTP_IN_FLIGHT = Math.max(1, Number(process.env.MAX_HTTP_IN_FLIGHT || 256));
+const MAX_HTTP_IN_FLIGHT_PER_IP = Math.max(1, Number(process.env.MAX_HTTP_IN_FLIGHT_PER_IP || 32));
+const MAX_HTTP_CONNECTIONS = Math.max(16, Number(process.env.MAX_HTTP_CONNECTIONS || 512));
+const POSTGRES_POOL_MAX = Math.max(1, Number(process.env.POSTGRES_POOL_MAX || 10));
+const POSTGRES_CONNECT_TIMEOUT_MS = Math.max(250, Number(process.env.POSTGRES_CONNECT_TIMEOUT_MS || 3000));
+const POSTGRES_IDLE_TIMEOUT_MS = Math.max(1000, Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 10000));
+const POSTGRES_QUERY_TIMEOUT_MS = Math.max(250, Number(process.env.POSTGRES_QUERY_TIMEOUT_MS || 5000));
+const POSTGRES_MIGRATION_TIMEOUT_MS = Math.max(5000, Number(process.env.POSTGRES_MIGRATION_TIMEOUT_MS || 60000));
+const POSTGRES_MUTATION_QUEUE_MAX = Math.max(1, Number(process.env.POSTGRES_MUTATION_QUEUE_MAX || 256));
 const rateLimitBuckets = new Map();
+const httpInFlightByIp = new Map();
+let httpInFlight = 0;
+let postgresMutationQueueDepth = 0;
+let originGuardAuditWindowStartedAt = 0;
+let originGuardAuditCount = 0;
 const LAUNCHER_VERSION = process.env.LAUNCHER_VERSION || "1.2.0";
 const LAUNCHER_MANIFEST_URL = process.env.LAUNCHER_MANIFEST_URL || "";
 const LAUNCHER_UPDATE_KEY = process.env.LAUNCHER_UPDATE_KEY || "";
@@ -62,6 +83,10 @@ const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESS
 const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
+const gameLoginSeen = new Map();
+const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 30 * 60 * 1000));
+const playerBanCache = new Map();
+const PLAYER_BAN_CACHE_TTL_MS = Math.max(1000, Number(process.env.PLAYER_BAN_CACHE_TTL_MS || 15000));
 const requestAuditContext = new AsyncLocalStorage();
 
 function currentAuditContext() {
@@ -74,6 +99,7 @@ async function auditGameEvent(db, event) {
   return writeAuditEvent(db, {
     ipAddress: context.ipAddress || "",
     device: context.device || "",
+    geo: context.geo || {},
     source: context.source || "game_api",
     ...event
   });
@@ -82,17 +108,41 @@ async function auditGameEvent(db, event) {
 async function recordPlayerAccess(account, req, kind, source) {
   if (!pgPool || !account?.id) return;
   const ipAddress = requestClientIp(req);
+  const geo = requestGeo(req);
   const device = String(req.headers["user-agent"] || "").slice(0, 300);
   try {
-    await touchPlayerActivity(pgPool, { playerId: account.id, kind, ipAddress, device, source });
+    const previousResult = await pgPool.query(
+      `SELECT last_ip_address, last_device, last_geo
+       FROM player_activity
+       WHERE player_id = $1`,
+      [Number(account.id)]
+    );
+    const previous = previousResult.rows[0] || null;
+    const ipChanged = Boolean(previous?.last_ip_address && ipAddress && previous.last_ip_address !== ipAddress);
+    const deviceChanged = Boolean(previous?.last_device && device && previous.last_device !== device);
+    const previousCountry = String(previous?.last_geo?.countryCode || "");
+    const countryChanged = Boolean(previousCountry && geo.countryCode && previousCountry !== geo.countryCode);
+    await touchPlayerActivity(pgPool, { playerId: account.id, kind, ipAddress, device, source, geo });
     await writeAuditEvent(pgPool, {
       playerId: account.id,
       eventType: kind === "logout" ? "player_logout" : "player_login",
       category: "session",
+      severity: kind !== "logout" && (countryChanged || deviceChanged) ? "notice" : "info",
+      suspicious: kind !== "logout" && (countryChanged || deviceChanged),
       description: kind === "logout" ? "Игрок вышел" : "Игрок вошёл",
       source,
       ipAddress,
-      device
+      device,
+      geo,
+      metadata: {
+        accessSource: source,
+        geoSource: geo.source || "socket",
+        ipChanged,
+        deviceChanged,
+        countryChanged,
+        previousIpAddress: ipChanged ? previous.last_ip_address : "",
+        previousCountryCode: countryChanged ? previousCountry : "",
+      }
     });
   } catch (error) {
     console.error(`[admin-logs] player access audit failed player=${account.id} kind=${kind}`, error);
@@ -106,11 +156,93 @@ function safeTokenEquals(left, right) {
   return crypto.timingSafeEqual(a, b);
 }
 
+function hasValidCloudFrontOrigin(req) {
+  return Boolean(CLOUDFRONT_ORIGIN_SECRET) &&
+    safeTokenEquals(req?.headers?.[CLOUDFRONT_ORIGIN_HEADER], CLOUDFRONT_ORIGIN_SECRET);
+}
+
+async function recordGameLoginOnce(account, req) {
+  if (!account?.id) return;
+  const now = Date.now();
+  const ip = requestClientIp(req);
+  const deviceKey = stableIdentityHash(req.headers["user-agent"] || "unknown");
+  const key = `${account.id}:${ip}:${deviceKey}`;
+  const previous = Number(gameLoginSeen.get(key) || 0);
+  if (now - previous < GAME_LOGIN_DEDUPE_TTL_MS) return;
+  if (gameLoginSeen.has(key)) gameLoginSeen.delete(key);
+  gameLoginSeen.set(key, now);
+  while (gameLoginSeen.size > 10000) gameLoginSeen.delete(gameLoginSeen.keys().next().value);
+  await recordPlayerAccess(account, req, "login", "game_api_login");
+}
+
+function decodeCloudFrontHeader(value, maxLength = 160) {
+  const raw = String(value || "").slice(0, maxLength * 3);
+  try {
+    return decodeURIComponent(raw).slice(0, maxLength);
+  } catch {
+    return raw.slice(0, maxLength);
+  }
+}
+
+function cloudFrontViewerIp(req) {
+  if (!hasValidCloudFrontOrigin(req)) return "";
+  const address = String(req.headers["cloudfront-viewer-address"] || "").trim();
+  if (!address || address.length > 160) return "";
+  if (address.startsWith("[")) {
+    const end = address.indexOf("]");
+    return end > 1 ? address.slice(1, end) : "";
+  }
+  const colon = address.lastIndexOf(":");
+  if (colon > 0 && /^\d+$/.test(address.slice(colon + 1))) return address.slice(0, colon);
+  return address;
+}
+
 function requestClientIp(req) {
-  const forwarded = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
-    : "";
-  return forwarded || req.socket?.remoteAddress || "unknown";
+  // CloudFront-Viewer-Address is generated by CloudFront. X-Forwarded-For is
+  // intentionally ignored because a viewer-controlled prefix survives proxying.
+  return cloudFrontViewerIp(req) || req.socket?.remoteAddress || "unknown";
+}
+
+function requestGeo(req) {
+  const trusted = hasValidCloudFrontOrigin(req);
+  return {
+    ip: requestClientIp(req),
+    source: trusted && req.headers["cloudfront-viewer-address"] ? "cloudfront" : "socket",
+    countryCode: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country"], 8) : "",
+    country: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country-name"], 120) : "",
+    regionCode: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country-region"], 32) : "",
+    region: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country-region-name"], 120) : "",
+    city: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-city"], 120) : "",
+    postalCode: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-postal-code"], 32) : "",
+    timeZone: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-time-zone"], 80) : "",
+    asn: trusted ? Number(req.headers["cloudfront-viewer-asn"] || 0) || 0 : 0,
+  };
+}
+
+function isOriginGuardExempt(pathname) {
+  return pathname === "/health" ||
+    pathname.startsWith("/battle/") ||
+    pathname === "/admin/device-reset" ||
+    pathname === "/db";
+}
+
+function allowPlayerFacingOrigin(req, pathname) {
+  if (ORIGIN_GUARD_MODE === "off" || isOriginGuardExempt(pathname) || hasValidCloudFrontOrigin(req)) return true;
+  if (ORIGIN_GUARD_MODE === "audit") {
+    const now = Date.now();
+    if (!originGuardAuditWindowStartedAt || now - originGuardAuditWindowStartedAt >= 60000) {
+      if (originGuardAuditCount > 0) {
+        console.warn(`[security] origin guard audit suppressed=${originGuardAuditCount} previousWindowMs=${now - originGuardAuditWindowStartedAt}`);
+      }
+      originGuardAuditWindowStartedAt = now;
+      originGuardAuditCount = 0;
+      console.warn(`[security] origin guard audit path=${pathname} remote=${req.socket?.remoteAddress || "unknown"}`);
+    } else {
+      originGuardAuditCount += 1;
+    }
+    return true;
+  }
+  return false;
 }
 
 function requestRatePolicy(pathname) {
@@ -119,7 +251,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/social" || pathname === "/battle/clan-events") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -128,22 +260,67 @@ function requestRatePolicy(pathname) {
   return { windowMs: RATE_LIMIT_WINDOW_MS, limit: RATE_LIMIT_REQUESTS };
 }
 
-function allowHttpRequest(req, pathname) {
-  const now = Date.now();
-  const policy = requestRatePolicy(pathname);
-  const bucketKey = `${requestClientIp(req)}|${pathname}`;
-  let bucket = rateLimitBuckets.get(bucketKey);
+function boundedRateBucket(key, policy, now) {
+  let bucket = rateLimitBuckets.get(key);
   if (!bucket || now - bucket.startedAt >= policy.windowMs) {
-    bucket = { startedAt: now, count: 0 };
-    rateLimitBuckets.set(bucketKey, bucket);
+    bucket = { startedAt: now, count: 0, lastSeenAt: now };
   }
-  bucket.count++;
-  if (rateLimitBuckets.size > 10000) {
-    for (const [key, value] of rateLimitBuckets) {
-      if (now - value.startedAt > 10 * 60 * 1000) rateLimitBuckets.delete(key);
-    }
+  bucket.count += 1;
+  bucket.lastSeenAt = now;
+  if (rateLimitBuckets.has(key)) rateLimitBuckets.delete(key);
+  rateLimitBuckets.set(key, bucket);
+  while (rateLimitBuckets.size > RATE_LIMIT_BUCKET_CAP) {
+    rateLimitBuckets.delete(rateLimitBuckets.keys().next().value);
   }
   return bucket.count <= policy.limit;
+}
+
+function stableIdentityHash(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 24);
+}
+
+function requestRateIdentities(req, url) {
+  const accountId = Number(url.searchParams.get("ccid") || url.searchParams.get("playerId") || url.searchParams.get("userId") || 0);
+  const session = url.searchParams.get("sessionAuth") || url.searchParams.get("token") || req.headers["x-session-token"] || "";
+  const device = req.headers["x-device-key-id"] || req.headers["x-launcher-device"] || url.searchParams.get("deviceKeyId") || "";
+  return {
+    account: Number.isInteger(accountId) && accountId > 0 ? String(accountId) : "",
+    session: stableIdentityHash(session),
+    device: stableIdentityHash(device),
+  };
+}
+
+function allowRequestIdentityBucket(req, key, policy, now = Date.now()) {
+  if (!key) return true;
+  if (!(req.securityRateKeys instanceof Set)) req.securityRateKeys = new Set();
+  if (req.securityRateKeys.has(key)) return true;
+  req.securityRateKeys.add(key);
+  return boundedRateBucket(key, policy, now);
+}
+
+function allowResolvedIdentityRequest(req, account, body = {}) {
+  const now = Date.now();
+  const accountId = Number(account?.id || body?.ccid || body?.playerId || 0);
+  const session = stableIdentityHash(body?.token || body?.sessionToken || body?.sessionAuth || "");
+  const device = stableIdentityHash(body?.deviceKeyId || body?.launcherDevice || "");
+  if (Number.isInteger(accountId) && accountId > 0 && !allowRequestIdentityBucket(req, `account:${accountId}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: ACCOUNT_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (session && !allowRequestIdentityBucket(req, `session:${session}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: SESSION_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (device && !allowRequestIdentityBucket(req, `device:${device}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: DEVICE_RATE_LIMIT_REQUESTS }, now)) return false;
+  return true;
+}
+
+function allowHttpRequest(req, url) {
+  const now = Date.now();
+  const pathname = url.pathname;
+  const policy = requestRatePolicy(pathname);
+  if (!boundedRateBucket(`ip:${requestClientIp(req)}|${pathname}`, policy, now)) return false;
+  const identities = requestRateIdentities(req, url);
+  if (identities.account && !allowRequestIdentityBucket(req, `account:${identities.account}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: ACCOUNT_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (identities.session && !allowRequestIdentityBucket(req, `session:${identities.session}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: SESSION_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (identities.device && !allowRequestIdentityBucket(req, `device:${identities.device}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: DEVICE_RATE_LIMIT_REQUESTS }, now)) return false;
+  return true;
 }
 
 function hasValidBattleServiceToken(req, body) {
@@ -1250,7 +1427,15 @@ const weaponSelectionSaveVersions = new Map();
 const MANAGED_CATALOG_ITEM_TYPES = [1, 2, 3, 4];
 
 function enqueuePostgresMutation(operation) {
-  const run = pgSaveChain.catch(() => {}).then(operation);
+  if (postgresMutationQueueDepth >= POSTGRES_MUTATION_QUEUE_MAX) {
+    const error = new Error("database_busy");
+    error.code = "DATABASE_BUSY";
+    return Promise.reject(error);
+  }
+  postgresMutationQueueDepth += 1;
+  const run = pgSaveChain.catch(() => {}).then(operation).finally(() => {
+    postgresMutationQueueDepth = Math.max(0, postgresMutationQueueDepth - 1);
+  });
   pgSaveChain = run.catch((error) => {
     console.error("[postgres] mutation failed", error);
   });
@@ -1323,7 +1508,8 @@ async function runMigrations() {
     const client = await pgPool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(sql);
+      await client.query(`SET LOCAL statement_timeout = ${Math.trunc(POSTGRES_MIGRATION_TIMEOUT_MS)}`);
+      await client.query({ text: sql, query_timeout: POSTGRES_MIGRATION_TIMEOUT_MS });
       await client.query("INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING", [version]);
       await client.query("COMMIT");
     } catch (error) {
@@ -1562,7 +1748,13 @@ async function initStore() {
   const { Pool } = await import("pg");
   pgPool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
+    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined,
+    max: POSTGRES_POOL_MAX,
+    connectionTimeoutMillis: POSTGRES_CONNECT_TIMEOUT_MS,
+    idleTimeoutMillis: POSTGRES_IDLE_TIMEOUT_MS,
+    statement_timeout: POSTGRES_QUERY_TIMEOUT_MS,
+    query_timeout: POSTGRES_QUERY_TIMEOUT_MS,
+    application_name: "contra-city-api",
   });
 
   await runMigrations();
@@ -1863,8 +2055,10 @@ const adminLogsApi = createAdminLogsApi({
   getPool: () => pgPool,
   readJsonBody,
   requestIp: requestClientIp,
+  requestGeo,
   onPlayerChanged: async (playerId) => {
     if (!pgPool) return;
+    playerBanCache.delete(Number(playerId));
     const fresh = await loadPostgresAccount(playerId);
     if (fresh) store.accounts[String(playerId)] = fresh;
   }
@@ -2250,7 +2444,7 @@ function persist(account) {
   saveStore(store);
 }
 
-async function accountFromRequest(url) {
+async function accountFromRequestUnchecked(url) {
   const requestStartedAt = Date.now();
   const requestPage = String(url.searchParams.get("page") || "").toLowerCase();
   const requestAction = String(url.searchParams.get("act") || url.searchParams.get("action") || "").toLowerCase();
@@ -2291,6 +2485,36 @@ async function accountFromRequest(url) {
   const resolved = skipPreRefresh ? account : await refreshAccountFromPostgres(account);
   logClanPreRoute(skipPreRefresh ? "fallback-cache" : "fallback-pg-refresh");
   return resolved;
+}
+
+async function activePlayerBan(playerId) {
+  const id = Number(playerId || 0);
+  if (!pgPool || !Number.isInteger(id) || id <= 0) return null;
+  const now = Date.now();
+  const cached = playerBanCache.get(id);
+  if (cached && now - cached.loadedAt < PLAYER_BAN_CACHE_TTL_MS) return cached.ban;
+  const result = await pgPool.query(
+    `SELECT id, reason, expires_at
+     FROM admin_punishments
+     WHERE player_id = $1
+       AND punishment_type = 'ban'
+       AND revoked_at IS NULL
+       AND (expires_at IS NULL OR expires_at > now())
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [id]
+  );
+  const ban = result.rows[0] || null;
+  if (playerBanCache.has(id)) playerBanCache.delete(id);
+  playerBanCache.set(id, { loadedAt: now, ban });
+  while (playerBanCache.size > 10000) playerBanCache.delete(playerBanCache.keys().next().value);
+  return ban;
+}
+
+async function accountFromRequest(url) {
+  const account = await accountFromRequestUnchecked(url);
+  if (!account) return null;
+  return (await activePlayerBan(account.id)) ? null : account;
 }
 
 function postgresTimestamp(value) {
@@ -6886,13 +7110,14 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
 }
 
 function requestPublicOrigin(req, url) {
-  const forwardedHost = TRUST_PROXY_HEADERS
+  const trustedCloudFront = hasValidCloudFrontOrigin(req);
+  const forwardedHost = trustedCloudFront
     ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()
     : "";
   const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
   if (!host) return url.origin;
-  const forwardedProto = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
+  const forwardedProto = trustedCloudFront
+    ? String(req.headers["cloudfront-forwarded-proto"] || req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
     : "";
   const proto = forwardedProto || url.protocol.replace(/:$/, "") || "http";
   return `${proto}://${host}`;
@@ -7367,6 +7592,32 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
   }
 }
 
+async function recordBattleSecurityEvent(event = {}) {
+  if (!pgPool) return { ok: true, storage: "json-file", ignored: true };
+  const kind = String(event.kind || event.type || "udp_suspicious_activity").replace(/[^a-z0-9_-]/gi, "_").slice(0, 80);
+  const playerId = Number(event.playerId || event.accountId || 0);
+  const ipAddress = String(event.ipAddress || event.ip || "").slice(0, 128);
+  const severity = ["notice", "warning", "critical"].includes(event.severity) ? event.severity : "warning";
+  await writeAuditEvent(pgPool, {
+    playerId: Number.isInteger(playerId) && playerId > 0 ? playerId : null,
+    eventType: `security_${kind}`,
+    category: "security",
+    severity,
+    suspicious: true,
+    description: String(event.description || `Подозрительная UDP-активность: ${kind}`).slice(0, 1000),
+    source: "battle_server_security",
+    ipAddress,
+    metadata: {
+      ...asBattleJson(event.metadata || event.details || {}),
+      port: Number(event.port || 0),
+      count: Number(event.count || 0),
+      durationMs: Number(event.durationMs || 0),
+      stage: String(event.stage || "preauth").slice(0, 40),
+    },
+  });
+  return { ok: true, storage: "postgres", type: kind };
+}
+
 async function recordBattleEvent(event) {
   const account = ensureDesktopAccount();
   if (!pgPool) {
@@ -7378,6 +7629,9 @@ async function recordBattleEvent(event) {
   const mode = normalizeStatsMode(event.mode || 2);
   const maxPlayers = Number(event.maxPlayers || 8);
   const playerId = Number(event.playerId || account.id || 1);
+  if (await activePlayerBan(playerId)) {
+    return { ok: false, status: 403, error: "account_banned" };
+  }
   const actorId = Number(event.actorId || 1);
   const team = Number(event.team ?? -1);
   const health = Number(event.health ?? 100);
@@ -7546,17 +7800,68 @@ async function recordBattleEvent(event) {
 
 ensureDesktopAccount();
 
-const server = http.createServer(async (req, res) => {
+function acquireHttpRequestSlot(req, res) {
+  const ip = requestClientIp(req);
+  const ipActive = Number(httpInFlightByIp.get(ip) || 0);
+  if (httpInFlight >= MAX_HTTP_IN_FLIGHT || ipActive >= MAX_HTTP_IN_FLIGHT_PER_IP) return false;
+  httpInFlight += 1;
+  httpInFlightByIp.set(ip, ipActive + 1);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    httpInFlight = Math.max(0, httpInFlight - 1);
+    const remaining = Number(httpInFlightByIp.get(ip) || 0) - 1;
+    if (remaining > 0) httpInFlightByIp.set(ip, remaining);
+    else httpInFlightByIp.delete(ip);
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  return true;
+}
+
+function serviceErrorStatus(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toUpperCase();
+  if (
+    code === "DATABASE_BUSY" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code.startsWith("08") ||
+    ["57P01", "57P02", "57P03", "53300", "53400"].includes(code) ||
+    message.includes("database_busy") ||
+    message.includes("timeout") ||
+    message.includes("connection") ||
+    message.includes("connect econn") ||
+    message.includes("too many connections")
+  ) return 503;
+  if (message.includes("body_too_large")) return 413;
+  if (message.includes("invalid_json")) return 400;
+  return 500;
+}
+
+async function handleHttpRequest(req, res) {
   if (Buffer.byteLength(req.url || "", "utf8") > MAX_REQUEST_URL_BYTES) {
     sendJson(res, { ok: false, error: "uri_too_long" }, 414);
     return;
   }
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-  if (!allowHttpRequest(req, url.pathname)) {
+  if (!allowPlayerFacingOrigin(req, url.pathname)) {
+    sendJson(res, { ok: false, error: "not_found" }, 404);
+    return;
+  }
+  if (!allowHttpRequest(req, url)) {
     sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
     return;
   }
   const requestOrigin = requestPublicOrigin(req, url);
+
+  if (process.env.SECURITY_TEST_FORCE_DB_OUTAGE === "1" && url.pathname === "/__security-test/db-outage") {
+    const error = new Error("connect ECONNREFUSED simulated runtime PostgreSQL outage");
+    error.code = "ECONNREFUSED";
+    throw error;
+  }
 
   if (await adminLogsApi.handle(req, res, url)) {
     return;
@@ -7602,6 +7907,10 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { result: false, error: "invalid_session" }, 403);
         return;
       }
+      if (!allowResolvedIdentityRequest(req, account, body)) {
+        sendJson(res, { result: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
       const device = await loadLauncherDevice(account.id);
       const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
       if (!device || !deviceKeyId || device.deviceKeyId !== deviceKeyId) {
@@ -7611,7 +7920,8 @@ const server = http.createServer(async (req, res) => {
       const challenge = createLauncherDeviceChallenge(account, deviceKeyId);
       sendJson(res, { result: true, ...challenge });
     } catch (error) {
-      sendJson(res, { result: false, error: error.message || "device_challenge_failed" }, 500);
+      const status = serviceErrorStatus(error);
+      sendJson(res, { result: false, error: status === 503 ? "service_unavailable" : (error.message || "device_challenge_failed") }, status);
     }
     return;
   }
@@ -7647,7 +7957,8 @@ const server = http.createServer(async (req, res) => {
       });
       sendJson(res, { ok: true, ccid, removed });
     } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "device_reset_failed" }, 500);
+      const status = serviceErrorStatus(error);
+      sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (error.message || "device_reset_failed") }, status);
     }
     return;
   }
@@ -7670,13 +7981,18 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { result: false, error: "invalid_session", news: launcherNewsPayload() }, 403, {}, { ascii: true });
       return;
     }
+    if (!allowResolvedIdentityRequest(req, account, body)) {
+      sendJson(res, { result: false, error: "rate_limited", news: launcherNewsPayload() }, 429, { "retry-after": "60" }, { ascii: true });
+      return;
+    }
 
     let deviceAccess;
     try {
       deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
     } catch (error) {
       console.error("[launcher-device] access check failed", error);
-      sendJson(res, { result: false, error: "device_binding_failed", news: launcherNewsPayload() }, 500, {}, { ascii: true });
+      const status = serviceErrorStatus(error);
+      sendJson(res, { result: false, error: status === 503 ? "service_unavailable" : "device_binding_failed", news: launcherNewsPayload() }, status, {}, { ascii: true });
       return;
     }
     if (!deviceAccess.ok) {
@@ -7751,9 +8067,11 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { result: false, error: "1" }, 403);
       return;
     }
+    await recordGameLoginOnce(account, req);
     const auditContext = {
       ipAddress: requestClientIp(req),
       device: String(req.headers["user-agent"] || "").slice(0, 300),
+      geo: requestGeo(req),
       source: "game_api"
     };
     const payload = await requestAuditContext.run(auditContext, () => routeAjax(url, account, requestOrigin));
@@ -7762,7 +8080,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/health") {
-    sendJson(res, { ok: true, build: API_BUILD_ID, storage: pgPool ? "postgres" : "json-file" });
+    sendJson(res, {
+      ok: true,
+      build: API_BUILD_ID,
+      storage: pgPool ? "postgres" : "json-file",
+      ...(process.env.SECURITY_TEST_METRICS === "1" ? {
+        securityMetrics: {
+          rateLimitBuckets: rateLimitBuckets.size,
+          httpInFlight,
+          httpInFlightIps: httpInFlightByIp.size,
+          postgresMutationQueueDepth,
+        },
+      } : {}),
+    });
     return;
   }
 
@@ -7780,7 +8110,7 @@ const server = http.createServer(async (req, res) => {
       const result = await battleSocialRequest(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "battle_social_failed" }, 500);
+      sendJson(res, { ok: false, error: error.message || "battle_social_failed" }, serviceErrorStatus(error));
     }
     return;
   }
@@ -7799,7 +8129,29 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, await battleClanTreasuryEvents(body));
     } catch (error) {
       console.error("[clan-live] treasury-feed failed", error);
-      sendJson(res, { ok: false, error: error.message || "clan_treasury_feed_failed" }, 500);
+      sendJson(res, { ok: false, error: error.message || "clan_treasury_feed_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/security") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.playerId || body.accountId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      sendJson(res, await recordBattleSecurityEvent(body));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "battle_security_failed" }, serviceErrorStatus(error));
     }
     return;
   }
@@ -7815,10 +8167,14 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { ok: false, error: "invalid_token" }, 403);
         return;
       }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.playerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
       const result = await recordBattleEvent(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "battle_event_failed" }, 500);
+      sendJson(res, { ok: false, error: error.message || "battle_event_failed" }, serviceErrorStatus(error));
     }
     return;
   }
@@ -7842,6 +8198,21 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");
+}
+
+const server = http.createServer((req, res) => {
+  if (!acquireHttpRequestSlot(req, res)) {
+    sendJson(res, { ok: false, error: "server_busy" }, 503, { "retry-after": "1" });
+    return;
+  }
+  handleHttpRequest(req, res).catch((error) => {
+    console.error("[http] unhandled request error", error);
+    if (!res.headersSent) {
+      sendJson(res, { ok: false, error: serviceErrorStatus(error) === 503 ? "service_unavailable" : "request_failed" }, serviceErrorStatus(error));
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+  });
 });
 
 server.listen(PORT, () => {
@@ -7849,6 +8220,8 @@ server.listen(PORT, () => {
   if (!adminLogsStatus?.configured) console.warn(`[admin-logs] owner account is not configured reason=${adminLogsStatus?.reason || "unknown"}`);
   else console.log(`[admin-logs] owner ready id=${adminLogsStatus.ownerId}`);
   if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
+  if (!CLOUDFRONT_ORIGIN_SECRET) console.warn(`[security] CLOUDFRONT_ORIGIN_SECRET is missing; origin guard mode=${ORIGIN_GUARD_MODE}`);
+  console.log(`[security] originGuard=${ORIGIN_GUARD_MODE} viewerIp=cloudfront-viewer-address rateBuckets=${RATE_LIMIT_BUCKET_CAP} connections=${MAX_HTTP_CONNECTIONS} inFlight=${MAX_HTTP_IN_FLIGHT}/ip${MAX_HTTP_IN_FLIGHT_PER_IP} pgPool=${POSTGRES_POOL_MAX} pgQueryTimeout=${POSTGRES_QUERY_TIMEOUT_MS}ms pgQueue=${POSTGRES_MUTATION_QUEUE_MAX}`);
   if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
   if (!CREATE_CODE) console.warn("[security] CREATE_CODE is not set; /create account creation is disabled.");
   if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
@@ -7858,6 +8231,8 @@ server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
 server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
 server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
 server.maxHeadersCount = 64;
+server.maxConnections = MAX_HTTP_CONNECTIONS;
+server.dropMaxConnection = true;
 server.on("clientError", (_error, socket) => {
   if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
 });
