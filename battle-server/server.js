@@ -307,6 +307,11 @@ const MAP_PICKUP_POINTS = {
     { id: 36001, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 6.126, y: 36.396, z: 159.793, rotY: 90 },
     { id: 36002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 2.755, y: 22.209, z: 161.192, rotY: 270 },
   ],
+  dashguard: [
+    { id: 38001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 10, y: 2, z: 30, rotY: 0 },
+    { id: 38002, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 20, y: 2, z: 40, rotY: 0 },
+    { id: 38003, type: ITEM_TYPES.ARMOR, subType: 1, value: 0, x: 30, y: 2, z: 50, rotY: 0 }
+  ],
   inferno: [
     // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids.
     { id: 37001, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 303.875, y: -52.652, z: 215.451, rotY: 270 },
@@ -488,6 +493,18 @@ const MAP_SPAWN_POINTS = {
       { x: 16.51, y: 20.676, z: 312.944, rotY: 180 },
     ],
   },
+  dashguard: {
+    dm: [
+      { x: 152.449, y: -24.553, z: 228.355, rotY: 330 },
+      { x: 63.741, y: -24.173, z: 313.678, rotY: 180 },
+      { x: 62.765, y: -18.43, z: 417.897, rotY: 180 },
+      { x: -35.083, y: -18.451, z: 314.706, rotY: 90 },
+      { x: 169.289, y: -18.284, z: 186.146, rotY: 270 },
+      { x: 182.13, y: -18.398, z: 244.876, rotY: 270 },
+      { x: 88.996, y: 10.842, z: 340.641, rotY: 180 },
+      { x: 3.285, y: -18.284, z: 225.055, rotY: 45 },
+    ],
+  },
   inferno: {
     // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids -> POINTS_RESCALE.
     dm: [
@@ -545,6 +562,7 @@ const MAP_ALLOWED_MODES = {
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
   arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
   inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  dashguard: [MAP_MODE_DEATHMATCH],
 };
 const CTF_MAPS = {
   arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
