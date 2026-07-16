@@ -308,11 +308,11 @@ const MAP_PICKUP_POINTS = {
     { id: 36002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 2.755, y: 22.209, z: 161.192, rotY: 270 },
   ],
   dashguard: [
-    { id: 38001, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 147.027f, y: -16.897f, z: 187.417f, rotY: 270f },
-    { id: 38002, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: -28.712f, y: -16.897f, z: 287.682f, rotY: 270f },
-    { id: 38003, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 60.257f, y: -16.897f, z: 266.146f, rotY: 270f },
-    { id: 38004, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 68.092f, y: -16.897f, z: 411.424f, rotY: 270f },
-    { id: 38005, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 115.696f, y: -17.238f, z: 264.747f, rotY: 90f },
+    { id: 38001, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 147.027, y: -16.897, z: 187.417, rotY: 270 },
+    { id: 38002, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: -28.712, y: -16.897, z: 287.682, rotY: 270 },
+    { id: 38003, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 60.257, y: -16.897, z: 266.146, rotY: 270 },
+    { id: 38004, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 68.092, y: -16.897, z: 411.424, rotY: 270 },
+    { id: 38005, type: ITEM_TYPES.HEALTH, subType: 1, value: 0, x: 115.696, y: -17.238, z: 264.747, rotY: 90 }
   ],
   inferno: [
     // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids.
