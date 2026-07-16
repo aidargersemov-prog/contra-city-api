@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "3.76.0.237";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-15-daily-quest-removed-v269";
+const BUILD_ID = "battle-server-2026-07-16-enet-pending-gate-v272";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -146,31 +146,78 @@ const MAX_PLAYER_JUMP = Math.max(1, Number(process.env.MAX_PLAYER_JUMP || 32));
 const ROOM_INTERPOLATION_MODE_RAW = Number(process.env.ROOM_INTERPOLATION_MODE ?? 3);
 const ROOM_INTERPOLATION_MODE = Math.max(0, Math.min(255, Number.isFinite(ROOM_INTERPOLATION_MODE_RAW) ? ROOM_INTERPOLATION_MODE_RAW : 0));
 const ADD_MOVE_ROTATION_KEY = process.env.ADD_MOVE_ROTATION_KEY !== "0";
-const MAX_UDP_DATAGRAM_BYTES = Math.max(512, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
+const MAX_UDP_DATAGRAM_BYTES = Math.max(64, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
 const MAX_ENET_COMMANDS_PER_PACKET = Math.max(1, Number(process.env.MAX_ENET_COMMANDS_PER_PACKET || 64));
-// Compatibility-first defaults: one public/NAT address may represent many real players,
-// and every client maintains several Photon endpoints at the same time.
-const MAX_SESSIONS_TOTAL = Math.max(50000, Number(process.env.MAX_SESSIONS_TOTAL || 50000));
-const MAX_SESSIONS_PER_IP = Math.max(512, Number(process.env.MAX_SESSIONS_PER_IP || 512));
-const UDP_RATE_WINDOW_MS = Math.max(1000, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
-const UDP_RATE_PACKETS_PER_IP = Math.max(100000, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
-const UDP_RATE_BYTES_PER_IP = Math.max(512 * 1024 * 1024, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
-const TCP_MAX_CONNECTIONS_PER_IP = Math.max(128, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
-const TCP_IDLE_TIMEOUT_MS = Math.max(120000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
-const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
+// Defaults leave room for several Photon endpoints per client and multiple clients behind one NAT.
+// Every limit remains lowerable through the environment so staging can exercise the boundary.
+const MAX_SESSIONS_TOTAL = Math.max(1, Number(process.env.MAX_SESSIONS_TOTAL || 10000));
+const MAX_SESSIONS_PER_IP = Math.max(1, Number(process.env.MAX_SESSIONS_PER_IP || 128));
+const MAX_PENDING_SESSIONS_TOTAL = Math.max(1, Number(process.env.MAX_PENDING_SESSIONS_TOTAL || 4096));
+const MAX_PENDING_SESSIONS_PER_IP = Math.max(1, Number(process.env.MAX_PENDING_SESSIONS_PER_IP || 32));
+const PENDING_SESSION_TTL_MS = Math.max(250, Number(process.env.PENDING_SESSION_TTL_MS || 10000));
+const PREAUTH_SESSION_TTL_MS = Math.max(PENDING_SESSION_TTL_MS, Number(process.env.PREAUTH_SESSION_TTL_MS || 30000));
+const DETACHED_SESSION_TTL_MS = Math.max(1000, Number(process.env.DETACHED_SESSION_TTL_MS || 30000));
+const SESSION_SECURITY_SWEEP_MS = Math.max(100, Number(process.env.SESSION_SECURITY_SWEEP_MS || 1000));
+const SESSION_SECURITY_SWEEP_LIMIT = Math.max(1, Number(process.env.SESSION_SECURITY_SWEEP_LIMIT || 512));
+const NEW_ENDPOINT_WINDOW_MS = Math.max(1000, Number(process.env.NEW_ENDPOINT_WINDOW_MS || 10000));
+const NEW_ENDPOINTS_PER_IP = Math.max(1, Number(process.env.NEW_ENDPOINTS_PER_IP || 64));
+const UDP_RATE_WINDOW_MS = Math.max(250, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
+const UDP_RATE_PACKETS_PER_IP = Math.max(1, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
+const UDP_RATE_BYTES_PER_IP = Math.max(1, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
+const UDP_RATE_BUCKET_CAP = Math.max(128, Number(process.env.UDP_RATE_BUCKET_CAP || 16384));
+const INVALID_WINDOW_MS = Math.max(1000, Number(process.env.INVALID_WINDOW_MS || 10000));
+const INVALID_PACKETS_PER_IP = Math.max(1, Number(process.env.INVALID_PACKETS_PER_IP || 64));
+const QUARANTINE_SHORT_MS = Math.max(1000, Number(process.env.QUARANTINE_SHORT_MS || 30000));
+const QUARANTINE_REPEAT_MS = Math.max(QUARANTINE_SHORT_MS, Number(process.env.QUARANTINE_REPEAT_MS || 300000));
+const SECURITY_IP_STATE_CAP = Math.max(128, Number(process.env.SECURITY_IP_STATE_CAP || 16384));
+const AUTH_OPERATION_WINDOW_MS = Math.max(1000, Number(process.env.AUTH_OPERATION_WINDOW_MS || 10000));
+const AUTH_OPERATIONS_PER_SESSION = Math.max(1, Number(process.env.AUTH_OPERATIONS_PER_SESSION || 2000));
+const AUTH_OPERATIONS_PER_ACCOUNT = Math.max(1, Number(process.env.AUTH_OPERATIONS_PER_ACCOUNT || 4000));
+const ACCOUNT_OPERATION_BUCKET_CAP = Math.max(128, Number(process.env.ACCOUNT_OPERATION_BUCKET_CAP || 10000));
+const TCP_MAX_CONNECTIONS_PER_IP = Math.max(1, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
+const TCP_IDLE_TIMEOUT_MS = Math.max(1000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
+const TCP_MAX_BYTES_PER_CONNECTION = Math.max(1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
 
 const sessions = new Map();
+const pendingSessions = new Map();
 const rooms = new Map();
 const masterSessionsByPlayerId = new Map();
 const clanTreasuryLiveEvents = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
 const udpRateByIp = new Map();
+const fullSessionCountByIp = new Map();
+const pendingSessionCountByIp = new Map();
+const natRebindSessions = new Map();
+const newEndpointRateByIp = new Map();
+const securityStateByIp = new Map();
+const securityAuditLastAt = new Map();
+const accountOperationRate = new Map();
 const tcpConnectionsByIp = new Map();
 let clanTreasuryPollCursor = 0;
 let clanTreasuryPollInitialized = false;
 let clanTreasuryPollInFlight = false;
 let clanTreasuryPollLastErrorAt = 0;
+let lastSecuritySweepAt = 0;
+
+function incrementCount(map, keyValue) {
+  const count = Number(map.get(keyValue) || 0) + 1;
+  map.set(keyValue, count);
+  return count;
+}
+
+function decrementCount(map, keyValue) {
+  const count = Number(map.get(keyValue) || 0) - 1;
+  if (count > 0) map.set(keyValue, count);
+  else map.delete(keyValue);
+  return Math.max(0, count);
+}
+
+function boundedInsert(map, keyValue, value, cap) {
+  if (map.has(keyValue)) map.delete(keyValue);
+  map.set(keyValue, value);
+  while (map.size > cap) map.delete(map.keys().next().value);
+}
 
 function allowUdpPacket(rinfo, byteLength) {
   const address = String(rinfo?.address || "unknown");
@@ -178,26 +225,17 @@ function allowUdpPacket(rinfo, byteLength) {
   let bucket = udpRateByIp.get(address);
   if (!bucket || now - bucket.startedAt >= UDP_RATE_WINDOW_MS) {
     bucket = { startedAt: now, packets: 0, bytes: 0, dropped: 0 };
-    udpRateByIp.set(address, bucket);
+    boundedInsert(udpRateByIp, address, bucket, UDP_RATE_BUCKET_CAP);
   }
   bucket.packets++;
   bucket.bytes += Math.max(0, Number(byteLength || 0));
   const allowed = bucket.packets <= UDP_RATE_PACKETS_PER_IP && bucket.bytes <= UDP_RATE_BYTES_PER_IP;
   if (!allowed) bucket.dropped++;
-  if (udpRateByIp.size > 10000) {
-    for (const [ip, value] of udpRateByIp) {
-      if (now - value.startedAt > UDP_RATE_WINDOW_MS * 2) udpRateByIp.delete(ip);
-    }
-  }
   return allowed;
 }
 
 function sessionCountForIp(address) {
-  let count = 0;
-  for (const session of sessions.values()) {
-    if (session?.rinfo?.address === address || String(session?.remoteKey || "").startsWith(`${address}:`)) count++;
-  }
-  return count;
+  return Number(fullSessionCountByIp.get(String(address || "unknown")) || 0);
 }
 let shopCatalogCache = { loadedAt: 0, weapons: [], wears: [] };
 const PROCESS_START_MS = Date.now();
@@ -762,6 +800,272 @@ function key(port, rinfo) {
   return `${port}:${rinfo.address}:${rinfo.port}`;
 }
 
+function endpointAddress(rinfo) {
+  return String(rinfo?.address || "unknown");
+}
+
+function natRebindKey(port, peerId, challenge) {
+  return `${Number(port) || 0}:${Number(peerId) || 0}:${Number(challenge) >>> 0}`;
+}
+
+function indexNatRebindSession(session) {
+  if (!session || session.isPending || !session.challenge) return;
+  const indexKey = natRebindKey(session.port, session.peerId, session.challenge);
+  let set = natRebindSessions.get(indexKey);
+  if (!set) {
+    set = new Set();
+    natRebindSessions.set(indexKey, set);
+  }
+  set.add(session);
+  session.natRebindIndexKey = indexKey;
+}
+
+function unindexNatRebindSession(session) {
+  const indexKey = session?.natRebindIndexKey;
+  if (!indexKey) return;
+  const set = natRebindSessions.get(indexKey);
+  if (set) {
+    set.delete(session);
+    if (set.size <= 0) natRebindSessions.delete(indexKey);
+  }
+  session.natRebindIndexKey = "";
+}
+
+function storePendingSession(session) {
+  pendingSessions.set(session.sessionId, session);
+  incrementCount(pendingSessionCountByIp, endpointAddress(session.rinfo));
+  return session;
+}
+
+function deletePendingSession(session, disconnect = true) {
+  if (!session?.sessionId || pendingSessions.get(session.sessionId) !== session) return false;
+  pendingSessions.delete(session.sessionId);
+  decrementCount(pendingSessionCountByIp, endpointAddress(session.rinfo));
+  if (disconnect) session.transportDisconnected = true;
+  return true;
+}
+
+function storeFullSession(session) {
+  sessions.set(session.sessionId, session);
+  incrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
+  indexNatRebindSession(session);
+  return session;
+}
+
+function deleteFullSession(session) {
+  if (!session?.sessionId || sessions.get(session.sessionId) !== session) return false;
+  sessions.delete(session.sessionId);
+  decrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
+  unindexNatRebindSession(session);
+  return true;
+}
+
+function touchBoundedState(map, address, value) {
+  boundedInsert(map, address, value, SECURITY_IP_STATE_CAP);
+  return value;
+}
+
+function noteInvalidUdp(address, reason, now = Date.now()) {
+  const ip = String(address || "unknown");
+  let state = securityStateByIp.get(ip);
+  if (!state || now - state.windowStartedAt >= INVALID_WINDOW_MS) {
+    state = {
+      windowStartedAt: now,
+      invalid: 0,
+      offenses: Number(state?.offenses || 0),
+      quarantineUntil: Number(state?.quarantineUntil || 0),
+      lastSeenAt: now,
+      lastReason: "",
+    };
+  }
+  state.invalid += 1;
+  state.lastSeenAt = now;
+  state.lastReason = String(reason || "invalid").slice(0, 80);
+  if (state.invalid === INVALID_PACKETS_PER_IP) {
+    state.offenses += 1;
+    const duration = state.offenses > 1 ? QUARANTINE_REPEAT_MS : QUARANTINE_SHORT_MS;
+    state.quarantineUntil = Math.max(state.quarantineUntil, now + duration);
+    console.log(`[security] udp quarantine ip=${ip} duration=${duration}ms offenses=${state.offenses} reason=${state.lastReason}`);
+    emitBattleSecurityAudit("udp_quarantine", {
+      ipAddress: ip,
+      severity: state.offenses > 1 ? "critical" : "warning",
+      description: `UDP pre-auth quarantine: ${state.lastReason}`,
+      durationMs: duration,
+      count: state.invalid,
+      stage: "preauth",
+      metadata: { offenses: state.offenses, reason: state.lastReason },
+    });
+  }
+  touchBoundedState(securityStateByIp, ip, state);
+  return state;
+}
+
+function isUdpQuarantined(address, now = Date.now()) {
+  return Number(securityStateByIp.get(String(address || "unknown"))?.quarantineUntil || 0) > now;
+}
+
+function allowNewEndpoint(address, now = Date.now()) {
+  const ip = String(address || "unknown");
+  let bucket = newEndpointRateByIp.get(ip);
+  if (!bucket || now - bucket.startedAt >= NEW_ENDPOINT_WINDOW_MS) {
+    bucket = { startedAt: now, count: 0, dropped: 0, lastSeenAt: now };
+  }
+  bucket.count += 1;
+  bucket.lastSeenAt = now;
+  const allowed = bucket.count <= NEW_ENDPOINTS_PER_IP;
+  if (!allowed) {
+    bucket.dropped += 1;
+    noteInvalidUdp(ip, "new-endpoint-rate", now);
+  }
+  touchBoundedState(newEndpointRateByIp, ip, bucket);
+  return allowed;
+}
+
+const ENET_COMMAND_MIN_LENGTH = new Map([
+  [0x01, 20],
+  [0x02, 44],
+  [0x03, 44],
+  [0x04, 12],
+  [0x05, 12],
+  [0x06, 12],
+  [0x07, 16],
+  [0x08, 32],
+  [0x0c, 12],
+]);
+
+function parseEnetPacketShape(msg) {
+  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) {
+    return { valid: false, reason: "datagram-size", commands: [] };
+  }
+  const commandCount = Number(msg[3] || 0);
+  if (commandCount <= 0 || commandCount > MAX_ENET_COMMANDS_PER_PACKET) {
+    return { valid: false, reason: "command-count", commands: [] };
+  }
+  let offset = 12;
+  const commands = [];
+  for (let index = 0; index < commandCount; index += 1) {
+    if (offset + 12 > msg.length) return { valid: false, reason: "command-header", commands: [] };
+    const type = msg[offset];
+    const minLength = ENET_COMMAND_MIN_LENGTH.get(type);
+    if (!minLength) return { valid: false, reason: `command-type-${type}`, commands: [] };
+    const length = readU32(msg, offset + 4);
+    if (length < minLength || offset + length > msg.length) {
+      return { valid: false, reason: "command-length", commands: [] };
+    }
+    if ((type === 0x02 || type === 0x03) && length !== 44) {
+      return { valid: false, reason: "connect-length", commands: [] };
+    }
+    commands.push({ type, offset, length, end: offset + length });
+    offset += length;
+  }
+  if (offset !== msg.length) return { valid: false, reason: "trailing-bytes", commands: [] };
+  return { valid: true, reason: "", commands };
+}
+
+function isValidInitialConnect(msg, packetShape) {
+  return Boolean(
+    packetShape?.valid &&
+    packetShape.commands.length === 1 &&
+    packetShape.commands[0].type === 0x02 &&
+    msg.readUInt16BE(0) === 0xffff &&
+    readU32(msg, 8) !== 0
+  );
+}
+
+function makePendingSession(port, socket, rinfo, sessionId, challenge, now = Date.now()) {
+  return {
+    isPending: true,
+    peerId: 1,
+    challenge,
+    serverSeq: 0,
+    unreliableSeq: 0,
+    serverSeqByChannel: new Map(),
+    unreliableSeqByChannel: new Map(),
+    verifySeq: null,
+    seenVerify: false,
+    outboundReliable: new Map(),
+    outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
+    outboundRoundTripVariance: 0,
+    reliableResponses: new Map(),
+    reliableInFlight: new Map(),
+    reliableFragments: new Map(),
+    reliableGeneration: 0,
+    lastChannel: 0,
+    port,
+    remoteKey: `${rinfo.address}:${rinfo.port}`,
+    sessionId,
+    socket,
+    rinfo: { address: rinfo.address, port: rinfo.port },
+    createdAt: now,
+    lastSeenAt: now,
+    transportDisconnected: false,
+  };
+}
+
+function isPhotonInitPayload(payload) {
+  return Buffer.isBuffer(payload) && payload.length >= 2 && payload.length <= 256 && payload[0] === 0xf3 && payload[1] === 0x00;
+}
+
+function isExactPendingJoin(parsed) {
+  if (!parsed || parsed.messageType !== 2 || parsed.opCode !== 255) return false;
+  const actor = parsed.params?.get(249);
+  const authId = Number(htGet(actor, 241)?.value || 0);
+  const authKey = String(htGet(actor, 240)?.value || "");
+  return Number.isInteger(authId) && authId > 0 && authKey.length > 0 && authKey.length <= 256;
+}
+
+function incrementWindowBucket(bucket, now, windowMs) {
+  if (!bucket || now - Number(bucket.startedAt || 0) >= windowMs) {
+    return { startedAt: now, count: 1, dropped: 0, offenses: Number(bucket?.offenses || 0) };
+  }
+  bucket.count += 1;
+  return bucket;
+}
+
+function allowAuthenticatedOperation(session, now = Date.now()) {
+  session.operationRate = incrementWindowBucket(session.operationRate, now, AUTH_OPERATION_WINDOW_MS);
+  if (session.operationRate.count > AUTH_OPERATIONS_PER_SESSION) {
+    session.operationRate.dropped += 1;
+    if (session.operationRate.count === AUTH_OPERATIONS_PER_SESSION + 1) {
+      session.operationRate.offenses += 1;
+      emitBattleSecurityAudit("session_operation_flood", {
+        playerId: Number(session.playerId || 0),
+        ipAddress: endpointAddress(session.rinfo),
+        port: session.port,
+        severity: "warning",
+        description: "Превышен лимит Photon операций одной сессии",
+        count: session.operationRate.count,
+        stage: session.applicationJoinedAt ? "authenticated" : "preauth",
+        metadata: { actorId: session.actorId || 0, offenses: session.operationRate.offenses },
+      });
+    }
+    return false;
+  }
+
+  const playerId = Number(session.playerId || 0);
+  if (!session.applicationJoinedAt || !Number.isInteger(playerId) || playerId <= 0) return true;
+  let accountBucket = incrementWindowBucket(accountOperationRate.get(playerId), now, AUTH_OPERATION_WINDOW_MS);
+  if (accountOperationRate.has(playerId)) accountOperationRate.delete(playerId);
+  accountOperationRate.set(playerId, accountBucket);
+  while (accountOperationRate.size > ACCOUNT_OPERATION_BUCKET_CAP) accountOperationRate.delete(accountOperationRate.keys().next().value);
+  if (accountBucket.count <= AUTH_OPERATIONS_PER_ACCOUNT) return true;
+  accountBucket.dropped += 1;
+  if (accountBucket.count === AUTH_OPERATIONS_PER_ACCOUNT + 1) {
+    accountBucket.offenses += 1;
+    emitBattleSecurityAudit("account_operation_flood", {
+      playerId,
+      ipAddress: endpointAddress(session.rinfo),
+      port: session.port,
+      severity: accountBucket.offenses > 1 ? "critical" : "warning",
+      description: "Превышен суммарный лимит Photon операций аккаунта",
+      count: accountBucket.count,
+      stage: "authenticated",
+      metadata: { actorId: session.actorId || 0, offenses: accountBucket.offenses },
+    });
+  }
+  return false;
+}
+
 function refreshSessionReliableEndpoint(session, socket, rinfo) {
   if (!session || !socket || !rinfo) return;
   const pending = session.outboundReliable;
@@ -776,9 +1080,10 @@ function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
   const incomingPeerId = msg.readUInt16BE(0);
   const incomingChallenge = readU32(msg, 8);
   if (!incomingChallenge || incomingPeerId === 0xffff) return null;
-
+  const candidates = natRebindSessions.get(natRebindKey(port, incomingPeerId, incomingChallenge));
+  if (!candidates || candidates.size !== 1) return null;
   const matches = [];
-  for (const candidate of sessions.values()) {
+  for (const candidate of candidates) {
     if (!candidate || candidate.transportDisconnected) continue;
     if (Number(candidate.port) !== Number(port)) continue;
     if (Number(candidate.peerId) !== Number(incomingPeerId)) continue;
@@ -796,12 +1101,16 @@ function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
   const previousRemote = session.remoteKey || "unknown";
   if (previousSessionId && previousSessionId !== sessionId && sessions.get(previousSessionId) === session) {
     sessions.delete(previousSessionId);
+    decrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
   }
-  sessions.set(sessionId, session);
+  unindexNatRebindSession(session);
   session.sessionId = sessionId;
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
+  sessions.set(sessionId, session);
+  incrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
+  indexNatRebindSession(session);
   refreshSessionReliableEndpoint(session, socket, rinfo);
   console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0}`);
   return session;
@@ -1083,7 +1392,7 @@ function runOutboundReliableRetries() {
     console.log(`[state] reliable timeout actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms`);
     detachMasterSession(session, "reliable-timeout");
     detachSessionFromRoom(session, "reliable-timeout");
-    if (session.sessionId) sessions.delete(session.sessionId);
+    deleteFullSession(session);
   }
 }
 
@@ -1116,7 +1425,7 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
       reliableCommands.push(...initCommands);
     }
     console.log(`[state] init accepted reply=${initModes.join("+")} seq=${initSeqs.join(",")}`);
-    if (PUSH_ROOM_LIST_AFTER_INIT) {
+    if (PUSH_ROOM_LIST_AFTER_INIT && !session.isPending) {
       const roomListCommands = makeReliableCommandsForPayload(session, makeRoomListEvent(session), channel);
       reliableCommands.push(...roomListCommands);
       console.log(`[event] room list pushed after init seq=${reliableCommandSeqSummary(roomListCommands)} rooms=${roomListSummary()}`);
@@ -8290,6 +8599,7 @@ function resetTransportForReconnect(session, reason) {
   session.health = playerRuntimeStats(null).maxHealth;
   session.energy = playerRuntimeStats(null).maxEnergy;
   session.dead = false;
+  session.roomJoinInFlightAt = 0;
   session.waitingSelfSpawnMove = false;
   clearSpawnSelfRetryTimers(session);
   session.pendingSpawnBroadcast = null;
@@ -8338,7 +8648,7 @@ function maybePruneIdleRoomSessions(now = Date.now()) {
       if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
       if (removeRoomPlayer(room, actorId, playerSession, "idle-timeout", { broadcastReason: "idle-leave" })) {
         removed += 1;
-        if (playerSession.sessionId) sessions.delete(playerSession.sessionId);
+        deleteFullSession(playerSession);
       }
     }
   }
@@ -8356,7 +8666,7 @@ function maybePruneIdleMasterSessions(now = Date.now()) {
       const lastSeenAt = Number(session?.lastSeenAt || 0);
       if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
       set.delete(session);
-      if (session?.sessionId) sessions.delete(session.sessionId);
+      deleteFullSession(session);
       removed += 1;
     }
     if (set.size <= 0) {
@@ -8942,6 +9252,32 @@ function emitAchievementEvents(sourceSession, achievements) {
     const self = sendReliableToSession(ownerSession, payload, channel) ? 1 : 0;
     const peers = broadcastReliableToRoom(ownerSession, payload, channel, "achievement", { requireGameState: false });
     console.log(`[sync] achievement actor=${actorId} user=${achievement.userId} ach=${achievement.i} value=${achievement.currentValue}/${achievement.maxValue} reward=${achievement.reward} self=${self} peers=${peers}`);
+  }
+}
+
+function emitBattleSecurityAudit(kind, payload = {}, cooldownMs = 60000) {
+  if (!API_TOKEN || !API_BASE_URL || typeof fetch !== "function") return false;
+  const now = Date.now();
+  const auditKey = `${kind}:${payload.ipAddress || payload.ip || "global"}`;
+  if (now - Number(securityAuditLastAt.get(auditKey) || 0) < cooldownMs) return false;
+  boundedInsert(securityAuditLastAt, auditKey, now, 2048);
+  void postBattleSecurityEvent(kind, payload);
+  return true;
+}
+
+async function postBattleSecurityEvent(kind, payload = {}) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/battle/security`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-battle-token": API_TOKEN,
+      },
+      body: JSON.stringify({ kind, ...payload }),
+    });
+    if (!response.ok) console.log(`[api] security ${kind} failed status=${response.status}`);
+  } catch (error) {
+    console.log(`[api] security ${kind} failed ${error.message}`);
   }
 }
 
@@ -9585,6 +9921,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[photon] unsupported messageType=${parsed?.messageType ?? "null"}`);
     return [];
   }
+  if (!allowAuthenticatedOperation(session)) return [];
 
   const eventCode = photonEventCode(parsed);
   if (shouldLogParsedPayload(parsed)) {
@@ -9638,12 +9975,14 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (parsed.opCode === 255) {
+    session.applicationJoinedAt = session.applicationJoinedAt || Date.now();
     const roomNameParam = parsed.params.get(255);
     const roomPropsParam = parsed.params.get(248);
     const actorParam = parsed.params.get(249);
     const requestedName = roomNameParam?.value || DEFAULT_ROOM;
 
     if (String(requestedName).includes("list_lobby")) {
+      session.roomJoinInFlightAt = 0;
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
@@ -9679,6 +10018,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const plainLobbyJoin = !roomPropsParam || !parsed.params.has(242) || !parsed.params.has(250);
     if (plainLobbyJoin) {
+      session.roomJoinInFlightAt = 0;
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
@@ -9709,6 +10049,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
     }
+    session.roomJoinInFlightAt = Date.now();
     resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
     session.listLobby = false;
     detachSessionFromRoom(session, "rejoin");
@@ -9761,6 +10102,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     pushRoomListToLobbySessions("room-join", channel);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
+    session.roomJoinInFlightAt = 0;
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     broadcastMasterUserState(session.playerId);
@@ -9776,6 +10118,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (parsed.opCode === 254) {
+    session.roomJoinInFlightAt = 0;
     if (isMasterSocialPort(port) && session.isMasterSession) {
       detachMasterSession(session, "op-leave");
     }
@@ -10042,13 +10385,172 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   return [];
 }
 
+function promotePendingSession(pending, now = Date.now(), credentials = {}) {
+  if (!pending?.isPending || pendingSessions.get(pending.sessionId) !== pending) return null;
+  const address = endpointAddress(pending.rinfo);
+  if (sessions.size >= MAX_SESSIONS_TOTAL || sessionCountForIp(address) >= MAX_SESSIONS_PER_IP) {
+    deletePendingSession(pending);
+    noteInvalidUdp(address, "full-session-cap", now);
+    emitBattleSecurityAudit("full_session_cap", {
+      ipAddress: address,
+      severity: "warning",
+      description: "Отклонено повышение pre-auth сессии: достигнут лимит full sessions",
+      stage: "photon_init",
+      metadata: { sessions: sessions.size, perIp: sessionCountForIp(address) },
+    });
+    return null;
+  }
+
+  deletePendingSession(pending, false);
+  Object.assign(pending, {
+    isPending: false,
+    applicationInitAt: now,
+    applicationJoinedAt: 0,
+    roomJoinInFlightAt: 0,
+    listLobby: false,
+    room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
+    roomRaw: null,
+    actorId: 1,
+    actorRaw: null,
+    peerActorRaw: null,
+    peerActorRawBytes: 0,
+    peerActorLoadoutSlots: 0,
+    peerActorProfile: "",
+    joinActorRaw: null,
+    joinActorRawBytes: 0,
+    joinActorLoadoutSlots: 0,
+    joinActorProfile: "",
+    actorJoinParam: null,
+    team: -1,
+    zombieType: ZOMBIE_TYPE.HUMAN,
+    zombieInfectionHits: 0,
+    zombieLastInfectorActorId: 0,
+    spawned: false,
+    dead: false,
+    moveSeen: false,
+    moveCount: 0,
+    waitingSelfSpawnMove: false,
+    currentWeaponSlot: 1,
+    weaponStates: makeWeaponRuntimeState(null),
+    peerWeaponConfirmKeys: new Map(),
+    visibleItemIds: new Set(),
+    activeItemShots: new Map(),
+    impactTimers: new Map(),
+    spawnSeq: 0,
+    spawnRetry: null,
+    spawnMoveWarningTimer: null,
+    spawnSelfRetryTimers: new Set(),
+    joinSelfEventTimer: null,
+    joinStartEventTimer: null,
+    joinSettingsTimers: [],
+    joinLateStartTimers: [],
+    gameStateRequested: false,
+    lastGameStateResponseAt: 0,
+    knownActorIds: new Set(),
+    actorJoinAnnouncedAt: new Map(),
+    joinActorListIds: new Set(),
+    deferredJoinActorIds: new Set(),
+    peerSpawnTimers: new Set(),
+    pendingSpawnBroadcast: null,
+    pendingPickupSync: null,
+    pickupSpawnRepairTimers: new Set(),
+    playerId: Number(credentials.authId || 1),
+    playerAuthKey: String(credentials.authKey || ""),
+    playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
+    health: playerRuntimeStats(null).maxHealth,
+    energy: playerRuntimeStats(null).maxEnergy,
+    kills: 0,
+    deaths: 0,
+    points: 0,
+    domination: 0,
+    revenge: 0,
+    maxDomination: 0,
+    maxRevenge: 0,
+    revengeStreak: 0,
+    killStreakByVictim: new Map(),
+    dominatedBy: new Set(),
+    expEarned: 0,
+    exp2clan: 0,
+    matchStartedAt: 0,
+    matchStatsPosted: false,
+    matchShots: 0,
+    matchHits: 0,
+    matchKills: 0,
+    matchDeaths: 0,
+    matchHeadKills: 0,
+    matchNutsKills: 0,
+    matchSuicides: 0,
+    matchDomination: 0,
+    matchRevenge: 0,
+    matchExp: 0,
+    transportDisconnected: false,
+  });
+  pending.roomRaw = makeRoomSettingsRaw(pending.room);
+  storeFullSession(pending);
+  if (DEBUG_PACKETS) {
+    console.log(`[security] pending promoted ip=${address} port=${pending.port} pending=${pendingSessions.size} sessions=${sessions.size}`);
+  }
+  return pending;
+}
+
+let pendingSweepIterator = null;
+let fullSweepIterator = null;
+
+function sweepSessionMap(map, iteratorName, limit, visitor) {
+  let iterator = iteratorName === "pending" ? pendingSweepIterator : fullSweepIterator;
+  if (!iterator) iterator = map.values();
+  let checked = 0;
+  while (checked < limit) {
+    const item = iterator.next();
+    if (item.done) {
+      iterator = map.values();
+      break;
+    }
+    checked += 1;
+    visitor(item.value);
+  }
+  if (iteratorName === "pending") pendingSweepIterator = iterator;
+  else fullSweepIterator = iterator;
+}
+
+function maybePruneTransportSecurity(now = Date.now()) {
+  if (now - lastSecuritySweepAt < SESSION_SECURITY_SWEEP_MS) return;
+  lastSecuritySweepAt = now;
+  sweepSessionMap(pendingSessions, "pending", SESSION_SECURITY_SWEEP_LIMIT, (session) => {
+    if (now - Number(session?.lastSeenAt || 0) <= PENDING_SESSION_TTL_MS) return;
+    deletePendingSession(session);
+  });
+  sweepSessionMap(sessions, "full", SESSION_SECURITY_SWEEP_LIMIT, (session) => {
+    const joined = Number(session?.applicationJoinedAt || 0) > 0;
+    if (joined && session?.room) return;
+    const roomJoinStartedAt = Number(session?.roomJoinInFlightAt || 0);
+    const idleStartedAt = Math.max(Number(session?.lastSeenAt || 0), roomJoinStartedAt);
+    const ttlMs = joined
+      ? (roomJoinStartedAt ? Math.max(DETACHED_SESSION_TTL_MS, JOIN_PROFILE_MAX_WAIT_MS + 5000) : DETACHED_SESSION_TTL_MS)
+      : PREAUTH_SESSION_TTL_MS;
+    if (now - idleStartedAt <= ttlMs) return;
+    const reason = joined ? "detached-timeout" : "preauth-timeout";
+    detachMasterSession(session, reason);
+    detachSessionFromRoom(session, reason);
+    deleteFullSession(session);
+  });
+}
+
 async function handleUdp(port, socket, msg, rinfo) {
-  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) return;
+  const packetNow = Date.now();
+  const knownSessionId = key(port, rinfo);
+  if (isUdpQuarantined(rinfo?.address, packetNow) && !sessions.has(knownSessionId)) return;
+  const packetShape = parseEnetPacketShape(msg);
+  if (!packetShape.valid) {
+    noteInvalidUdp(rinfo?.address, packetShape.reason, packetNow);
+    return;
+  }
   if (!allowUdpPacket(rinfo, msg.length)) return;
+  maybePruneTransportSecurity(packetNow);
 
   let offset = 12;
-  const sessionId = key(port, rinfo);
-  let session = sessions.get(sessionId);
+  const sessionId = knownSessionId;
+  let session = sessions.get(sessionId) || pendingSessions.get(sessionId);
   if (!session) {
     const reboundSession = findNatRebindSession(port, msg, rinfo);
     if (reboundSession) {
@@ -10056,115 +10558,42 @@ async function handleUdp(port, socket, msg, rinfo) {
     }
   }
   if (!session) {
-    if (sessions.size >= MAX_SESSIONS_TOTAL) return;
-    if (sessionCountForIp(rinfo.address) >= MAX_SESSIONS_PER_IP) return;
-    session = {
-      peerId: 1,
-      actorId: 1,
-      challenge: readU32(msg, 8),
-      // VerifyConnect is an ENet control command and is not dispatched through
-      // Photon payload order. The first real Photon payload must therefore use
-      // reliable sequence 1, otherwise the Unity client ACKs it but waits for
-      // missing sequence 1 forever.
-      serverSeq: 0,
-      unreliableSeq: 0,
-      serverSeqByChannel: new Map(),
-      unreliableSeqByChannel: new Map(),
-      outboundReliable: new Map(),
-      outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
-      outboundRoundTripVariance: 0,
-      verifySeq: null,
-      seenVerify: false,
-      listLobby: false,
-      room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
-      roomRaw: null,
-      actorRaw: null,
-      peerActorRaw: null,
-      peerActorRawBytes: 0,
-      peerActorLoadoutSlots: 0,
-      peerActorProfile: "",
-      joinActorRaw: null,
-      joinActorRawBytes: 0,
-      joinActorLoadoutSlots: 0,
-      joinActorProfile: "",
-      actorJoinParam: null,
-      team: -1,
-      zombieType: ZOMBIE_TYPE.HUMAN,
-      zombieInfectionHits: 0,
-      zombieLastInfectorActorId: 0,
-      spawned: false,
-      dead: false,
-      moveSeen: false,
-      moveCount: 0,
-      waitingSelfSpawnMove: false,
-      currentWeaponSlot: 1,
-      weaponStates: makeWeaponRuntimeState(null),
-      peerWeaponConfirmKeys: new Map(),
-      visibleItemIds: new Set(),
-      activeItemShots: new Map(),
-      impactTimers: new Map(),
-      spawnSeq: 0,
-      spawnRetry: null,
-      spawnMoveWarningTimer: null,
-      spawnSelfRetryTimers: new Set(),
-      joinSelfEventTimer: null,
-      joinStartEventTimer: null,
-      joinSettingsTimers: [],
-      joinLateStartTimers: [],
-      gameStateRequested: false,
-      lastGameStateResponseAt: 0,
-      reliableResponses: new Map(),
-      reliableInFlight: new Map(),
-      reliableFragments: new Map(),
-      reliableGeneration: 0,
-      knownActorIds: new Set(),
-      actorJoinAnnouncedAt: new Map(),
-      joinActorListIds: new Set(),
-      deferredJoinActorIds: new Set(),
-      peerSpawnTimers: new Set(),
-      pendingSpawnBroadcast: null,
-      pendingPickupSync: null,
-      pickupSpawnRepairTimers: new Set(),
-      lastChannel: 0,
-      port,
-      remoteKey: `${rinfo.address}:${rinfo.port}`,
-      playerId: 1,
-      playerAuthKey: "",
-      playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
-      lastSeenAt: Date.now(),
-      health: playerRuntimeStats(null).maxHealth,
-      energy: playerRuntimeStats(null).maxEnergy,
-      kills: 0,
-      deaths: 0,
-      points: 0,
-      domination: 0,
-      revenge: 0,
-      maxDomination: 0,
-      maxRevenge: 0,
-      revengeStreak: 0,
-      killStreakByVictim: new Map(),
-      dominatedBy: new Set(),
-      expEarned: 0,
-      exp2clan: 0,
-      matchStartedAt: 0,
-      matchStatsPosted: false,
-      matchShots: 0,
-      matchHits: 0,
-      matchKills: 0,
-      matchDeaths: 0,
-      matchHeadKills: 0,
-      matchNutsKills: 0,
-      matchSuicides: 0,
-      matchDomination: 0,
-      matchRevenge: 0,
-      matchExp: 0,
-    };
-    session.roomRaw = makeRoomSettingsRaw(session.room);
-    sessions.set(sessionId, session);
+    if (!isValidInitialConnect(msg, packetShape)) {
+      noteInvalidUdp(rinfo.address, "new-endpoint-without-connect", packetNow);
+      return;
+    }
+    if (isUdpQuarantined(rinfo.address, packetNow)) return;
+    if (!allowNewEndpoint(rinfo.address, packetNow)) return;
+    if (pendingSessions.size >= MAX_PENDING_SESSIONS_TOTAL) {
+      emitBattleSecurityAudit("pending_global_cap", {
+        severity: "critical",
+        description: "Достигнут глобальный лимит ENet pending sessions",
+        count: pendingSessions.size,
+        stage: "enet_connect",
+      });
+      return;
+    }
+    if (Number(pendingSessionCountByIp.get(endpointAddress(rinfo)) || 0) >= MAX_PENDING_SESSIONS_PER_IP) {
+      noteInvalidUdp(rinfo.address, "pending-ip-cap", packetNow);
+      return;
+    }
+    session = storePendingSession(makePendingSession(port, socket, rinfo, sessionId, readU32(msg, 8), packetNow));
   }
   const incomingChallenge = readU32(msg, 8);
   if (session.challenge && incomingChallenge && session.challenge !== incomingChallenge) {
-    resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
+    if (!isValidInitialConnect(msg, packetShape)) {
+      noteInvalidUdp(rinfo.address, "challenge-mismatch", packetNow);
+      return;
+    }
+    if (session.isPending) {
+      deletePendingSession(session);
+      session = storePendingSession(makePendingSession(port, socket, rinfo, sessionId, incomingChallenge, packetNow));
+    } else {
+      unindexNatRebindSession(session);
+      resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
+      session.challenge = incomingChallenge;
+      indexNatRebindSession(session);
+    }
   }
   session.challenge = incomingChallenge;
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
@@ -10172,7 +10601,6 @@ async function handleUdp(port, socket, msg, rinfo) {
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
   refreshSessionReliableEndpoint(session, socket, rinfo);
-  const packetNow = Date.now();
   session.lastSeenAt = packetNow;
   maybePruneIdleRoomSessions(packetNow);
   maybePruneIdleMasterSessions(packetNow);
@@ -10181,8 +10609,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   let peerIdOverride = null;
   let lastChannel = 0;
   let transportDisconnected = false;
-  const commandCount = msg[3] || 0;
-  if (commandCount > MAX_ENET_COMMANDS_PER_PACKET) return;
+  const commandCount = packetShape.commands.length;
   const sentTime = readU32(msg, 4);
   if (DEBUG_PACKETS) {
     console.log(`[udp:${port}] peer=${msg.readUInt16BE(0)} count=${commandCount} len=${msg.length}`);
@@ -10220,7 +10647,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       const verifySeq = session.verifySeq;
       commands.push(makeVerifyConnect(verifySeq));
       peerIdOverride = 0xffff;
-      console.log(`[state] verify connect seq=${verifySeq}`);
+      if (DEBUG_PACKETS) console.log(`[state] verify connect seq=${verifySeq}`);
     } else if (commandType === 0x04) {
       commands.push(makeAck(channel, reliableSeq, sentTime));
       if (!session.transportDisconnected) {
@@ -10229,23 +10656,44 @@ async function handleUdp(port, socket, msg, rinfo) {
         const disconnectedRoom = session.room?.name || "none";
         detachMasterSession(session, "enet-disconnect");
         detachSessionFromRoom(session, "enet-disconnect");
-        if (session.sessionId) sessions.delete(session.sessionId);
+        if (session.isPending) deletePendingSession(session);
+        else deleteFullSession(session);
         console.log(`[state] enet disconnect port=${port} actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${disconnectedRoom}`);
       }
     } else if (commandType === 0x05 || commandType === 0x0c) {
       commands.push(makeAck(channel, reliableSeq, sentTime));
     } else if ((commandType === 0x06 || commandType === 0x07 || commandType === 0x08) && payloadOffset <= commandEnd) {
-      commands.push(makeAck(channel, reliableSeq, sentTime));
-      if (!session.seenVerify && session.verifySeq == null) {
-        session.verifySeq = session.serverSeq++;
-        commands.push(makeVerifyConnect(session.verifySeq));
-        peerIdOverride = 0xffff;
-        console.log(`[state] implicit verify connect seq=${session.verifySeq} reason=missing-handshake command=${commandType}`);
+      if (!session.seenVerify) {
+        noteInvalidUdp(rinfo.address, "data-before-connect", packetNow);
         offset = commandEnd;
         continue;
       }
       let cacheKey = commandType === 0x06 ? `${session.reliableGeneration || 0}:${channel}:${reliableSeq}` : null;
       let payload = msg.subarray(payloadOffset, commandEnd);
+      if (session.isPending) {
+        if (commandType !== 0x06) {
+          noteInvalidUdp(rinfo.address, "pending-non-init", packetNow);
+          offset = commandEnd;
+          continue;
+        }
+        if (!isPhotonInitPayload(payload)) {
+          let pendingParsed = null;
+          try {
+            pendingParsed = parsePhotonRequest(payload);
+          } catch {
+            pendingParsed = null;
+          }
+          if (!isExactPendingJoin(pendingParsed)) {
+            noteInvalidUdp(rinfo.address, "pending-non-join", packetNow);
+            offset = commandEnd;
+            continue;
+          }
+          session = promotePendingSession(session, packetNow, actorCredentials(pendingParsed.params.get(249)));
+          if (!session) return;
+          cacheKey = `${session.reliableGeneration || 0}:${channel}:${reliableSeq}`;
+        }
+      }
+      commands.push(makeAck(channel, reliableSeq, sentTime));
       let fragment = null;
       if (commandType === 0x08) {
         fragment = parseReliableFragmentCommand(msg, offset, commandEnd, channel, reliableSeq);
@@ -10333,12 +10781,14 @@ console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} 
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
-console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
+console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms detachedTtl=${DETACHED_SESSION_TTL_MS}ms newEndpoints=${NEW_ENDPOINTS_PER_IP}/${NEW_ENDPOINT_WINDOW_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms quarantine=${QUARANTINE_SHORT_MS}/${QUARANTINE_REPEAT_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
 if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
+const transportSecurityInterval = setInterval(() => maybePruneTransportSecurity(Date.now()), SESSION_SECURITY_SWEEP_MS);
+if (typeof transportSecurityInterval.unref === "function") transportSecurityInterval.unref();
 const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREASURY_POLL_MS);
 if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
 const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
