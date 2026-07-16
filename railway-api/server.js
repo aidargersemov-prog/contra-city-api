@@ -21,7 +21,8 @@ const ASSET_BUNDLE_NAMES = new Set([
   "arenaring.unity3d",
   "bit_map.unity3d",
   "legoturnament.unity3d",
-  "inferno.unity3d"
+  "inferno.unity3d",
+  "dashguard.unity3d"
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
@@ -1134,7 +1135,8 @@ const maps = [
   mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
-  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS)
+  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
+  mapEntry(19, "TestEventy", MAP_MODE_DEATHMATCH)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
