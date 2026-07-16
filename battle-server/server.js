@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-15-reliable-retry-smoothing-v272";
+const BUILD_ID = "battle-server-2026-07-15-daily-quest-removed-v269";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -74,7 +74,6 @@ const REPLAY_PEER_SPAWNS_AFTER_SELF = process.env.REPLAY_PEER_SPAWNS_AFTER_SELF 
 const CONFIRM_PEER_SPAWN_AFTER_ISENEMY = process.env.CONFIRM_PEER_SPAWN_AFTER_ISENEMY !== "0";
 const PROFILE_CACHE_TTL_MS = Number(process.env.PROFILE_CACHE_TTL_MS || 30000);
 const CATALOG_CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS || 300000);
-const API_REQUEST_TIMEOUT_MS = Math.max(1000, Number(process.env.API_REQUEST_TIMEOUT_MS || 8000));
 const PROFILE_JOIN_WAIT_MS = Math.max(0, Number(process.env.PROFILE_JOIN_WAIT_MS || 2500));
 const JOIN_LOADOUT_SLOT_LIMIT = Math.max(1, Math.min(7, Number(process.env.JOIN_LOADOUT_SLOT_LIMIT || 7)));
 const FULL_LOADOUT_SLOT_LIMIT = 7;
@@ -89,21 +88,8 @@ const MAX_UDP_PACKET_BYTES = Math.max(0, Number(process.env.MAX_UDP_PACKET_BYTES
 const OUTBOUND_RELIABLE_INITIAL_RTO_MS = Math.max(50, Number(process.env.OUTBOUND_RELIABLE_INITIAL_RTO_MS || 300));
 const OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE || 5));
 const OUTBOUND_RELIABLE_DISCONNECT_MS = Math.max(1000, Number(process.env.OUTBOUND_RELIABLE_DISCONNECT_MS || 10000));
-const OUTBOUND_RELIABLE_RECOVERY_GRACE_MS = Math.max(1000, Number(process.env.OUTBOUND_RELIABLE_RECOVERY_GRACE_MS || 15000));
-const OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS = Math.max(OUTBOUND_RELIABLE_RECOVERY_GRACE_MS, Number(process.env.OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS || 60000));
-const OUTBOUND_RELIABLE_MAX_RTO_MS = Math.max(OUTBOUND_RELIABLE_INITIAL_RTO_MS, Number(process.env.OUTBOUND_RELIABLE_MAX_RTO_MS || 4000));
-const OUTBOUND_RELIABLE_MAX_PENDING = Math.max(128, Number(process.env.OUTBOUND_RELIABLE_MAX_PENDING || 2048));
 const OUTBOUND_RELIABLE_SWEEP_MS = Math.max(25, Number(process.env.OUTBOUND_RELIABLE_SWEEP_MS || 50));
-const OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS || 16));
-const RELIABLE_REPLAY_LOG_INTERVAL_MS = Math.max(250, Number(process.env.RELIABLE_REPLAY_LOG_INTERVAL_MS || 1000));
-const RELIABLE_RESPONSE_CACHE_TTL_MS = Math.max(
-  OUTBOUND_RELIABLE_DISCONNECT_MS + OUTBOUND_RELIABLE_RECOVERY_GRACE_MS,
-  Number(process.env.RELIABLE_RESPONSE_CACHE_TTL_MS || 60000),
-);
-const RELIABLE_RESPONSE_CACHE_MAX_ENTRIES = Math.max(256, Number(process.env.RELIABLE_RESPONSE_CACHE_MAX_ENTRIES || 4096));
-const INBOUND_RELIABLE_MAX_PENDING = Math.max(64, Number(process.env.INBOUND_RELIABLE_MAX_PENDING || 2048));
-const INBOUND_RELIABLE_GAP_WARN_MS = Math.max(250, Number(process.env.INBOUND_RELIABLE_GAP_WARN_MS || 2000));
-const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 60000));
+const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 15000));
 const ENET_FRAGMENT_TRACE = process.env.ENET_FRAGMENT_TRACE !== "0";
 const ENET_MAX_FRAGMENT_COUNT = Math.max(1, Number(process.env.ENET_MAX_FRAGMENT_COUNT || 128));
 const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX_FRAGMENT_TOTAL_BYTES || 65536));
@@ -126,7 +112,6 @@ const MAP_PICKUPS_IN_GAMESTATE = process.env.MAP_PICKUPS_IN_GAMESTATE === "1";
 const ITEM_RESPAWN_MS = Math.max(0, Number(process.env.ITEM_RESPAWN_MS || 15000));
 const ITEM_PICKUP_RADIUS = Math.max(1, Number(process.env.ITEM_PICKUP_RADIUS || 8));
 const PICKUP_SPAWN_REPAIR_DELAYS_MS = parseDelayList(process.env.PICKUP_SPAWN_REPAIR_DELAYS_MS || "");
-const PEER_RESPAWN_FALLBACK_MS = Math.max(100, Number(process.env.PEER_RESPAWN_FALLBACK_MS || 1200));
 const REQUIRE_PICKUP_BENEFIT = true;
 const ENABLE_BATTLE_DAMAGE = process.env.ENABLE_BATTLE_DAMAGE !== "0";
 const DAMAGE_SHORT_RANGE = Math.max(1, Number(process.env.DAMAGE_SHORT_RANGE || 30));
@@ -226,28 +211,6 @@ function parseDelayList(value) {
 
 function formatDelayList(delays) {
   return delays.length ? `${delays.join(",")}ms` : "off";
-}
-
-function logGuardedCallbackError(scope, error) {
-  const detail = error?.stack || error?.message || String(error);
-  console.log(`[guard] ${scope} failed ${detail}`);
-}
-
-function runGuardedCallback(scope, callback) {
-  try {
-    const result = callback();
-    if (result && typeof result.catch === "function") {
-      result.catch((error) => logGuardedCallbackError(scope, error));
-    }
-    return result;
-  } catch (error) {
-    logGuardedCallbackError(scope, error);
-    return undefined;
-  }
-}
-
-function guardedCallback(scope, callback) {
-  return () => runGuardedCallback(scope, callback);
 }
 
 function normalizeChannelId(value, fallback = 0) {
@@ -789,15 +752,6 @@ function refreshSessionReliableEndpoint(session, socket, rinfo) {
   }
 }
 
-function sessionHasRebindableIdentity(session) {
-  if (!session?.seenVerify) return false;
-  const generation = Number(session.reliableGeneration || 0);
-  if (Number(session.transportGeneration || 0) !== generation) return false;
-  if (session.joinInProgress || session.listLobby || session.isMasterSession) return true;
-  if (session.room?.players?.get?.(session.actorId) === session) return true;
-  return session.verifySeq != null;
-}
-
 function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
   const incomingPeerId = msg.readUInt16BE(0);
   const incomingChallenge = readU32(msg, 8);
@@ -809,7 +763,7 @@ function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
     if (Number(candidate.port) !== Number(port)) continue;
     if (Number(candidate.peerId) !== Number(incomingPeerId)) continue;
     if (Number(candidate.challenge) !== Number(incomingChallenge)) continue;
-    if (!sessionHasRebindableIdentity(candidate)) continue;
+    if (!candidate.room || !candidate.actorId || !candidate.spawned) continue;
     if (now - numberOr(candidate.lastSeenAt, 0) > ENET_NAT_REBIND_MAX_IDLE_MS) continue;
     matches.push(candidate);
     if (matches.length > 1) return null;
@@ -828,11 +782,8 @@ function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
-  session.endpointGeneration = Number(session.endpointGeneration || 0) + 1;
-  session.boundTransportGeneration = Number(session.transportGeneration || session.reliableGeneration || 0);
-  session.lastRebindAt = Date.now();
   refreshSessionReliableEndpoint(session, socket, rinfo);
-  console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} transportGen=${session.boundTransportGeneration} endpointGen=${session.endpointGeneration} pending=${session.outboundReliable?.size || 0}`);
+  console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0}`);
   return session;
 }
 
@@ -897,46 +848,13 @@ function makeUnreliable(lastReliableSeq, unreliableSeq, payload, channel = 0) {
   ]);
 }
 
-function pruneReliableResponseCache(session, now = Date.now()) {
-  const cache = session?.reliableResponses;
-  if (!(cache instanceof Map)) return 0;
-  let removed = 0;
-  for (const [cacheKey, reliableCommands] of cache.entries()) {
-    const expiresAt = Number(reliableCommands?.expiresAt || 0);
-    if (expiresAt > 0 && now >= expiresAt) {
-      cache.delete(cacheKey);
-      removed += 1;
-    }
-  }
-  while (cache.size > RELIABLE_RESPONSE_CACHE_MAX_ENTRIES) {
-    const firstKey = cache.keys().next().value;
-    cache.delete(firstKey);
-    removed += 1;
-  }
-  return removed;
-}
-
-function getCachedReliableResponse(session, cacheKey, now = Date.now()) {
-  const cache = session?.reliableResponses;
-  if (!(cache instanceof Map)) return null;
-  const reliableCommands = cache.get(cacheKey);
-  if (!reliableCommands) return null;
-  const expiresAt = Number(reliableCommands.expiresAt || 0);
-  if (expiresAt > 0 && now >= expiresAt) {
-    cache.delete(cacheKey);
-    return null;
+function cacheReliableResponse(session, cacheKey, reliableCommands) {
+  session.reliableResponses.set(cacheKey, reliableCommands);
+  while (session.reliableResponses.size > 128) {
+    const firstKey = session.reliableResponses.keys().next().value;
+    session.reliableResponses.delete(firstKey);
   }
   return reliableCommands;
-}
-
-function cacheReliableResponse(session, cacheKey, reliableCommands) {
-  const commands = Array.isArray(reliableCommands) ? reliableCommands : [];
-  const now = Date.now();
-  commands.cachedAt = now;
-  commands.expiresAt = now + RELIABLE_RESPONSE_CACHE_TTL_MS;
-  session.reliableResponses.set(cacheKey, commands);
-  pruneReliableResponseCache(session, now);
-  return commands;
 }
 
 function commandBytes(commands) {
@@ -1060,14 +978,6 @@ function trackOutboundReliableCommands(socket, rinfo, session, commands) {
       existing.lastSentAt = now;
       continue;
     }
-    if (pending.size >= OUTBOUND_RELIABLE_MAX_PENDING) {
-      session.outboundReliableOverflowAt ||= now;
-      if (!session.outboundReliableOverflowLogAt || now - session.outboundReliableOverflowLogAt >= 5000) {
-        session.outboundReliableOverflowLogAt = now;
-        console.log(`[warn] reliable pending-cap actor=${session.actorId || 0} pending=${pending.size}/${OUTBOUND_RELIABLE_MAX_PENDING} channel=${info.channel} seq=${info.reliableSeq} recovery=armed`);
-      }
-      continue;
-    }
     pending.set(key, {
       ...info,
       command: Buffer.from(command),
@@ -1077,7 +987,6 @@ function trackOutboundReliableCommands(socket, rinfo, session, commands) {
       lastSentAt: now,
       sentCount: 1,
       roundTripTimeout: outboundReliableRto(session),
-      recoveryStartedAt: 0,
     });
   }
 }
@@ -1090,22 +999,11 @@ function acknowledgeOutboundReliable(session, channel, reliableSeq) {
   if (!entry) return false;
   pending.delete(key);
 
-  const now = Date.now();
-  const sample = Math.max(1, now - entry.lastSentAt);
+  const sample = Math.max(1, Date.now() - entry.lastSentAt);
   const previousRtt = Math.max(1, numberOr(session.outboundRoundTripTime, OUTBOUND_RELIABLE_INITIAL_RTO_MS));
   const previousVariance = Math.max(0, numberOr(session.outboundRoundTripVariance, 0));
   session.outboundRoundTripVariance = Math.round(previousVariance * 0.75 + Math.abs(previousRtt - sample) * 0.25);
   session.outboundRoundTripTime = Math.round(previousRtt * 0.875 + sample * 0.125);
-  session.lastOutboundReliableAckAt = now;
-  if (!(session.lastOutboundReliableAckByChannel instanceof Map)) session.lastOutboundReliableAckByChannel = new Map();
-  session.lastOutboundReliableAckByChannel.set(normalizeChannelId(channel, 0), now);
-  if (session.outboundReliableRecoveryByChannel instanceof Map) {
-    const hasRecoveringChannelEntry = Array.from(pending.values()).some((pendingEntry) => (
-      Number(pendingEntry.channel) === Number(channel) && Number(pendingEntry.recoveryStartedAt || 0) > 0
-    ));
-    if (!hasRecoveringChannelEntry) session.outboundReliableRecoveryByChannel.delete(normalizeChannelId(channel, 0));
-  }
-  if (pending.size < OUTBOUND_RELIABLE_MAX_PENDING) session.outboundReliableOverflowAt = 0;
   if (DEBUG_PACKETS) {
     console.log(`[ack] actor=${session.actorId || 0} channel=${channel} seq=${reliableSeq} sample=${sample}ms pending=${pending.size}`);
   }
@@ -1117,25 +1015,19 @@ function clearOutboundReliableState(session) {
   session.outboundReliable = new Map();
   session.outboundRoundTripTime = OUTBOUND_RELIABLE_INITIAL_RTO_MS;
   session.outboundRoundTripVariance = 0;
-  session.outboundReliableRecoveryByChannel = new Map();
-  session.outboundReliableOverflowAt = 0;
-  session.outboundReliableOverflowLogAt = 0;
 }
 
-function sendOutboundReliableRetryBatch(session, entries) {
-  if (!session || !Array.isArray(entries) || entries.length === 0) return false;
-  const commands = entries.map((entry) => entry?.command).filter(Boolean);
-  if (commands.length === 0) return false;
-  const socket = session.socket || entries.find((entry) => entry?.socket)?.socket;
-  const rinfo = session.rinfo || entries.find((entry) => entry?.rinfo)?.rinfo;
-  if (!socket || !rinfo) return false;
+function sendOutboundReliableRetry(session, entry) {
+  if (!session || !entry?.socket || !entry?.rinfo || !entry.command) return false;
+  const sentTime = photonNow();
+  const packet = Buffer.concat([
+    makeHeader(session.peerId, 1, sentTime, session.challenge),
+    entry.command,
+  ]);
   try {
-    // ENet already supports several reliable commands in one datagram. Reuse
-    // the normal packet splitter so a stalled peer cannot make the retry sweep
-    // emit one UDP datagram (and one synchronous log line) per pending event.
-    sendPacket(socket, rinfo, session, commands);
+    entry.socket.send(packet, entry.rinfo.port, entry.rinfo.address);
   } catch (error) {
-    console.log(`[warn] reliable-retry-batch failed actor=${session.actorId || 0} commands=${commands.length} reason=${error.message}`);
+    console.log(`[warn] reliable-retry failed actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} reason=${error.message}`);
     return false;
   }
   return true;
@@ -1146,88 +1038,31 @@ function runOutboundReliableRetries() {
   const expiredSessions = new Map();
   for (const session of sessions.values()) {
     const pending = session?.outboundReliable;
-    if (!(pending instanceof Map)) continue;
-    if (!(session.outboundReliableRecoveryByChannel instanceof Map)) session.outboundReliableRecoveryByChannel = new Map();
-    const retryBudget = Math.max(1, Math.min(OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS, MAX_ENET_COMMANDS_PER_PACKET));
-    const retryEntries = [];
+    if (!(pending instanceof Map) || pending.size <= 0) continue;
     for (const [key, entry] of pending.entries()) {
       if (now - entry.lastSentAt <= entry.roundTripTimeout) continue;
-      const channelRecoveryStartedAt = Number(session.outboundReliableRecoveryByChannel.get(entry.channel) || 0);
-      if (channelRecoveryStartedAt && !entry.recoveryStartedAt) {
-        entry.recoveryStartedAt = channelRecoveryStartedAt;
-      }
-      const normalRetryExpired = (
+      if (
         entry.sentCount > OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE ||
         now - entry.firstSentAt > OUTBOUND_RELIABLE_DISCONNECT_MS
-      );
-      if (normalRetryExpired && !entry.recoveryStartedAt) {
-        const recoveryStartedAt = Number(session.outboundReliableRecoveryByChannel.get(entry.channel) || 0) || now;
-        entry.recoveryStartedAt = recoveryStartedAt;
-        if (!channelRecoveryStartedAt) {
-          session.outboundReliableRecoveryByChannel.set(entry.channel, recoveryStartedAt);
-          console.log(`[recovery] reliable-channel actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms transportIdle=${now - numberOr(session.lastSeenAt, 0)}ms pending=${pending.size}`);
-        }
-      }
-      if (entry.recoveryStartedAt) {
-        const recoveryAge = now - entry.recoveryStartedAt;
-        const transportIdle = now - numberOr(session.lastSeenAt, 0);
-        const recoveryExhausted = recoveryAge >= OUTBOUND_RELIABLE_RECOVERY_GRACE_MS && (
-          transportIdle >= OUTBOUND_RELIABLE_DISCONNECT_MS ||
-          recoveryAge >= OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS
-        );
-        if (recoveryExhausted) {
-          if (!expiredSessions.has(session)) expiredSessions.set(session, entry);
-          continue;
-        }
-      }
-      if (retryEntries.length < retryBudget) retryEntries.push(entry);
-    }
-    if (retryEntries.length > 0 && sendOutboundReliableRetryBatch(session, retryEntries)) {
-      const retrySummaryByChannel = new Map();
-      for (const entry of retryEntries) {
-        entry.sentCount += 1;
-        entry.lastSentAt = now;
-        entry.roundTripTimeout = Math.min(OUTBOUND_RELIABLE_MAX_RTO_MS, entry.roundTripTimeout * 2);
-        const summary = retrySummaryByChannel.get(entry.channel) || {
-          firstSeq: entry.reliableSeq,
-          lastSeq: entry.reliableSeq,
-          commands: 0,
-          maxCount: 0,
-          maxRto: 0,
-          recoveryStartedAt: 0,
-        };
-        summary.lastSeq = entry.reliableSeq;
-        summary.commands += 1;
-        summary.maxCount = Math.max(summary.maxCount, entry.sentCount);
-        summary.maxRto = Math.max(summary.maxRto, entry.roundTripTimeout);
-        if (entry.recoveryStartedAt) {
-          summary.recoveryStartedAt = summary.recoveryStartedAt || entry.recoveryStartedAt;
-        }
-        retrySummaryByChannel.set(entry.channel, summary);
-      }
-      for (const [channel, summary] of retrySummaryByChannel.entries()) {
-        console.log(`[retry] reliable-batch actor=${session.actorId || 0} channel=${channel} seq=${summary.firstSeq}-${summary.lastSeq} commands=${summary.commands} count<=${summary.maxCount} next<=${summary.maxRto}ms pending=${pending.size}${summary.recoveryStartedAt ? ` recoveryAge=${now - summary.recoveryStartedAt}ms` : ""}`);
-      }
-    }
-    if (session.outboundReliableOverflowAt) {
-      const overflowAge = now - session.outboundReliableOverflowAt;
-      const transportIdle = now - numberOr(session.lastSeenAt, 0);
-      if (
-        overflowAge >= OUTBOUND_RELIABLE_RECOVERY_GRACE_MS &&
-        (transportIdle >= OUTBOUND_RELIABLE_DISCONNECT_MS || overflowAge >= OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS)
       ) {
-        const entry = pending.values().next().value || { channel: 0, reliableSeq: 0, sentCount: 0, firstSentAt: session.outboundReliableOverflowAt };
+        pending.delete(key);
         if (!expiredSessions.has(session)) expiredSessions.set(session, entry);
+        continue;
       }
+      if (!sendOutboundReliableRetry(session, entry)) continue;
+      entry.sentCount += 1;
+      entry.lastSentAt = now;
+      entry.roundTripTimeout *= 2;
+      console.log(`[retry] reliable actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} type=${entry.commandType} count=${entry.sentCount} next=${entry.roundTripTimeout}ms pending=${pending.size}`);
     }
   }
 
   for (const [session, entry] of expiredSessions.entries()) {
     if (session.transportDisconnected) continue;
     session.transportDisconnected = true;
-    console.log(`[state] reliable recovery exhausted actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms transportIdle=${now - numberOr(session.lastSeenAt, 0)}ms`);
-    detachMasterSession(session, "reliable-recovery-exhausted");
-    detachSessionFromRoom(session, "reliable-recovery-exhausted");
+    console.log(`[state] reliable timeout actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms`);
+    detachMasterSession(session, "reliable-timeout");
+    detachSessionFromRoom(session, "reliable-timeout");
     if (session.sessionId) sessions.delete(session.sessionId);
   }
 }
@@ -1271,163 +1106,10 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
 
   const responses = await handleOperation(port, socket, rinfo, session, parsed, channel);
   const reliableCommands = responses.flatMap((response) => makeReliableCommandsForPayload(session, response, channel));
-  if (photonEventCode(parsed) === 84) session.peerSnapshotReady = true;
   if (SHOT_LOCAL_RESPONSE_TRACE && photonEventCode(parsed) === 97) {
     console.log(`[sync] shot-response actor=${session.actorId} ${describeShotRequest(parsed)} responses=${responses.length} commands=${reliableCommands.length} bytes=${commandBytes(reliableCommands)} seq=${reliableCommandSeqSummary(reliableCommands)} channel=${channel}`);
   }
   return reliableCommands;
-}
-
-function reliableSequenceNext(sequence, count = 1) {
-  return (Number(sequence) + Math.max(1, Number(count) || 1)) >>> 0;
-}
-
-function reliableSequenceIsAhead(sequence, expected) {
-  const distance = (Number(sequence) - Number(expected)) >>> 0;
-  return distance > 0 && distance < 0x80000000;
-}
-
-function ensureInboundReliableChannelState(session, channel) {
-  if (!(session.inboundReliableChannels instanceof Map)) session.inboundReliableChannels = new Map();
-  const targetChannel = normalizeChannelId(channel, 0);
-  const generation = Number(session.reliableGeneration || 0);
-  let state = session.inboundReliableChannels.get(targetChannel);
-  if (!state || Number(state.generation) !== generation) {
-    if (state?.gapTimer) clearTimeout(state.gapTimer);
-    state = {
-      channel: targetChannel,
-      generation,
-      expectedSeq: 1,
-      pending: new Map(),
-      processing: false,
-      gapSince: 0,
-      gapTimer: null,
-    };
-    session.inboundReliableChannels.set(targetChannel, state);
-  }
-  return state;
-}
-
-function clearInboundReliableOrdering(session) {
-  if (!(session?.inboundReliableChannels instanceof Map)) {
-    if (session) session.inboundReliableChannels = new Map();
-    return;
-  }
-  for (const state of session.inboundReliableChannels.values()) {
-    if (state?.gapTimer) clearTimeout(state.gapTimer);
-  }
-  session.inboundReliableChannels = new Map();
-}
-
-function sendQueuedReliableCommands(session, commands, request) {
-  if (!Array.isArray(commands) || commands.length === 0) return false;
-  if (!session?.socket || !session?.rinfo || session.transportDisconnected) return false;
-  try {
-    sendPacket(session.socket, session.rinfo, session, commands);
-    return true;
-  } catch (error) {
-    console.log(`[warn] reliable-response-send failed actor=${session.actorId || 0} channel=${request?.channel ?? 0} seq=${request?.startSeq ?? "?"} reason=${error.message}`);
-    return false;
-  }
-}
-
-async function executeInboundReliableRequest(session, request) {
-  const { cacheKey } = request;
-  const existing = getCachedReliableResponse(session, cacheKey);
-  if (existing) return existing;
-  if (session.reliableInFlight.has(cacheKey)) return session.reliableInFlight.get(cacheKey);
-
-  const buildRequest = typeof request.execute === "function"
-    ? request.execute
-    : () => buildReliableCommandsForParsedPayload(
-        request.port,
-        session.socket || request.socket,
-        session.rinfo || request.rinfo,
-        session,
-        request.parsed,
-        request.payload,
-        request.channel,
-      );
-  const promise = Promise.resolve().then(buildRequest)
-    .then((commands) => cacheReliableResponse(session, cacheKey, commands))
-    .catch((error) => {
-      console.log(`[reliable] operation failed actor=${session.actorId || 0} channel=${request.channel} seq=${request.startSeq} ${error.stack || error.message}`);
-      return cacheReliableResponse(session, cacheKey, []);
-    })
-    .finally(() => session.reliableInFlight.delete(cacheKey));
-  session.reliableInFlight.set(cacheKey, promise);
-  return promise;
-}
-
-function armInboundReliableGapWarning(session, state) {
-  if (!state || state.gapTimer || state.pending.size === 0 || state.pending.has(state.expectedSeq)) return;
-  if (!state.gapSince) state.gapSince = Date.now();
-  state.gapTimer = setTimeout(guardedCallback(
-    `inbound-reliable-gap actor=${session?.actorId || 0} channel=${state.channel}`,
-    () => {
-      state.gapTimer = null;
-      if (session.transportDisconnected || state.pending.size === 0 || state.pending.has(state.expectedSeq)) return;
-      const firstPending = state.pending.keys().next().value;
-      console.log(`[reliable] inbound-gap actor=${session.actorId || 0} channel=${state.channel} expected=${state.expectedSeq} firstPending=${firstPending} queued=${state.pending.size} age=${Date.now() - state.gapSince}ms`);
-      armInboundReliableGapWarning(session, state);
-    },
-  ), INBOUND_RELIABLE_GAP_WARN_MS);
-  if (typeof state.gapTimer.unref === "function") state.gapTimer.unref();
-}
-
-function drainInboundReliableChannel(session, state) {
-  if (!state || state.processing || session.transportDisconnected) return;
-  state.processing = true;
-  Promise.resolve().then(async () => {
-    while (!session.transportDisconnected) {
-      const request = state.pending.get(state.expectedSeq);
-      if (!request) break;
-      state.pending.delete(state.expectedSeq);
-      state.gapSince = 0;
-      const commands = await executeInboundReliableRequest(session, request);
-      state.expectedSeq = reliableSequenceNext(request.endSeq, 1);
-      sendQueuedReliableCommands(session, commands, request);
-    }
-  }).catch((error) => {
-    logGuardedCallbackError(`inbound-reliable-drain actor=${session.actorId || 0} channel=${state.channel}`, error);
-  }).finally(() => {
-    state.processing = false;
-    if (state.pending.has(state.expectedSeq)) drainInboundReliableChannel(session, state);
-    else armInboundReliableGapWarning(session, state);
-  });
-}
-
-function enqueueInboundReliableRequest(session, request) {
-  const state = ensureInboundReliableChannelState(session, request.channel);
-  const startSeq = Number(request.startSeq) >>> 0;
-  if (startSeq !== state.expectedSeq && !reliableSequenceIsAhead(startSeq, state.expectedSeq)) {
-    return { status: "stale", expectedSeq: state.expectedSeq };
-  }
-  if (state.pending.has(startSeq)) return { status: "duplicate-pending", expectedSeq: state.expectedSeq };
-  if (state.pending.size >= INBOUND_RELIABLE_MAX_PENDING) {
-    console.log(`[security] inbound-reliable pending-cap actor=${session.actorId || 0} channel=${state.channel} expected=${state.expectedSeq} seq=${startSeq} pending=${state.pending.size}/${INBOUND_RELIABLE_MAX_PENDING}`);
-    return { status: "overflow", expectedSeq: state.expectedSeq };
-  }
-  state.pending.set(startSeq, request);
-  drainInboundReliableChannel(session, state);
-  if (startSeq !== state.expectedSeq) armInboundReliableGapWarning(session, state);
-  return { status: startSeq === state.expectedSeq ? "ready" : "buffered", expectedSeq: state.expectedSeq };
-}
-
-function logReliableReplay(session, channel, reliableSeq, cachedLength, fragmentStart = null) {
-  if (!(session.reliableReplayLogState instanceof Map)) session.reliableReplayLogState = new Map();
-  const targetChannel = normalizeChannelId(channel, 0);
-  const replayKind = cachedLength > 0 ? "response" : "ack-only";
-  const logKey = `${targetChannel}:${replayKind}:${fragmentStart == null ? "command" : "fragment"}`;
-  const now = Date.now();
-  const previous = session.reliableReplayLogState.get(logKey);
-  if (!previous || now - previous.lastLogAt >= RELIABLE_REPLAY_LOG_INTERVAL_MS) {
-    const repeats = (previous?.suppressed || 0) + 1;
-    console.log(`[state] reliable replay actor=${session.actorId || 0} channel=${targetChannel} seq=${reliableSeq} cached=${cachedLength} repeats=${repeats}${fragmentStart == null ? "" : ` fragmentStart=${fragmentStart}`}`);
-    session.reliableReplayLogState.set(logKey, { lastLogAt: now, suppressed: 0 });
-    return;
-  }
-  previous.suppressed += 1;
 }
 
 function reliableFragmentCacheKey(session, channel, fragmentStartSeq) {
@@ -1562,7 +1244,6 @@ function nextUnreliableSeqForSession(session, channel = 0) {
 
 function sendReliablePayload(socket, rinfo, session, payload, channel = 0) {
   sendPacket(socket, rinfo, session, makeReliableCommandsForPayload(session, payload, channel));
-  return true;
 }
 
 function reliableChannelForSession(session, fallback = 0, options = {}) {
@@ -3855,12 +3536,6 @@ async function profileForJoin(incomingActor, options = {}) {
 
 function applyLateProfile(session, profile, incomingActor = null) {
   if (isFallbackBattleProfile(profile)) return;
-  const joinedBattle = session?.room?.players?.get?.(session.actorId) === session;
-  if (joinedBattle && (session.gameStateRequested || session.spawned || session.matchStartedAt)) {
-    session.pendingBattleProfile = { profile, incomingActor, stagedAt: Date.now() };
-    console.log(`[profile] late staged actor=${session.actorId} id=${profile.authId} reason=battle-state-frozen apply=next-room-join`);
-    return false;
-  }
   session.loadedProfile = profile;
   session.playerId = profile.authId;
   session.playerAuthKey = profile.authKey || session.playerAuthKey || "";
@@ -3876,35 +3551,18 @@ function applyLateProfile(session, profile, incomingActor = null) {
     session.energy = stats.maxEnergy;
   }
   console.log(`[profile] late ready actor=${session.actorId} id=${profile.authId} name=${profile.name} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} taunts=${selectedTaunts(profile).length} tauntSlots=${selectedTauntSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} armorPct=${stats.modifiers.armorPercent} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)} wearDmg=${formatDamageBonuses(stats.modifiers.damageBonuses)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
-  return true;
-}
-
-async function fetchWithTimeout(url, options = {}, scope = "api") {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
-  if (typeof timeout.unref === "function") timeout.unref();
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`${scope}-timeout=${API_REQUEST_TIMEOUT_MS}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 async function fetchApiJson(path) {
   if (!API_BASE_URL || typeof fetch !== "function") return null;
-  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, { headers: { accept: "application/json" } }, `GET ${path}`);
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers: { accept: "application/json" } });
   if (!response.ok) throw new Error(`status=${response.status}`);
   return response.json();
 }
 
 async function postApiJson(path, body) {
   if (!API_BASE_URL || typeof fetch !== "function") return null;
-  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: {
       accept: "application/json",
@@ -3912,7 +3570,7 @@ async function postApiJson(path, body) {
       ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
     },
     body: JSON.stringify(body || {}),
-  }, `POST ${path}`);
+  });
   if (!response.ok) throw new Error(`status=${response.status}`);
   return response.json();
 }
@@ -4433,10 +4091,10 @@ function updateControlPoint(room, point, channel) {
 
 function startControlPointTicker(room, channel = 0) {
   if (!isControlPointsRoom(room) || room.controlPointTimer) return;
-  room.controlPointTimer = setInterval(guardedCallback(`control-point room=${room.name}`, () => {
+  room.controlPointTimer = setInterval(() => {
     if (!isControlPointsRoom(room)) return;
     for (const point of room.controlPoints.values()) updateControlPoint(room, point, channel);
-  }), CONTROL_POINT_CAPTURE_TICK_MS);
+  }, CONTROL_POINT_CAPTURE_TICK_MS);
 }
 
 function stopControlPointTicker(room) {
@@ -4493,66 +4151,7 @@ function makeRoomItemState(mapName) {
 
 function ensureRoomItems(room) {
   if (!room.items) room.items = makeRoomItemState(room.map);
-  scheduleRoomItemRespawn(room);
   return room.items;
-}
-
-function clearRoomItemRespawnTimer(room) {
-  if (!room?.itemRespawnTimer) return;
-  clearTimeout(room.itemRespawnTimer);
-  room.itemRespawnTimer = null;
-  room.itemRespawnDueAt = 0;
-}
-
-function respawnDueRoomItems(room, reason = "room-timer") {
-  if (!ENABLE_MAP_PICKUPS || !room?.items || rooms.get(room.name) !== room) return 0;
-  const now = Date.now();
-  let respawned = 0;
-  for (const item of room.items.values()) {
-    if (!item.picked || !item.nextRespawnAt || now < item.nextRespawnAt) continue;
-    item.picked = false;
-    item.nextRespawnAt = 0;
-    markRoomItemHiddenForAll(room, item.id);
-    const payload = buildSpawnItemEvent(item);
-    let peers = 0;
-    for (const playerSession of room.players.values()) {
-      if (!playerSession?.gameStateRequested) continue;
-      const channel = reliableChannelForSession(playerSession, playerSession.lastChannel || 0);
-      if (!sendReliableToSession(playerSession, payload, channel)) continue;
-      markSessionItemVisible(playerSession, item.id);
-      queuePickupSpawnRepair(playerSession, [item.id], channel, "item-respawn");
-      peers += 1;
-    }
-    respawned += 1;
-    console.log(`[event] item-respawn id=${item.id} type=${item.type} subType=${item.subType ?? 0} value=${item.value} pos=${fmtPoint(item)} peers=${peers} reason=${reason}`);
-  }
-  scheduleRoomItemRespawn(room);
-  return respawned;
-}
-
-function scheduleRoomItemRespawn(room) {
-  if (!ENABLE_MAP_PICKUPS || !room?.items || ITEM_RESPAWN_MS <= 0) return;
-  let earliest = 0;
-  for (const item of room.items.values()) {
-    const dueAt = Number(item?.picked ? item.nextRespawnAt : 0);
-    if (dueAt > 0 && (!earliest || dueAt < earliest)) earliest = dueAt;
-  }
-  if (!earliest) {
-    clearRoomItemRespawnTimer(room);
-    return;
-  }
-  if (room.itemRespawnTimer && Number(room.itemRespawnDueAt || 0) === earliest) return;
-  clearRoomItemRespawnTimer(room);
-  room.itemRespawnDueAt = earliest;
-  room.itemRespawnTimer = setTimeout(guardedCallback(
-    `item-respawn room=${room.name}`,
-    () => {
-      room.itemRespawnTimer = null;
-      room.itemRespawnDueAt = 0;
-      respawnDueRoomItems(room);
-    },
-  ), Math.max(0, earliest - Date.now()));
-  if (typeof room.itemRespawnTimer.unref === "function") room.itemRespawnTimer.unref();
 }
 
 function makeItemRaw(item, overrides = {}) {
@@ -4711,7 +4310,7 @@ function queuePickupSpawnRepair(session, itemIds, channel = 0, reason = "item-sp
 
   for (const delayMs of PICKUP_SPAWN_REPAIR_DELAYS_MS) {
     const waitMs = Math.max(0, Number(delayMs) || 0);
-    const timer = setTimeout(guardedCallback(`item-spawn-repair actor=${actorId}`, () => {
+    const timer = setTimeout(() => {
       timerSet.delete(timer);
       if (session.actorId !== actorId || session.room !== room || room.players?.get(actorId) !== session) return;
       if (Number(session.spawnSeq || 0) !== spawnSeq) return;
@@ -4725,18 +4324,17 @@ function queuePickupSpawnRepair(session, itemIds, channel = 0, reason = "item-sp
         }
         console.log(`[sync] item-spawn-repair actor=${actorId} items=${activeItems.length} delay=${waitMs}ms reason=${reason}${describeSpawnItemPayload(activeItems)}`);
       }
-    }), waitMs);
+    }, waitMs);
     timerSet.add(timer);
     if (typeof timer.unref === "function") timer.unref();
   }
 }
 
-function appendActiveRoomPickupPayloads(session, payloads, channel = 0, reason = "post-spawn-response") {
-  if (!Array.isArray(payloads)) return 0;
+function sendActiveRoomPickupsToSession(session, channel = 0, reason = "post-spawn") {
   const entries = activeRoomPickupEventsForSession(session);
   if (!entries.length) return 0;
   const items = entries.map((entry) => entry.item);
-  payloads.push(...pickupSpawnRepairPayloads(items));
+  if (!sendReliablePayloadsToSession(session, pickupSpawnRepairPayloads(items), channel)) return 0;
   for (const entry of entries) {
     markSessionItemVisible(session, entry.item.id);
   }
@@ -4745,16 +4343,37 @@ function appendActiveRoomPickupPayloads(session, payloads, channel = 0, reason =
   return entries.length;
 }
 
-function sendActiveRoomPickupsToSession(session, channel = 0, reason = "post-spawn") {
-  const visibleBefore = new Set(ensureSessionVisibleItemIds(session));
-  const payloads = [];
-  const count = appendActiveRoomPickupPayloads(session, payloads, channel, reason);
-  if (!count) return 0;
-  if (!sendReliablePayloadsToSession(session, payloads, channel)) {
-    session.visibleItemIds = visibleBefore;
-    return 0;
+function queuePostSpawnPickupSync(session, reason = "post-spawn") {
+  if (!ENABLE_MAP_PICKUPS || !session?.room) return;
+  session.pendingPickupSync = {
+    reason,
+    afterMoveCount: Math.max(2, (Number(session.moveCount) || 0) + 1),
+  };
+}
+
+function appendActiveRoomPickupEvents(session, commands, channel = 0, reason = "post-spawn-response") {
+  if (!Array.isArray(commands)) return 0;
+  const entries = activeRoomPickupEventsForSession(session);
+  if (!entries.length) return 0;
+  const items = entries.map((entry) => entry.item);
+  for (const payload of pickupSpawnRepairPayloads(items)) {
+    commands.push(...makeReliableCommandsForPayload(session, payload, channel));
   }
-  return count;
+  for (const item of items) {
+    markSessionItemVisible(session, item.id);
+  }
+  queuePickupSpawnRepair(session, entries.map((entry) => entry.item.id), channel, reason);
+  console.log(`[sync] item-spawn actor=${session.actorId} items=${entries.length} reason=${reason}${describeSpawnItemPayload(entries)}`);
+  return entries.length;
+}
+
+function maybeAppendPostSpawnPickupSync(session, commands, channel = 0) {
+  const pending = session?.pendingPickupSync;
+  if (!pending || !ENABLE_MAP_PICKUPS) return;
+  if (!session.spawned || session.dead || !session.gameStateRequested) return;
+  if ((Number(session.moveCount) || 0) < Number(pending.afterMoveCount || 0)) return;
+  appendActiveRoomPickupEvents(session, commands, channel, pending.reason || "post-spawn-response");
+  session.pendingPickupSync = null;
 }
 
 function sendReliablePayloadsToSession(targetSession, payloads, channel = 0) {
@@ -4836,13 +4455,15 @@ function sendSpectatorUnreliableToSession(targetSession, payload) {
 
 function canReceiveLivePeerEvent(playerSession) {
   if (!playerSession?.gameStateRequested) return false;
-  return Boolean(playerSession.peerSnapshotReady || playerSession.moveSeen);
+  if (playerSession.waitingSelfSpawnMove) return false;
+  return Boolean(playerSession.moveSeen);
 }
 
 function canReceiveSpectatorUnreliableLive(playerSession) {
   if (!SPECTATOR_LIVE_UNRELIABLE) return false;
   if (!playerSession?.gameStateRequested) return false;
-  return !canReceiveLivePeerEvent(playerSession);
+  if (playerSession.waitingSelfSpawnMove) return false;
+  return !playerSession.moveSeen;
 }
 
 function broadcastLiveToRoom(sourceSession, payload, channel = 0, options = {}) {
@@ -4916,6 +4537,26 @@ function sendReliableToWholeRoom(room, payload, channel = 0, options = {}) {
     if (sendReliableToSession(playerSession, payload, channel)) sent += 1;
   }
   return sent;
+}
+
+function maybeAppendRespawnItems(session, commands, channel) {
+  if (!ENABLE_MAP_PICKUPS || !session?.room?.items || ITEM_RESPAWN_MS <= 0) return;
+  const now = Date.now();
+  for (const item of session.room.items.values()) {
+    if (!item.picked || !item.nextRespawnAt || now < item.nextRespawnAt) continue;
+    item.picked = false;
+    item.nextRespawnAt = 0;
+    markRoomItemHiddenForAll(session.room, item.id);
+    const spawnItemEvent = buildSpawnItemEvent(item);
+    commands.push(...makeReliableCommandsForPayload(session, spawnItemEvent, channel));
+    markSessionItemVisible(session, item.id);
+    queuePickupSpawnRepair(session, [item.id], channel, "item-respawn");
+    broadcastReliableToRoom(session, spawnItemEvent, channel, "item-respawn", {
+      requireLiveReady: false,
+      markItemVisibleId: item.id,
+    });
+    console.log(`[event] item-respawn id=${item.id} type=${item.type} subType=${item.subType ?? 0} value=${item.value} pos=${fmtPoint(item)}`);
+  }
 }
 
 function distanceSquared(left, right) {
@@ -5157,6 +4798,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   session.dead = false;
   session.moveSeen = false;
   session.moveCount = 0;
+  session.pendingPickupSync = null;
   clearPickupSpawnRepairTimers(session);
   session.visibleItemIds = new Set();
   session.waitingSelfSpawnMove = true;
@@ -5379,7 +5021,8 @@ function resetStandardPlayerForNextRound(playerSession) {
   clearPeerSpawnTimers(playerSession);
   clearPickupSpawnRepairTimers(playerSession);
   clearSpawnStallRecovery(playerSession);
-  clearPendingSpawnBroadcast(playerSession);
+  playerSession.pendingSpawnBroadcast = null;
+  playerSession.pendingPickupSync = null;
   playerSession.visibleItemIds = new Set();
   playerSession.team = normalizeTeamForRoom(playerSession, playerSession.team);
   playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
@@ -5473,7 +5116,7 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
     clearPeerSpawnTimers(playerSession);
     clearPickupSpawnRepairTimers(playerSession);
     clearSpawnStallRecovery(playerSession);
-    clearPendingSpawnBroadcast(playerSession);
+    playerSession.pendingSpawnBroadcast = null;
     playerSession.waitingSelfSpawnMove = false;
   }
 
@@ -5586,7 +5229,8 @@ function resetZombiePlayerForNextRound(playerSession) {
   clearPeerSpawnTimers(playerSession);
   clearPickupSpawnRepairTimers(playerSession);
   clearSpawnStallRecovery(playerSession);
-  clearPendingSpawnBroadcast(playerSession);
+  playerSession.pendingSpawnBroadcast = null;
+  playerSession.pendingPickupSync = null;
   playerSession.visibleItemIds = new Set();
   playerSession.team = HUMAN_TEAM;
   playerSession.zombieType = ZOMBIE_TYPE.HUMAN;
@@ -5626,10 +5270,7 @@ function beginNextZombieRound(room, roundSeq, channel = 0) {
 function scheduleZombieRestart(room, channel = 0) {
   clearZombieRestartTimer(room);
   const roundSeq = Number(room.zombieRoundSeq || 0);
-  room.zombieRestartTimer = setTimeout(guardedCallback(
-    `zombie-restart room=${room.name} seq=${roundSeq}`,
-    () => beginNextZombieRound(room, roundSeq, channel),
-  ), ZOMBIE_ROUND_RESTART_MS);
+  room.zombieRestartTimer = setTimeout(() => beginNextZombieRound(room, roundSeq, channel), ZOMBIE_ROUND_RESTART_MS);
   if (typeof room.zombieRestartTimer.unref === "function") room.zombieRestartTimer.unref();
 }
 
@@ -5656,7 +5297,7 @@ function finishZombieRound(room, winnerTeam, reason = "unknown", channel = 0, cu
     clearPeerSpawnTimers(playerSession);
     clearPickupSpawnRepairTimers(playerSession);
     clearSpawnStallRecovery(playerSession);
-    clearPendingSpawnBroadcast(playerSession);
+    playerSession.pendingSpawnBroadcast = null;
     playerSession.waitingSelfSpawnMove = false;
   }
 
@@ -5698,13 +5339,13 @@ function queueZombiePlayerUpdateRepair(playerSession, channel = 0, reason = "zom
   let queued = 0;
   for (const delayMs of ZOMBIE_UPDATE_REPAIR_DELAYS_MS) {
     const waitMs = Math.max(0, Number(delayMs) || 0);
-    const timer = setTimeout(guardedCallback(`zombie-update-repair actor=${actorId}`, () => {
+    const timer = setTimeout(() => {
       if (playerSession.room !== room || room.players.get(actorId) !== playerSession) return;
       if (Number(room.zombieRoundSeq || 0) !== roundSeq) return;
       if (!isZombiePlayerSession(playerSession) || playerSession.dead) return;
       const sent = sendZombiePayloadToReadyRoom(room, makeZombiePlayerUpdateEvent(playerSession), channel);
       console.log(`[zombie] update-repair actor=${actorId} type=${playerSession.zombieType} reason=${reason} delay=${waitMs}ms sent=${sent}`);
-    }), waitMs);
+    }, waitMs);
     if (typeof timer.unref === "function") timer.unref();
     queued += 1;
   }
@@ -5724,25 +5365,21 @@ function zombieRegenRange(session) {
 function runZombieRegenerationTick() {
   for (const room of rooms.values()) {
     if (!isZombieRoom(room) || zombieModeForRoom(room) !== ZOMBIE_MODE.MAIN) continue;
-    runGuardedCallback(`zombie-regen-room room=${room.name}`, () => {
-      for (const playerSession of zombieAlivePlayers(room, ZOMBIE_TEAM)) {
-        runGuardedCallback(`zombie-regen-player actor=${playerSession.actorId}`, () => {
-          const range = zombieRegenRange(playerSession);
-          if (!range || range.max <= 0) return;
-          const stats = sessionRuntimeStats(playerSession);
-          const maxHealth = sessionMaxHealth(playerSession, stats);
-          const currentHealth = Math.round(clampNumber(playerSession.health ?? maxHealth, 0, maxHealth));
-          if (currentHealth <= 0 || currentHealth >= maxHealth) return;
-          const amount = randomIntInclusive(range.min, range.max);
-          if (amount <= 0) return;
-          playerSession.health = Math.min(maxHealth, currentHealth + amount);
-          const payload = makePlayerHealthEnergyEvent(playerSession);
-          const channel = reliableChannelForSession(playerSession, playerSession.lastChannel || 0);
-          const sent = sendReliableToSession(playerSession, payload, channel) ? 1 : 0;
-          console.log(`[zombie] regen actor=${playerSession.actorId} type=${playerSession.zombieType} hp=${currentHealth}->${playerSession.health}/${maxHealth} add=${playerSession.health - currentHealth} sent=${sent}`);
-        });
-      }
-    });
+    for (const playerSession of zombieAlivePlayers(room, ZOMBIE_TEAM)) {
+      const range = zombieRegenRange(playerSession);
+      if (!range || range.max <= 0) continue;
+      const stats = sessionRuntimeStats(playerSession);
+      const maxHealth = sessionMaxHealth(playerSession, stats);
+      const currentHealth = Math.round(clampNumber(playerSession.health ?? maxHealth, 0, maxHealth));
+      if (currentHealth <= 0 || currentHealth >= maxHealth) continue;
+      const amount = randomIntInclusive(range.min, range.max);
+      if (amount <= 0) continue;
+      playerSession.health = Math.min(maxHealth, currentHealth + amount);
+      const payload = makePlayerHealthEnergyEvent(playerSession);
+      const channel = reliableChannelForSession(playerSession, playerSession.lastChannel || 0);
+      const sent = sendReliableToSession(playerSession, payload, channel) ? 1 : 0;
+      console.log(`[zombie] regen actor=${playerSession.actorId} type=${playerSession.zombieType} hp=${currentHealth}->${playerSession.health}/${maxHealth} add=${playerSession.health - currentHealth} sent=${sent}`);
+    }
   }
 }
 
@@ -5794,10 +5431,7 @@ function beginZombieMain(room, roundSeq, channel = 0) {
 function scheduleZombieMain(room, channel = 0) {
   clearZombieBossTimer(room);
   const roundSeq = Number(room.zombieRoundSeq || 0);
-  room.zombieBossTimer = setTimeout(guardedCallback(
-    `zombie-main room=${room.name} seq=${roundSeq}`,
-    () => beginZombieMain(room, roundSeq, channel),
-  ), ZOMBIE_BOSS_INFECTION_MS);
+  room.zombieBossTimer = setTimeout(() => beginZombieMain(room, roundSeq, channel), ZOMBIE_BOSS_INFECTION_MS);
   if (typeof room.zombieBossTimer.unref === "function") room.zombieBossTimer.unref();
 }
 
@@ -5806,12 +5440,12 @@ function scheduleZombieRoundLimit(room, channel = 0) {
   const timeLimitMs = Math.max(0, numberOr(room?.timeLimit, 0) * 60 * 1000);
   if (!timeLimitMs) return;
   const roundSeq = Number(room.zombieRoundSeq || 0);
-  room.zombieRoundTimer = setTimeout(guardedCallback(`zombie-round-limit room=${room.name} seq=${roundSeq}`, () => {
+  room.zombieRoundTimer = setTimeout(() => {
     if (!room || rooms.get(room.name) !== room) return;
     if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== roundSeq) return;
     const winner = zombieAlivePlayers(room, HUMAN_TEAM).length > 0 ? HUMAN_TEAM : ZOMBIE_TEAM;
     finishZombieRound(room, winner, "time-limit", channel);
-  }), timeLimitMs);
+  }, timeLimitMs);
   if (typeof room.zombieRoundTimer.unref === "function") room.zombieRoundTimer.unref();
 }
 
@@ -5832,13 +5466,6 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
     resetZombieParticipantForHumanStart(playerSession);
     const spawnEvent = buildSpawnEvent(playerSession, HUMAN_TEAM, "zombie-round-start");
     sent += sendZombiePayloadToReadyRoom(room, spawnEvent, channel, currentSession, currentResponses);
-  }
-  for (const playerSession of players) {
-    if (playerSession === currentSession && Array.isArray(currentResponses)) {
-      appendActiveRoomPickupPayloads(playerSession, currentResponses, channel, "zombie-round-start");
-    } else {
-      sendActiveRoomPickupsToSession(playerSession, channel, "zombie-round-start");
-    }
   }
   sent += sendZombiePayloadToReadyRoom(room, makeZombieModeEvent(room.zombieMode), channel, currentSession, currentResponses);
 
@@ -5861,7 +5488,7 @@ function keepZombieLateJoinSpectator(session) {
   session.moveCount = 0;
   session.waitingSelfSpawnMove = false;
   session.lastTransform = null;
-  clearPendingSpawnBroadcast(session);
+  session.pendingSpawnBroadcast = null;
   clearSpawnStallRecovery(session);
   clearSpawnMoveWarningTimer(session);
   clearSpawnSelfRetryTimers(session);
@@ -6556,10 +6183,10 @@ function makeReloadUpdateEvent(session, state) {
 
 function scheduleReloadTick(session, state, channel, reloadSeq, delayMs) {
   clearWeaponReloadTimer(state);
-  state.reloadTimer = setTimeout(guardedCallback(`reload actor=${session?.actorId || 0} slot=${state?.slot || 0}`, () => {
+  state.reloadTimer = setTimeout(() => {
     state.reloadTimer = null;
     applyReloadTick(session, state, channel, reloadSeq);
-  }), Math.max(0, delayMs));
+  }, Math.max(0, delayMs));
   if (typeof state.reloadTimer.unref === "function") {
     state.reloadTimer.unref();
   }
@@ -7235,7 +6862,7 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   clearPeerSpawnTimers(targetSession);
   clearPickupSpawnRepairTimers(targetSession);
   clearSpawnStallRecovery(targetSession);
-  clearPendingSpawnBroadcast(targetSession);
+  targetSession.pendingSpawnBroadcast = null;
   resetZombieInfectionProgress(targetSession);
   targetSession.team = ZOMBIE_TEAM;
   targetSession.zombieType = ZOMBIE_TYPE.REGULAR;
@@ -7411,7 +7038,7 @@ function applyImpactDotKill(effect, targetSession, damage) {
   clearPeerSpawnTimers(targetSession);
   clearPickupSpawnRepairTimers(targetSession);
   clearSpawnStallRecovery(targetSession);
-  clearPendingSpawnBroadcast(targetSession);
+  targetSession.pendingSpawnBroadcast = null;
   postBattleEvent(targetSession, "death", {
     health: targetSession.health,
     energy: targetSession.energy,
@@ -7699,7 +7326,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     clearPeerSpawnTimers(targetSession);
     clearPickupSpawnRepairTimers(targetSession);
     clearSpawnStallRecovery(targetSession);
-    clearPendingSpawnBroadcast(targetSession);
+    targetSession.pendingSpawnBroadcast = null;
     const impulse = shotImpulseVector(data, shooter, targetSession);
     result.killed = true;
     result.killedSession = targetSession;
@@ -7933,7 +7560,6 @@ function takeRoomItem(session, item, reason, context = {}) {
 
   item.picked = true;
   item.nextRespawnAt = ITEM_RESPAWN_MS > 0 ? Date.now() + ITEM_RESPAWN_MS : 0;
-  scheduleRoomItemRespawn(session.room);
   markRoomItemHiddenForAll(session.room, item.id);
   let pickValue = 0;
   let detail = "";
@@ -8228,8 +7854,6 @@ function ensureRoom(settings) {
       players: new Map(),
       moves: 0,
       items: makeRoomItemState(requestedMap),
-      itemRespawnTimer: null,
-      itemRespawnDueAt: 0,
       controlPoints: makeControlPointState(requestedMap),
       controlPointScores: makeControlPointScoreState(),
       flags: makeFlagState(requestedMap),
@@ -8298,7 +7922,6 @@ function clearZombieTimers(room) {
   clearZombieRestartTimer(room);
   clearStandardRoundTimers(room);
   stopControlPointTicker(room);
-  clearRoomItemRespawnTimer(room);
 }
 
 function nextRoomActorId(room) {
@@ -8319,14 +7942,11 @@ function resetReliableDedupe(session, reason = "reset", options = {}) {
   const fragments = session.reliableFragments?.size || 0;
   session.reliableResponses?.clear?.();
   session.reliableFragments?.clear?.();
-  session.reliableReplayLogState = new Map();
   if (options.clearInFlight !== false) {
     session.reliableInFlight?.clear?.();
   }
   if (options.bumpGeneration) {
     session.reliableGeneration = (session.reliableGeneration || 0) + 1;
-    session.transportGeneration = session.reliableGeneration;
-    clearInboundReliableOrdering(session);
   }
   if (cached || inFlight || fragments || options.bumpGeneration) {
     console.log(`[state] reliable cache reset reason=${reason} cached=${cached} inflight=${inFlight} fragments=${fragments}${options.clearInFlight === false ? " preserved" : ""} gen=${session.reliableGeneration || 0}`);
@@ -8351,13 +7971,13 @@ function queueSpawnNoMoveWarning(session, point, reason) {
   const actorId = session.actorId;
   const roomName = session.room?.name;
   const mapName = session.room?.map || DEFAULT_MAP;
-  session.spawnMoveWarningTimer = setTimeout(guardedCallback(`spawn-no-move actor=${actorId}`, () => {
+  session.spawnMoveWarningTimer = setTimeout(() => {
     session.spawnMoveWarningTimer = null;
     if (session.actorId !== actorId || session.room?.name !== roomName || session.moveSeen) {
       return;
     }
     console.log(`[warn] spawn-no-move actor=${actorId} map=${mapName} reason=${reason} pos=${fmtPoint(point)} wait=${SPAWN_NO_MOVE_WARN_MS}ms`);
-  }), SPAWN_NO_MOVE_WARN_MS);
+  }, SPAWN_NO_MOVE_WARN_MS);
   if (typeof session.spawnMoveWarningTimer.unref === "function") {
     session.spawnMoveWarningTimer.unref();
   }
@@ -8386,7 +8006,7 @@ function queueSelfSpawnRetry(session, reliableCommand, spawnSeq, reason) {
 
   for (const delayMs of SPAWN_SELF_RETRY_DELAYS_MS) {
     const waitMs = Math.max(0, Number(delayMs) || 0);
-    const timer = setTimeout(guardedCallback(`spawn-self-retry actor=${actorId}`, () => {
+    const timer = setTimeout(() => {
       timerSet.delete(timer);
       if (session.actorId !== actorId || session.room !== room) return;
       if (room.players?.get(actorId) !== session) return;
@@ -8395,7 +8015,7 @@ function queueSelfSpawnRetry(session, reliableCommand, spawnSeq, reason) {
       if (sendReliableCommandToSession(session, reliableCommand)) {
         console.log(`[sync] spawn-self-retry actor=${actorId} seq=${reliableCommand.seqs ?? reliableCommand.seq} delay=${waitMs}ms reason=${reason}`);
       }
-    }), waitMs);
+    }, waitMs);
     timerSet.add(timer);
     if (typeof timer.unref === "function") timer.unref();
   }
@@ -8533,9 +8153,6 @@ function resetSessionRoomProgress(session) {
   clearSessionWeaponReloadTimers(session);
   clearSessionImpactTimers(session);
   session.gameStateRequested = false;
-  session.peerSnapshotReady = false;
-  session.joinInProgress = false;
-  session.joinedRoomGeneration = 0;
   session.lastGameStateResponseAt = 0;
   session.knownActorIds = new Set();
   session.actorJoinAnnouncedAt = new Map();
@@ -8550,7 +8167,8 @@ function resetSessionRoomProgress(session) {
   session.team = -1;
   session.zombieType = ZOMBIE_TYPE.HUMAN;
   session.lastTransform = null;
-  clearPendingSpawnBroadcast(session);
+  session.pendingSpawnBroadcast = null;
+  session.pendingPickupSync = null;
   resetSessionMatchStats(session);
   clearOutboundReliableState(session);
 }
@@ -8632,7 +8250,6 @@ function resetTransportForReconnect(session, reason) {
   session.reliableFragments = new Map();
   session.verifySeq = null;
   session.seenVerify = false;
-  session.transportDisconnected = false;
   session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
   session.roomRaw = makeRoomSettingsRaw(session.room);
   session.actorRaw = null;
@@ -8655,7 +8272,7 @@ function resetTransportForReconnect(session, reason) {
   session.dead = false;
   session.waitingSelfSpawnMove = false;
   clearSpawnSelfRetryTimers(session);
-  clearPendingSpawnBroadcast(session);
+  session.pendingSpawnBroadcast = null;
   session.kills = 0;
   session.deaths = 0;
   session.points = 0;
@@ -8773,43 +8390,6 @@ function clearPeerSpawnTimers(session) {
   session.peerSpawnTimers.clear();
 }
 
-function clearPendingSpawnBroadcast(session) {
-  const pending = session?.pendingSpawnBroadcast;
-  if (pending?.timer) clearTimeout(pending.timer);
-  if (session) session.pendingSpawnBroadcast = null;
-}
-
-function publishPendingSpawnBroadcast(session, reason = "fallback") {
-  const pending = session?.pendingSpawnBroadcast;
-  if (!pending?.payload) return 0;
-  clearPendingSpawnBroadcast(session);
-  const room = pending.room;
-  if (!room || session.room !== room || room.players?.get?.(pending.actorId) !== session) return 0;
-  if (!session.spawned || session.dead || Number(session.spawnSeq || 0) !== Number(pending.spawnSeq || 0)) return 0;
-  const peers = broadcastSpawnToRoom(session, pending.payload, pending.channel || 0);
-  console.log(`[sync] deferred-spawn actor=${session.actorId} peers=${peers} reason=${reason}`);
-  return peers;
-}
-
-function deferPendingSpawnBroadcast(session, payload, channel = 0) {
-  clearPendingSpawnBroadcast(session);
-  const pending = {
-    payload,
-    channel,
-    room: session.room,
-    actorId: session.actorId,
-    spawnSeq: Number(session.spawnSeq || 0),
-    timer: null,
-  };
-  pending.timer = setTimeout(guardedCallback(
-    `peer-respawn-fallback actor=${session.actorId}`,
-    () => publishPendingSpawnBroadcast(session, `timeout-fallback-${PEER_RESPAWN_FALLBACK_MS}ms`),
-  ), PEER_RESPAWN_FALLBACK_MS);
-  if (typeof pending.timer.unref === "function") pending.timer.unref();
-  session.pendingSpawnBroadcast = pending;
-  return pending;
-}
-
 function markActorKnown(session, actorId) {
   const normalizedActorId = Number(actorId);
   if (!Number.isInteger(normalizedActorId) || normalizedActorId <= 0) return;
@@ -8873,16 +8453,15 @@ function schedulePeerSpawnEvent(targetSession, sourceSession, spawnPayload, chan
   if (!room || !sourceActorId || !targetActorId || !spawnPayload) return false;
   const timerSet = ensurePeerSpawnTimerSet(targetSession);
   const waitMs = Math.max(0, Number(delayMs) || 0);
-  const timer = setTimeout(guardedCallback(`peer-spawn target=${targetActorId} actor=${sourceActorId}`, () => {
+  const timer = setTimeout(() => {
     timerSet?.delete(timer);
     if (sourceSession.room !== room || targetSession.room !== room) return;
     if (room.players.get(sourceActorId) !== sourceSession || room.players.get(targetActorId) !== targetSession) return;
     if (!targetSession.gameStateRequested) return;
     if (sendPeerSpawnToSession(targetSession, sourceSession, spawnPayload, channel)) {
-      sendPeerRuntimeSnapshotToSession(targetSession, sourceSession, channel, "actor-ready");
       console.log(`[sync] spawn-delayed actor=${sourceActorId} peer=${targetActorId} delay=${waitMs}ms`);
     }
-  }), waitMs);
+  }, waitMs);
   timerSet?.add(timer);
   if (typeof timer.unref === "function") timer.unref();
   return true;
@@ -8932,7 +8511,7 @@ function queuePeerActorRepair(targetSession, channel = 0, reason = "gamestate") 
 
   for (const delayMs of PEER_ACTOR_REPAIR_DELAYS_MS) {
     const waitMs = Math.max(0, Number(delayMs) || 0);
-    const timer = setTimeout(guardedCallback(`peer-actor-repair target=${targetActorId}`, () => {
+    const timer = setTimeout(() => {
       if (targetSession.room !== room || room.players.get(targetActorId) !== targetSession) return;
       if (!targetSession.gameStateRequested) return;
 
@@ -8959,7 +8538,7 @@ function queuePeerActorRepair(targetSession, channel = 0, reason = "gamestate") 
       if (sendReliablePayloadsToSession(targetSession, payloads, channel)) {
         console.log(`[sync] peer-actor-repair target=${targetActorId} actors=${actors.join(",")} delay=${waitMs}ms reason=${reason} queuedSpawns=${queuedSpawns}`);
       }
-    }), waitMs);
+    }, waitMs);
     if (typeof timer.unref === "function") timer.unref();
   }
 }
@@ -9081,14 +8660,14 @@ function queueJoinSettingsPushes(port, socket, rinfo, session, channel = 0) {
   clearJoinSettingsTimers(session);
   if (!JOIN_SETTINGS_PUSH_DELAYS_MS.length) return;
   session.joinSettingsTimers = JOIN_SETTINGS_PUSH_DELAYS_MS.map((delayMs) => {
-    const timer = setTimeout(guardedCallback(`join-settings actor=${session.actorId}`, () => {
-      if (session.transportDisconnected || session.room?.players?.get?.(session.actorId) !== session || session.gameStateRequested) {
+    const timer = setTimeout(() => {
+      if (sessions.get(key(port, rinfo)) !== session || session.gameStateRequested) {
         return;
       }
       console.log(`[event] join-settings-push actor=${session.actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} roomRaw=${session.roomRaw?.length || 0}`);
       markKnownRoomActors(session);
-      sendReliableToSession(session, makeJoinSettingsEvent(session), channel);
-    }), delayMs);
+      sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
+    }, delayMs);
     if (typeof timer.unref === "function") {
       timer.unref();
     }
@@ -9101,14 +8680,14 @@ function queueJoinStartFallback(port, socket, rinfo, session, channel = 0) {
   // Normal slow-load recovery is handled by join-late-start pulses; this early one-shot is opt-in for diagnostics.
   if (JOIN_START_EVENT_FALLBACK_DELAY_MS <= 0) return;
   const actorId = session.actorId;
-  session.joinStartEventTimer = setTimeout(guardedCallback(`join-start actor=${actorId}`, () => {
+  session.joinStartEventTimer = setTimeout(() => {
     session.joinStartEventTimer = null;
-    if (session.transportDisconnected || session.room?.players?.get?.(actorId) !== session || session.actorId !== actorId || session.gameStateRequested) {
+    if (sessions.get(key(port, rinfo)) !== session || session.actorId !== actorId || session.gameStateRequested) {
       return;
     }
     console.log(`[event] join-start-fallback actor=${actorId} delay=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms`);
-    sendReliableToSession(session, makeJoinStartEvent(session), channel);
-  }), JOIN_START_EVENT_FALLBACK_DELAY_MS);
+    sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
+  }, JOIN_START_EVENT_FALLBACK_DELAY_MS);
   if (typeof session.joinStartEventTimer.unref === "function") {
     session.joinStartEventTimer.unref();
   }
@@ -9119,15 +8698,15 @@ function queueJoinLateStartPulses(port, socket, rinfo, session, channel = 0) {
   if (!JOIN_LATE_START_DELAYS_MS.length) return;
   const actorId = session.actorId;
   session.joinLateStartTimers = JOIN_LATE_START_DELAYS_MS.map((delayMs) => {
-    const timer = setTimeout(guardedCallback(`join-late-start actor=${actorId}`, () => {
-      if (session.transportDisconnected || session.room?.players?.get?.(actorId) !== session || session.actorId !== actorId || session.gameStateRequested) {
+    const timer = setTimeout(() => {
+      if (sessions.get(key(port, rinfo)) !== session || session.actorId !== actorId || session.gameStateRequested) {
         return;
       }
       console.log(`[event] join-late-start-pulse actor=${actorId} delay=${delayMs}ms`);
-      sendReliableToSession(session, makeJoinStartEvent(session), channel);
+      sendReliablePayload(socket, rinfo, session, makeJoinStartEvent(session), channel);
       markKnownRoomActors(session);
-      sendReliableToSession(session, makeJoinSettingsEvent(session), channel);
-    }), delayMs);
+      sendReliablePayload(socket, rinfo, session, makeJoinSettingsEvent(session), channel);
+    }, delayMs);
     if (typeof timer.unref === "function") {
       timer.unref();
     }
@@ -9163,9 +8742,9 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
   const actorId = session.actorId;
   const startedAt = Date.now();
   const scheduleSelfJoin = (delayMs) => {
-    session.joinSelfEventTimer = setTimeout(guardedCallback(`join-self actor=${actorId}`, () => {
+    session.joinSelfEventTimer = setTimeout(() => {
       session.joinSelfEventTimer = null;
-      if (session.transportDisconnected || session.room?.players?.get?.(actorId) !== session || session.actorId !== actorId) {
+      if (sessions.get(key(port, rinfo)) !== session || session.actorId !== actorId) {
         return;
       }
 
@@ -9175,7 +8754,7 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
           console.log(`[event] join-self wait-profile actor=${actorId} elapsed=${elapsed}ms retry=${JOIN_PROFILE_RETRY_MS}ms`);
           if (options.incomingActor) {
             warmPlayerProfile(options.incomingActor, "join-self-retry").then((loadedProfile) => {
-              if (!session.transportDisconnected && session.room?.players?.get?.(actorId) === session && session.actorId === actorId) {
+              if (sessions.get(key(port, rinfo)) === session && session.actorId === actorId) {
                 applyLateProfile(session, loadedProfile, options.incomingActor);
               }
             });
@@ -9190,11 +8769,11 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
       }
 
       console.log(`[event] delayed join-self actor=${actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} profileWait=${options.waitForProfile ? "on" : "off"}`);
-      sendReliableToSession(session, makeJoinSelfEvent(session), channel);
+      sendReliablePayload(socket, rinfo, session, makeJoinSelfEvent(session), channel);
       queueJoinSettingsPushes(port, socket, rinfo, session, channel);
       queueJoinStartFallback(port, socket, rinfo, session, channel);
       queueJoinLateStartPulses(port, socket, rinfo, session, channel);
-    }), delayMs);
+    }, delayMs);
     if (typeof session.joinSelfEventTimer.unref === "function") {
       session.joinSelfEventTimer.unref();
     }
@@ -9428,48 +9007,6 @@ function rawMasterEvent(eventCode, actorId, dataRaw) {
   if (actorId != null) entries.push({ key: 225, value: rawInt(actorId) });
   if (dataRaw) entries.push({ key: 213, value: dataRaw });
   return rawEvent(eventCode, entries);
-}
-
-function buildPeerRuntimeSnapshotEvents(sourceSession, options = {}) {
-  if (!sourceSession || !sourceSession.spawned || sourceSession.dead) return [];
-  const events = [];
-  if (options.includeSpawn !== false) {
-    const spawnEvent = makeSpawnEventFromSession(sourceSession);
-    if (spawnEvent) events.push(spawnEvent);
-  }
-  const state = weaponStateBySlot(sourceSession, sourceSession.currentWeaponSlot)
-    || Array.from(sourceSession.weaponStates?.values?.() || [])[0]
-    || null;
-  const weaponEvent = buildWeaponChangeEventFromState(sourceSession, state);
-  if (weaponEvent) events.push(weaponEvent);
-  events.push(makePlayerHealthEnergyEvent(sourceSession));
-  return events;
-}
-
-function sendPeerRuntimeSnapshotToSession(targetSession, sourceSession, channel = 0, reason = "snapshot") {
-  const payloads = buildPeerRuntimeSnapshotEvents(sourceSession, { includeSpawn: false });
-  if (!payloads.length) return 0;
-  if (!sendReliablePayloadsToSession(targetSession, payloads, channel)) return 0;
-  console.log(`[sync] peer-runtime-snapshot target=${targetSession.actorId} actor=${sourceSession.actorId} events=${payloads.length} reason=${reason}`);
-  return payloads.length;
-}
-
-function buildReadyPeerSnapshotEvents(targetSession) {
-  const room = targetSession?.room;
-  if (!room?.players?.size) return [];
-  const events = [];
-  let peers = 0;
-  for (const [actorId, sourceSession] of room.players.entries()) {
-    if (!sourceSession || sourceSession === targetSession || !sessionKnowsActor(targetSession, actorId)) continue;
-    const snapshot = buildPeerRuntimeSnapshotEvents(sourceSession, { includeSpawn: true });
-    if (!snapshot.length) continue;
-    events.push(...snapshot);
-    peers += 1;
-  }
-  if (events.length) {
-    console.log(`[sync] peer-ready-snapshot target=${targetSession.actorId} peers=${peers} events=${events.length}`);
-  }
-  return events;
 }
 
 function clanTreasuryDeliveryKey(clanId, eventId) {
@@ -10152,34 +9689,14 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
     }
-    const joinTransportGeneration = Number(session.transportGeneration || session.reliableGeneration || 0);
-    session.joinInProgress = true;
-    let joinProfile;
-    try {
-      joinProfile = await profileForJoin(actorParam, { forceRefresh: true });
-    } catch (error) {
-      session.joinInProgress = false;
-      console.log(`[state] room join rejected reason=profile-error name=${settings.name} ${error.message}`);
-      return [rawOperationResponse(255, [], -3, "profile-unavailable")];
-    }
-    session.joinInProgress = false;
-    if (session.transportDisconnected || Number(session.transportGeneration || 0) !== joinTransportGeneration) {
-      console.log(`[state] room join abandoned reason=transport-generation name=${settings.name} expected=${joinTransportGeneration} actual=${session.transportGeneration || 0}`);
-      return [];
-    }
-    const { profile, source: profileSource } = joinProfile;
-    if (isFallbackBattleProfile(profile)) {
-      console.log(`[state] room join rejected reason=profile-unavailable name=${settings.name} player=${actorCredentials(actorParam).authId}`);
-      return [rawOperationResponse(255, [], -3, "profile-unavailable")];
-    }
     resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
     session.listLobby = false;
     detachSessionFromRoom(session, "rejoin");
+    const { profile, source: profileSource, pendingProfile } = await profileForJoin(actorParam, { forceRefresh: true });
     session.playerId = profile.authId;
     session.playerAuthKey = profile.authKey || actorCredentials(actorParam).authKey || "";
     session.playerName = profile.name;
     session.loadedProfile = profile;
-    session.pendingBattleProfile = null;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
     session.peerWeaponConfirmKeys = new Map();
@@ -10201,8 +9718,21 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.roomRaw = makeRoomSettingsRaw(session.room);
     removeDuplicatePlayerSessions(session.room, session);
     session.actorId = nextRoomActorId(session.room);
-    session.joinedRoomGeneration = joinTransportGeneration;
     updateActorWireData(session, actorParam, profile, channel);
+    const joinActorId = session.actorId;
+    if (profileSource === "fallback") {
+      (pendingProfile || warmPlayerProfile(actorParam, "late-room-profile")).then((loadedProfile) => {
+        if (sessions.get(key(port, rinfo)) === session && session.actorId === joinActorId) {
+          applyLateProfile(session, loadedProfile, actorParam);
+        }
+      });
+    } else if (profileSource === "cache") {
+      loadPlayerProfile(actorParam, { forceRefresh: true }).then((loadedProfile) => {
+        if (sessions.get(key(port, rinfo)) === session && session.actorId === joinActorId) {
+          applyLateProfile(session, loadedProfile, actorParam);
+        }
+      });
+    }
     const actorListRaw = makeRoomActorListRaw(session.room, session);
     session.knownActorIds = new Set();
     session.actorJoinAnnouncedAt = new Map();
@@ -10211,12 +9741,11 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     pushRoomListToLobbySessions("room-join", channel);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
-    session.peerSnapshotReady = false;
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     broadcastMasterUserState(session.playerId);
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
-      waitForProfile: false,
+      waitForProfile: profileSource === "fallback",
       incomingActor: actorParam,
     });
     broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
@@ -10304,13 +9833,11 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     } else if (AUTO_SPAWN_AFTER_GAMESTATE && !session.spawned && !isTeamMode(roomMode(session))) {
       const spawnResponse = buildSpawnEvent(session, null, "auto-after-gamestate");
       responses.push(spawnResponse);
-      appendActiveRoomPickupPayloads(session, responses, channel, "auto-after-gamestate");
       broadcastSpawnToRoom(session, spawnResponse, channel);
       queueAutoSpawn(session, null, "post-gamestate");
     } else if (!session.spawned) {
       console.log(`[event] waiting client spawn request actor=${session.actorId} team=${normalizeTeamForRoom(session)} mode=${roomMode(session)}`);
     }
-    responses.push(...buildReadyPeerSnapshotEvents(session));
     queuePeerActorRepair(session, channel, "post-gamestate");
     return responses;
   }
@@ -10341,11 +9868,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (sendReliableCommandToSession(session, selfSpawnCommand)) {
       console.log(`[sync] spawn-self actor=${session.actorId} seq=${selfSpawnCommand.seq} reason=${respawnAfterDeath ? "respawn" : "spawn"}`);
     }
-    sendActiveRoomPickupsToSession(session, channel, "immediate-after-spawn");
     queueSelfSpawnRetry(session, selfSpawnCommand, spawnSeq, respawnAfterDeath ? "respawn" : "spawn");
     if (respawnAfterDeath) {
-      deferPendingSpawnBroadcast(session, response, channel);
-      console.log(`[sync] spawn actor=${session.actorId} peer-broadcast=deferred-until-move-or-timeout timeout=${PEER_RESPAWN_FALLBACK_MS}ms reason=respawn`);
+      session.pendingSpawnBroadcast = { payload: response, channel };
+      console.log(`[sync] spawn actor=${session.actorId} peer-broadcast=deferred-until-move reason=respawn`);
       return [];
     }
     broadcastSpawnToRoom(session, response, channel);
@@ -10385,7 +9911,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       console.log(`[event] move actor=${session.actorId} count=${session.room.moves}${point ? ` pos=${fmtPoint(point)}` : ""}`);
     }
     if (session.pendingSpawnBroadcast?.payload) {
-      publishPendingSpawnBroadcast(session, "first-move-after-respawn");
+      const pending = session.pendingSpawnBroadcast;
+      session.pendingSpawnBroadcast = null;
+      const spawnPeers = broadcastSpawnToRoom(session, pending.payload, pending.channel ?? channel);
+      console.log(`[sync] deferred-spawn actor=${session.actorId} peers=${spawnPeers} reason=first-move-after-respawn`);
     }
     if (session.room.moves === 1 || session.room.moves % 250 === 0) {
       postBattleEvent(session, "move", { eventData: { count: session.room.moves } });
@@ -10394,6 +9923,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     const movePeers = broadcastMoveToRoom(session, move, channel);
     if ((DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) && movePeers.total > 0) {
       console.log(`[sync] move actor=${session.actorId} peers=${movePeers.total} reliable=${movePeers.reliable} unreliable=${movePeers.unreliable || 0} spectator=${movePeers.spectator}${movePeers.spectator ? ` spectatorChannel=${movePeers.spectatorChannel}` : ""} count=${session.room.moves}`);
+    }
+    if (firstMoveAfterSpawn) {
+      queuePostSpawnPickupSync(session, "second-move-after-spawn");
     }
     const pickup = firstMoveAfterSpawn ? null : buildProximityPickItemEvent(session, point);
     if (pickup?.pickEvent) {
@@ -10521,15 +10053,8 @@ async function handleUdp(port, socket, msg, rinfo) {
       outboundReliable: new Map(),
       outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
       outboundRoundTripVariance: 0,
-      outboundReliableRecoveryByChannel: new Map(),
-      outboundReliableOverflowAt: 0,
-      lastOutboundReliableAckAt: 0,
-      lastOutboundReliableAckByChannel: new Map(),
       verifySeq: null,
       seenVerify: false,
-      joinInProgress: false,
-      joinedRoomGeneration: 0,
-      transportDisconnected: false,
       listLobby: false,
       room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
       roomRaw: null,
@@ -10567,22 +10092,18 @@ async function handleUdp(port, socket, msg, rinfo) {
       joinSettingsTimers: [],
       joinLateStartTimers: [],
       gameStateRequested: false,
-      peerSnapshotReady: false,
       lastGameStateResponseAt: 0,
       reliableResponses: new Map(),
       reliableInFlight: new Map(),
       reliableFragments: new Map(),
-      reliableReplayLogState: new Map(),
       reliableGeneration: 0,
-      transportGeneration: 0,
-      endpointGeneration: 0,
-      inboundReliableChannels: new Map(),
       knownActorIds: new Set(),
       actorJoinAnnouncedAt: new Map(),
       joinActorListIds: new Set(),
       deferredJoinActorIds: new Set(),
       peerSpawnTimers: new Set(),
       pendingSpawnBroadcast: null,
+      pendingPickupSync: null,
       pickupSpawnRepairTimers: new Set(),
       lastChannel: 0,
       port,
@@ -10715,16 +10236,17 @@ async function handleUdp(port, socket, msg, rinfo) {
         }
         cacheKey = reliableFragmentCacheKey(session, channel, fragment.startSeq);
       }
-      const cachedResponse = cacheKey ? getCachedReliableResponse(session, cacheKey) : null;
-      if (cachedResponse) {
-        const cached = cachedResponse;
+      if (cacheKey && session.reliableResponses.has(cacheKey)) {
+        const cached = session.reliableResponses.get(cacheKey);
         commands.push(...cached);
-        logReliableReplay(session, channel, reliableSeq, cached.length, commandType === 0x08 ? fragment.startSeq : null);
+        console.log(`[state] reliable replay seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
         offset = commandEnd;
         continue;
       }
       if (cacheKey && session.reliableInFlight.has(cacheKey)) {
-        console.log(`[state] reliable replay-inflight seq=${reliableSeq}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
+        const cached = await session.reliableInFlight.get(cacheKey);
+        commands.push(...cached);
+        console.log(`[state] reliable replay-wait seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
         offset = commandEnd;
         continue;
       }
@@ -10756,29 +10278,16 @@ async function handleUdp(port, socket, msg, rinfo) {
           }
         }
 
+        const buildReliableCommands = () => buildReliableCommandsForParsedPayload(port, socket, rinfo, session, parsed, payload, channel);
+
         if (cacheKey) {
-          const startSeq = commandType === 0x08 ? fragment.startSeq : reliableSeq;
-          const endSeq = commandType === 0x08
-            ? (Number(fragment.startSeq) + Math.max(0, Number(fragment.fragmentCount) - 1)) >>> 0
-            : reliableSeq;
-          const queued = enqueueInboundReliableRequest(session, {
-            cacheKey,
-            port,
-            socket,
-            rinfo: { address: rinfo.address, port: rinfo.port },
-            parsed,
-            payload,
-            channel,
-            startSeq,
-            endSeq,
-          });
-          if (queued.status === "stale") {
-            console.log(`[state] reliable stale actor=${session.actorId || 0} channel=${channel} seq=${startSeq} expected=${queued.expectedSeq} action=ack-without-reexecute`);
-          } else if (queued.status === "buffered") {
-            console.log(`[state] reliable buffered actor=${session.actorId || 0} channel=${channel} seq=${startSeq} expected=${queued.expectedSeq}`);
-          }
+          const promise = buildReliableCommands()
+            .then((reliableCommands) => cacheReliableResponse(session, cacheKey, reliableCommands))
+            .finally(() => session.reliableInFlight.delete(cacheKey));
+          session.reliableInFlight.set(cacheKey, promise);
+          commands.push(...await promise);
         } else {
-          commands.push(...await buildReliableCommandsForParsedPayload(port, socket, rinfo, session, parsed, payload, channel));
+          commands.push(...await buildReliableCommands());
         }
       } catch (error) {
         console.log(`[parse] ${error.message}`);
@@ -10791,6 +10300,8 @@ async function handleUdp(port, socket, msg, rinfo) {
 
   if (!transportDisconnected) {
     maybeAppendQueuedSpawn(session, commands, lastChannel);
+    maybeAppendPostSpawnPickupSync(session, commands, lastChannel);
+    maybeAppendRespawnItems(session, commands, lastChannel);
   }
 
   if (commands.length > 0) {
@@ -10798,26 +10309,23 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} apiTimeout=${API_REQUEST_TIMEOUT_MS}ms initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} peerRespawnFallback=${PEER_RESPAWN_FALLBACK_MS}ms reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms/recovery${OUTBOUND_RELIABLE_RECOVERY_GRACE_MS}ms/activeMax${OUTBOUND_RELIABLE_ACTIVE_RECOVERY_MAX_MS}ms pendingMax=${OUTBOUND_RELIABLE_MAX_PENDING} retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep replayLog=${RELIABLE_REPLAY_LOG_INTERVAL_MS}ms responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms/${RELIABLE_RESPONSE_CACHE_MAX_ENTRIES} inboundOrder=channel-sequence/${INBOUND_RELIABLE_MAX_PENDING} debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms atomicProfileJoin=required joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=off interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=immediate-after-spawn pickupRespawn=room-scheduler pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-until-snapshot" : "channel1-unreliable-animation+weapon-until-snapshot") : "blocked"} peerLiveGate=gamestate-snapshot-ready spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms/current-generation gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
-const zombieRegenInterval = setInterval(guardedCallback("zombie-regen", runZombieRegenerationTick), ZOMBIE_REGEN_TICK_MS);
+const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
-const outboundReliableRetryInterval = setInterval(guardedCallback("outbound-reliable-retry", runOutboundReliableRetries), OUTBOUND_RELIABLE_SWEEP_MS);
+const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
 if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
-const clanTreasuryPollInterval = setInterval(guardedCallback("clan-treasury-poll", runClanTreasuryLivePoll), CLAN_TREASURY_POLL_MS);
+const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREASURY_POLL_MS);
 if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
-const clanTreasuryInitialPoll = setTimeout(guardedCallback("clan-treasury-initial-poll", runClanTreasuryLivePoll), 0);
+const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
 if (typeof clanTreasuryInitialPoll.unref === "function") clanTreasuryInitialPoll.unref();
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
-  udp.on("error", (error) => {
-    console.log(`[udp:${port}] socket error ${error.stack || error.message}`);
-  });
   udp.on("message", (msg, rinfo) => {
     handleUdp(port, udp, msg, rinfo).catch((error) => {
       console.log(`[udp:${port}] handler failed ${error.stack || error.message}`);
@@ -10856,9 +10364,6 @@ for (const port of PORTS) {
       }
       if (DEBUG_PACKETS) console.log(`[tcp:${port}] ${data.length} bytes`);
     });
-  });
-  tcp.on("error", (error) => {
-    console.log(`[tcp:${port}] server error ${error.stack || error.message}`);
   });
   tcp.maxConnections = Math.max(100, MAX_SESSIONS_TOTAL);
   tcp.listen(port, "0.0.0.0", () => console.log(`[tcp] ${port} listening`));
