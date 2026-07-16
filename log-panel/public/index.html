@@ -7,9 +7,9 @@
   <meta name="theme-color" content="#111318">
   <title>Contra City — Логи игры</title>
   <meta name="description" content="История событий игроков Contra City">
-  <link rel="stylesheet" href="/styles.css?v=43">
+  <link rel="stylesheet" href="/styles.css?v=44">
   <script src="/config.js" defer></script>
-  <script src="/app.js?v=43" defer></script>
+  <script src="/app.js?v=44" defer></script>
 </head>
 <body>
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
@@ -43,7 +43,7 @@
         <button class="nav-item" data-filter-categories="economy,weapons,workshop,clothes,taunts,enhancers,abilities,inventory" data-page-title="Покупки и монеты"><span class="nav-icon">●</span><span>Покупки и монеты</span></button>
         <button class="nav-item" data-filter-categories="clan" data-page-title="Кланы"><span class="nav-icon">♛</span><span>Кланы</span></button>
         <button class="nav-item" data-filter-categories="progress" data-page-title="Задания и опыт"><span class="nav-icon">✓</span><span>Задания и опыт</span></button>
-        <button class="nav-item danger-nav" data-suspicious="true"><span class="nav-icon">!</span><span>Подозрительное</span><em id="nav-risk-count">0</em></button>
+        <button class="nav-item danger-nav" data-suspicious="true"><span class="nav-icon">!</span><span>Подозрительная активность</span><em id="nav-risk-count">0</em></button>
         <button class="nav-item owner-only hidden" data-view="admins"><span class="nav-icon">♟</span><span>Администраторы</span></button>
       </nav>
       <div class="sidebar-footer">
@@ -138,6 +138,9 @@
   <aside id="filter-drawer" class="drawer" aria-hidden="true">
     <div class="drawer-header"><h2>Фильтры</h2><button class="icon-button drawer-close" aria-label="Закрыть">×</button></div>
     <form id="filter-form">
+      <label>IP-адрес<input name="ipAddress" maxlength="128" placeholder="Например, 203.0.113.10"></label>
+      <div class="two-columns"><label>Город<input name="city" maxlength="120"></label><label>Страна<input name="countryCode" maxlength="8" placeholder="RU"></label></div>
+      <label>Источник<select name="source"><option value="">Любой источник</option><option value="launcher_session">Лаунчер</option><option value="web_session">Веб-сессия</option><option value="login_link">Ссылка входа</option><option value="game_api_login">Вход игрового клиента</option><option value="game_api">Игровой API</option><option value="battle_server">Battle server</option><option value="battle_server_security">Защита battle server</option></select></label>
       <label>Период<select name="period"><option value="">Любое время</option><option value="1h">Последний час</option><option value="24h">24 часа</option><option value="7d">7 дней</option><option value="30d">30 дней</option></select></label>
       <div class="two-columns"><label>С даты<input name="dateFrom" type="datetime-local"></label><label>По дату<input name="dateTo" type="datetime-local"></label></div>
       <label>Категория<select name="category" id="filter-category"><option value="">Все категории</option></select></label>

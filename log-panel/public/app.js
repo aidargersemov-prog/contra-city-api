@@ -17,6 +17,7 @@ const CATEGORY_LABELS = {
   profile: "Профиль", security: "Безопасность", moderation: "Модерация", system: "Система"
 };
 const TYPE_LABELS = {
+  security_udp_quarantine: "UDP-карантин", security_pending_global_cap: "Лимит подключений", security_full_session_cap: "Лимит сессий", admin_login_bruteforce: "Подбор пароля администратора",
   player_login: "Вход", player_logout: "Выход", purchase: "Покупка", weapon_upgrade: "Улучшение оружия",
   daily_quest_progress: "Прогресс задания", daily_quest_claim: "Ежедневное задание", achievement_complete: "Достижение",
   clan_create: "Создание клана", clan_delete: "Удаление клана", clan_rename: "Переименование клана",
@@ -139,6 +140,11 @@ function eventValue(event) {
 
 function eventDescription(event) {
   const changedFields = Array.isArray(event.metadata?.changedFields) ? event.metadata.changedFields : [];
+  if (event.eventType === "player_login" || event.eventType === "player_logout") {
+    const place = [event.geo?.city, event.geo?.region, event.geo?.country || event.geo?.countryCode].filter(Boolean).join(", ");
+    const access = [place, event.ipAddress].filter(Boolean).join(" · ");
+    return access ? `${event.description} · ${access}` : event.description;
+  }
   if (event.eventType === "player_state_change") {
     const labels = {
       balance: "баланс", experience: "опыт", level: "уровень", statistics: "статистика",
@@ -506,8 +512,8 @@ function bindUi() {
       state.filters = { suspicious: "true" };
       state.page = 1;
       const riskNav = $(".nav-item[data-suspicious=\"true\"]");
-      $("#active-filter-label").textContent = "Подозрительные события";
-      switchView("events", { nav: riskNav, title: "Подозрительные события" });
+      $("#active-filter-label").textContent = "Подозрительная активность";
+      switchView("events", { nav: riskNav, title: "Подозрительная активность" });
     }
   });
 }
