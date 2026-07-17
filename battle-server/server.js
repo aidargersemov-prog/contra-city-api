@@ -581,6 +581,9 @@ const MAP_MODE_DEATHMATCH = 1;
 const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
+// The client already owns mode 16 (Tower Defense) and initializes Campaign for it.
+// Dashguard reuses that exact client lifecycle under an Event presentation layer.
+const MAP_MODE_DASHGUARD_EVENT = 16;
 const MAP_MODE_ZOMBIE = 64;
 const ZOMBIE_MODE = {
   PAUSE: 1,
@@ -602,7 +605,7 @@ const MAP_ALLOWED_MODES = {
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
   arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
   inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
-  dashguard: [MAP_MODE_DEATHMATCH],
+  dashguard: [MAP_MODE_DEATHMATCH, MAP_MODE_DASHGUARD_EVENT],
 };
 const CTF_MAPS = {
   arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
@@ -4202,6 +4205,14 @@ function makeGameStateRaw(session) {
     entries.push({ key: rawByte(80), value: items });
   }
 
+  // The original client restores Campaign actors from GameState[70] before a
+  // late joiner starts receiving live Event81 updates. Dashguard uses that
+  // exact snapshot slot for its boss and skeletons.
+  const dashguardCampaign = makeDashguardCampaignRaw(session.room);
+  if (dashguardCampaign) {
+    entries.push({ key: rawByte(70), value: dashguardCampaign });
+  }
+
   if (INCLUDE_ACTOR_IN_GAMESTATE) {
     entries.unshift(
       { key: rawByte(98), value: session.actorRaw || rawHashtable([]) },
@@ -4210,6 +4221,797 @@ function makeGameStateRaw(session) {
   }
 
   return rawHashtable(entries);
+}
+
+// ---------------------------------------------------------------------------
+// Dashguard Event (Campaign mode 16)
+// ---------------------------------------------------------------------------
+// Event81 is the original Campaign transport.  We deliberately keep the
+// original SpawnBot payload fields (23..27, 239) so an unpatched legacy client
+// ignores the new actor kinds safely instead of throwing while decoding them.
+const DASHGUARD_EVENT = Object.freeze({
+  MAP: "dashguard",
+  BOSS_ACTION_TYPE: 240,
+  SKELETON_ACTION_TYPE: 241,
+  EVENT_SNAPSHOT: 40,
+  EVENT_ACTION: 41,
+  EVENT_DAMAGE: 42,
+  EVENT_DEATH: 43,
+  EVENT_NOTICE: 44,
+  EVENT_COMPLETE: 45,
+  KEY_ID: 200,
+  KEY_KIND: 201,
+  KEY_HP: 202,
+  KEY_MAX_HP: 203,
+  KEY_STATE: 204,
+  KEY_PHASE: 205,
+  KEY_X: 206,
+  KEY_Y: 207,
+  KEY_Z: 208,
+  KEY_ROTATION: 209,
+  KEY_TARGET: 210,
+  KEY_ACTION: 211,
+  KEY_EVENT_STATE: 212,
+  KEY_DAMAGE: 213,
+  KEY_RADIUS: 214,
+  KEY_RESOLVE_AT: 215,
+  KEY_ACTORS: 220,
+  KEY_TEXT: 221,
+  KEY_DEAD: 222,
+  KEY_PENDING_X: 223,
+  KEY_PENDING_Y: 224,
+  KEY_PENDING_Z: 225,
+  KIND_BOSS: 1,
+  KIND_SKELETON: 2,
+  STATE_SPAWN: 1,
+  STATE_IDLE: 2,
+  STATE_CHASE: 3,
+  STATE_CAST: 4,
+  STATE_AOE: 5,
+  STATE_DRAIN: 6,
+  STATE_SUMMON: 7,
+  STATE_ATTACK: 8,
+  STATE_DEAD: 9,
+  ACTION_SPAWN: 1,
+  ACTION_CAST: 2,
+  ACTION_AOE_TELEGRAPH: 3,
+  ACTION_AOE_IMPACT: 4,
+  ACTION_DRAIN: 5,
+  ACTION_SUMMON: 6,
+  ACTION_HIT: 7,
+  ACTION_DEATH: 8,
+  ACTION_PHASE: 9,
+  ACTION_SKELETON_ATTACK: 10,
+  ACTION_CLEANUP: 11,
+});
+
+const DASHGUARD_EVENT_CONFIG = Object.freeze({
+  bossId: 900001,
+  skeletonFirstId: 900100,
+  bossMaxHp: 250000,
+  skeletonMaxHp: 25000,
+  maxSkeletonsTotal: 10,
+  maxSkeletonsAlive: 10,
+  introMs: 7000,
+  spawnLockMs: 1600,
+  tickMs: 100,
+  snapshotMs: 160,
+  wipeRecoveryMs: 9000,
+  emptyRoomResetMs: 90000,
+  bossSpeed: 3.1,
+  skeletonSpeed: 3.75,
+  bossCastRange: 23,
+  skeletonAttackRange: 2.65,
+  arenaRadius: 82,
+  // Authored from Dashguard_Prototype: Artorias_Lo (1) and 2hmtaunta.
+  bossSpawn: { x: 49.49685, y: -19.111328, z: 198.1179, rotY: 0 },
+  skeletonSpawn: { x: 77, y: -19.111328, z: 189, rotY: 90 },
+  // Ten authored slots let the complete 3/4/3 encounter exist at once.
+  // Their final walkability is a required Unity NavMesh validation gate.
+  skeletonSpawns: [
+    { x: 70.0, y: -19.111328, z: 190.0, rotY: 45 },
+    { x: 77.0, y: -19.111328, z: 189.0, rotY: 90 },
+    { x: 84.0, y: -19.111328, z: 190.0, rotY: 135 },
+    { x: 70.0, y: -19.111328, z: 198.0, rotY: 30 },
+    { x: 84.0, y: -19.111328, z: 198.0, rotY: 150 },
+    { x: 70.0, y: -19.111328, z: 206.0, rotY: 330 },
+    { x: 77.0, y: -19.111328, z: 207.0, rotY: 270 },
+    { x: 84.0, y: -19.111328, z: 206.0, rotY: 210 },
+    { x: 72.0, y: -19.107962, z: 214.0, rotY: 315 },
+    { x: 82.0, y: -19.107962, z: 214.0, rotY: 225 },
+  ],
+  skeletonSpawnSafeRadius: 7,
+  skeletonNpcSeparation: 3.5,
+  arenaCenter: { x: 61.5, y: -19.111328, z: 205.5 },
+  // Safe authored corridors are deliberately explicit. They are the server
+  // side guardrail; the map NavMesh refines visual avoidance on the client.
+  navigation: [
+    { x: 49.5, y: -19.111328, z: 198.12 },
+    { x: 61, y: -19.111328, z: 197.8 },
+    { x: 73, y: -19.111328, z: 198.9 },
+    { x: 82, y: -19.111328, z: 190 },
+    { x: 78, y: -19.111328, z: 177 },
+    { x: 62, y: -19.111328, z: 176.5 },
+    { x: 48, y: -19.111328, z: 184 },
+  ],
+});
+
+function isDashguardEventRoom(room) {
+  return Boolean(room) && mapKey(room.map) === DASHGUARD_EVENT.MAP && Number(room.mode) === MAP_MODE_DASHGUARD_EVENT;
+}
+
+function createDashguardEventState() {
+  return {
+    status: "waiting",
+    phase: 0,
+    startedAt: 0,
+    introTimer: null,
+    ticker: null,
+    cleanupTimer: null,
+    lastTickAt: Date.now(),
+    lastSnapshotAt: 0,
+    actors: new Map(),
+    skeletonsSpawned: 0,
+    nextSkeletonId: DASHGUARD_EVENT_CONFIG.skeletonFirstId,
+    allPlayersDeadSince: 0,
+    emptyRoomSince: 0,
+  };
+}
+
+function ensureDashguardEventState(room) {
+  if (!isDashguardEventRoom(room)) return null;
+  if (!room.dashguardEvent) room.dashguardEvent = createDashguardEventState();
+  return room.dashguardEvent;
+}
+
+function clearDashguardEventTimers(room) {
+  const event = room?.dashguardEvent;
+  if (!event) return;
+  if (event.introTimer) clearTimeout(event.introTimer);
+  if (event.ticker) clearInterval(event.ticker);
+  if (event.cleanupTimer) clearTimeout(event.cleanupTimer);
+  event.introTimer = null;
+  event.ticker = null;
+  event.cleanupTimer = null;
+}
+
+function dashguardActorActionType(kind) {
+  return kind === DASHGUARD_EVENT.KIND_BOSS
+    ? DASHGUARD_EVENT.BOSS_ACTION_TYPE
+    : DASHGUARD_EVENT.SKELETON_ACTION_TYPE;
+}
+
+function makeDashguardActorRaw(actor) {
+  const point = actor.position || DASHGUARD_EVENT_CONFIG.bossSpawn;
+  const pending = actor.pending;
+  const pendingAction = pending?.type === "magic" ? DASHGUARD_EVENT.ACTION_CAST
+    : (pending?.type === "aoe" ? DASHGUARD_EVENT.ACTION_AOE_TELEGRAPH
+      : (pending?.type === "drain" ? DASHGUARD_EVENT.ACTION_DRAIN
+        : (pending?.type === "skeleton" ? DASHGUARD_EVENT.ACTION_SKELETON_ATTACK : 0)));
+  const entries = [
+    // Existing SpawnBot decoder reads these before its switch. Keep them valid.
+    { key: rawByte(27), value: rawByte(dashguardActorActionType(actor.kind)) },
+    { key: rawByte(26), value: rawInt(actor.id) },
+    { key: rawByte(25), value: rawLong(0) },
+    { key: rawByte(24), value: rawLong(0) },
+    { key: rawByte(23), value: rawInt(0) },
+    { key: rawByte(239), value: rawShort(0) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_ID), value: rawInt(actor.id) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_KIND), value: rawByte(actor.kind) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_HP), value: rawInt(Math.max(0, Math.round(actor.hp))) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_MAX_HP), value: rawInt(Math.round(actor.maxHp)) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_STATE), value: rawByte(actor.state) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(actor.phase || 0) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_X), value: rawFloat(point.x) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_Y), value: rawFloat(point.y) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_Z), value: rawFloat(point.z) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_ROTATION), value: rawFloat(point.rotY || 0) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_TARGET), value: rawInt(actor.targetActorId || -1) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_DEAD), value: rawBool(!actor.alive) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_ACTION), value: rawByte(pendingAction) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_RESOLVE_AT), value: rawLong(pending?.resolveAt || 0) },
+  ];
+  if (pending?.point) {
+    entries.push(
+      { key: rawByte(DASHGUARD_EVENT.KEY_PENDING_X), value: rawFloat(pending.point.x) },
+      { key: rawByte(DASHGUARD_EVENT.KEY_PENDING_Y), value: rawFloat(pending.point.y) },
+      { key: rawByte(DASHGUARD_EVENT.KEY_PENDING_Z), value: rawFloat(pending.point.z) },
+    );
+  }
+  if (Number.isFinite(pending?.radius)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_RADIUS), value: rawFloat(pending.radius) });
+  return rawHashtable(entries);
+}
+
+function makeDashguardCampaignRaw(room) {
+  if (!isDashguardEventRoom(room)) return null;
+  const event = ensureDashguardEventState(room);
+  if (!event?.actors?.size) return null;
+  return rawHashtable(Array.from(event.actors.values())
+    .filter((actor) => actor && actor.alive)
+    .map((actor) => ({ key: rawInt(actor.id), value: makeDashguardActorRaw(actor) })));
+}
+
+function makeDashguardEventPayload(type, data) {
+  return rawEvent(81, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(72), value: rawByte(type) },
+      { key: rawByte(71), value: data },
+    ]) },
+  ]);
+}
+
+function makeDashguardSpawnEvent(actor) {
+  // Preserve CampaignEventType.SpawnBot (= 1) so the original dispatch path
+  // remains intact; patched SpawnBot consumes only action types 240/241.
+  return makeDashguardEventPayload(1, makeDashguardActorRaw(actor));
+}
+
+function makeDashguardSnapshotEvent(room) {
+  const event = ensureDashguardEventState(room);
+  if (!event) return null;
+  const actorEntries = Array.from(event.actors.values())
+    .filter((actor) => actor)
+    .map((actor) => ({ key: rawInt(actor.id), value: makeDashguardActorRaw(actor) }));
+  return makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_SNAPSHOT, rawHashtable([
+    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(event.phase) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_EVENT_STATE), value: rawByte(dashguardEventStateCode(event.status)) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_ACTORS), value: rawHashtable(actorEntries) },
+  ]));
+}
+
+function makeDashguardActionEvent(actor, action, extra = {}) {
+  const entries = [
+    { key: rawByte(DASHGUARD_EVENT.KEY_ID), value: rawInt(actor?.id || -1) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_KIND), value: rawByte(actor?.kind || 0) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_ACTION), value: rawByte(action) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(actor?.phase || 0) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_TARGET), value: rawInt(extra.targetActorId ?? actor?.targetActorId ?? -1) },
+  ];
+  if (extra.position) {
+    entries.push(
+      { key: rawByte(DASHGUARD_EVENT.KEY_X), value: rawFloat(extra.position.x) },
+      { key: rawByte(DASHGUARD_EVENT.KEY_Y), value: rawFloat(extra.position.y) },
+      { key: rawByte(DASHGUARD_EVENT.KEY_Z), value: rawFloat(extra.position.z) },
+    );
+  }
+  if (Number.isFinite(extra.radius)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_RADIUS), value: rawFloat(extra.radius) });
+  if (Number.isFinite(extra.resolveAt)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_RESOLVE_AT), value: rawLong(extra.resolveAt) });
+  if (Number.isFinite(extra.damage)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_DAMAGE), value: rawInt(extra.damage) });
+  if (extra.text) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_TEXT), value: rawString(extra.text) });
+  return makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_ACTION, rawHashtable(entries));
+}
+
+function makeDashguardDamageEvent(source, targetSession, healthDamage, energyDamage, killed) {
+  return makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_DAMAGE, rawHashtable([
+    { key: rawByte(DASHGUARD_EVENT.KEY_ID), value: rawInt(source?.id || -1) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_TARGET), value: rawInt(targetSession.actorId) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_HP), value: rawInt(Math.max(0, Math.round(targetSession.health || 0))) },
+    { key: rawByte(92), value: rawShort(healthDamage) },
+    { key: rawByte(93), value: rawShort(energyDamage) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_DEAD), value: rawBool(killed) },
+  ]));
+}
+
+function dashguardEventStateCode(status) {
+  if (status === "intro") return 1;
+  if (status === "active") return 2;
+  if (status === "completed") return 3;
+  return 0;
+}
+
+function dashguardLivePlayers(room) {
+  return Array.from(room?.players?.values?.() || [])
+    .filter((session) => session && session.gameStateRequested && session.spawned && !session.dead && session.lastTransform);
+}
+
+function dashguardArenaPlayers(room) {
+  return dashguardLivePlayers(room)
+    .filter((session) => dashguardDistance(session.lastTransform, DASHGUARD_EVENT_CONFIG.arenaCenter) <= DASHGUARD_EVENT_CONFIG.arenaRadius);
+}
+
+function dashguardDistance(first, second) {
+  if (!first || !second) return Infinity;
+  return Math.hypot(Number(first.x) - Number(second.x), Number(first.z) - Number(second.z));
+}
+
+function dashguardCreateActor(kind, id, maxHp, point) {
+  return {
+    id,
+    kind,
+    hp: maxHp,
+    maxHp,
+    alive: true,
+    phase: kind === DASHGUARD_EVENT.KIND_BOSS ? 1 : 0,
+    state: DASHGUARD_EVENT.STATE_SPAWN,
+    stateUntil: Date.now() + DASHGUARD_EVENT_CONFIG.spawnLockMs,
+    position: { x: point.x, y: point.y, z: point.z, rotY: point.rotY || 0 },
+    homePosition: { x: point.x, y: point.y, z: point.z, rotY: point.rotY || 0 },
+    targetActorId: -1,
+    nextMagicAt: 0,
+    nextAoeAt: 0,
+    nextDrainAt: 0,
+    nextAttackAt: 0,
+    pending: null,
+    lastHitAt: 0,
+    route: [],
+    routeTargetIndex: -1,
+    nextRouteAt: 0,
+  };
+}
+
+function dashguardStartTicker(room) {
+  const event = ensureDashguardEventState(room);
+  if (!event || event.ticker) return;
+  event.lastTickAt = Date.now();
+  event.ticker = setInterval(() => {
+    try {
+      if (rooms.get(room.name) !== room || !isDashguardEventRoom(room)) {
+        clearDashguardEventTimers(room);
+        return;
+      }
+      dashguardTick(room);
+    } catch (error) {
+      console.error(`[dashguard] tick failed room=${room?.name || "unknown"}`, error);
+    }
+  }, DASHGUARD_EVENT_CONFIG.tickMs);
+  if (typeof event.ticker.unref === "function") event.ticker.unref();
+}
+
+function ensureDashguardEvent(room, channel = 0) {
+  const event = ensureDashguardEventState(room);
+  if (!event) return null;
+  dashguardStartTicker(room);
+  if (event.status !== "waiting") return event;
+
+  event.status = "intro";
+  event.startedAt = Date.now();
+  const noticeActor = { id: -1, kind: 0, phase: 0, targetActorId: -1 };
+  sendReliableToWholeRoom(room, makeDashguardActionEvent(noticeActor, DASHGUARD_EVENT.ACTION_SPAWN, {
+    text: "DASHGUARD BREACH DETECTED",
+    resolveAt: Date.now() + DASHGUARD_EVENT_CONFIG.introMs,
+  }), channel, { requireGameState: true });
+  event.introTimer = setTimeout(() => {
+    event.introTimer = null;
+    if (rooms.get(room.name) !== room || event.status !== "intro" || !dashguardLivePlayers(room).length) {
+      event.status = "waiting";
+      return;
+    }
+    const boss = dashguardCreateActor(
+      DASHGUARD_EVENT.KIND_BOSS,
+      DASHGUARD_EVENT_CONFIG.bossId,
+      DASHGUARD_EVENT_CONFIG.bossMaxHp,
+      DASHGUARD_EVENT_CONFIG.bossSpawn,
+    );
+    event.actors.set(boss.id, boss);
+    event.status = "active";
+    sendReliableToWholeRoom(room, makeDashguardSpawnEvent(boss), channel, { requireGameState: true });
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_SPAWN, {
+      text: "ARTORIAS // ARCANE WARDEN",
+      resolveAt: boss.stateUntil,
+    }), channel, { requireGameState: true });
+    dashguardSendSnapshot(room, channel, true);
+    console.log(`[dashguard] boss spawned room=${room.name} hp=${boss.hp} players=${dashguardLivePlayers(room).length}`);
+  }, DASHGUARD_EVENT_CONFIG.introMs);
+  if (typeof event.introTimer.unref === "function") event.introTimer.unref();
+  return event;
+}
+
+function dashguardSendSnapshot(room, channel = 0, force = false) {
+  const event = ensureDashguardEventState(room);
+  if (!event) return 0;
+  const now = Date.now();
+  if (!force && now - event.lastSnapshotAt < DASHGUARD_EVENT_CONFIG.snapshotMs) return 0;
+  event.lastSnapshotAt = now;
+  const payload = makeDashguardSnapshotEvent(room);
+  return payload ? sendReliableToWholeRoom(room, payload, channel, { requireGameState: true }) : 0;
+}
+
+function dashguardNearestTarget(room, actor) {
+  let best = null;
+  let bestDistance = Infinity;
+  for (const session of dashguardArenaPlayers(room)) {
+    const distance = dashguardDistance(actor.position, session.lastTransform);
+    if (distance < bestDistance) {
+      best = session;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function dashguardClampPosition(actor) {
+  const center = DASHGUARD_EVENT_CONFIG.arenaCenter;
+  const dx = actor.position.x - center.x;
+  const dz = actor.position.z - center.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance <= DASHGUARD_EVENT_CONFIG.arenaRadius || distance < 0.001) return;
+  const scale = DASHGUARD_EVENT_CONFIG.arenaRadius / distance;
+  actor.position.x = center.x + dx * scale;
+  actor.position.z = center.z + dz * scale;
+}
+
+function dashguardMoveTowards(actor, destination, speed, deltaSeconds) {
+  const dx = Number(destination.x) - actor.position.x;
+  const dz = Number(destination.z) - actor.position.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance < 0.05) return false;
+  const step = Math.min(distance, Math.max(0, speed * deltaSeconds));
+  actor.position.x += dx / distance * step;
+  actor.position.z += dz / distance * step;
+  actor.position.rotY = Math.atan2(dx, dz) * 180 / Math.PI;
+  dashguardClampPosition(actor);
+  return true;
+}
+
+function dashguardNearestNavigationIndex(point) {
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  for (let index = 0; index < DASHGUARD_EVENT_CONFIG.navigation.length; index += 1) {
+    const distance = dashguardDistance(point, DASHGUARD_EVENT_CONFIG.navigation[index]);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  }
+  return bestIndex;
+}
+
+function dashguardPlanRoute(actor, destination, now) {
+  const nodes = DASHGUARD_EVENT_CONFIG.navigation;
+  const from = dashguardNearestNavigationIndex(actor.position);
+  const to = dashguardNearestNavigationIndex(destination);
+  const count = nodes.length;
+  const clockwise = (to - from + count) % count;
+  const counterClockwise = (from - to + count) % count;
+  const direction = clockwise <= counterClockwise ? 1 : -1;
+  const steps = Math.min(clockwise, counterClockwise);
+  const route = [];
+  for (let step = 1; step <= steps; step += 1) {
+    route.push(nodes[(from + direction * step + count) % count]);
+  }
+  actor.route = route;
+  actor.routeTargetIndex = to;
+  actor.nextRouteAt = now + 850;
+}
+
+function dashguardMoveThroughCorridor(actor, destination, speed, deltaSeconds, now) {
+  // Direct movement is allowed only near an authored navigation point. For
+  // longer chases the server walks the same fixed corridors that the map
+  // authoring script exposes to the client-side NavMesh validation.
+  const nearbyTarget = dashguardDistance(destination, DASHGUARD_EVENT_CONFIG.navigation[dashguardNearestNavigationIndex(destination)]) < 9;
+  if (dashguardDistance(actor.position, destination) < 9 && nearbyTarget) {
+    actor.route = [];
+    return dashguardMoveTowards(actor, destination, speed, deltaSeconds);
+  }
+  const targetIndex = dashguardNearestNavigationIndex(destination);
+  if (!actor.route.length || actor.routeTargetIndex !== targetIndex || now >= actor.nextRouteAt) {
+    dashguardPlanRoute(actor, destination, now);
+  }
+  const waypoint = actor.route[0];
+  if (!waypoint) return dashguardMoveTowards(actor, destination, speed, deltaSeconds);
+  const moved = dashguardMoveTowards(actor, waypoint, speed, deltaSeconds);
+  if (dashguardDistance(actor.position, waypoint) <= 0.6) actor.route.shift();
+  return moved;
+}
+
+function dashguardSetPhase(room, boss, phase, channel) {
+  const event = ensureDashguardEventState(room);
+  if (!event || phase <= event.phase) return;
+  event.phase = phase;
+  boss.phase = phase;
+  boss.state = DASHGUARD_EVENT.STATE_SUMMON;
+  boss.stateUntil = Date.now() + 1250;
+  const planned = phase === 2 ? 3 : (phase === 3 ? 4 : 3);
+  const remaining = Math.max(0, DASHGUARD_EVENT_CONFIG.maxSkeletonsTotal - event.skeletonsSpawned);
+  const count = Math.min(planned, remaining, DASHGUARD_EVENT_CONFIG.maxSkeletonsAlive);
+  sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_PHASE, {
+    text: phase === 2 ? "THE RIFT OPENS" : (phase === 3 ? "THE WARDEN AWAKENS" : "LAST SEAL BROKEN"),
+    resolveAt: boss.stateUntil,
+  }), channel, { requireGameState: true });
+  if (count > 0) {
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_SUMMON, {
+      text: "SKELETON GUARD DEPLOYING",
+      resolveAt: boss.stateUntil,
+    }), channel, { requireGameState: true });
+  }
+  for (let index = 0; index < count; index += 1) {
+    const spawn = dashguardPickSkeletonSpawn(room, event, index);
+    if (!spawn) continue;
+    const skeleton = dashguardCreateActor(
+      DASHGUARD_EVENT.KIND_SKELETON,
+      event.nextSkeletonId++,
+      DASHGUARD_EVENT_CONFIG.skeletonMaxHp,
+      spawn,
+    );
+    event.actors.set(skeleton.id, skeleton);
+    event.skeletonsSpawned += 1;
+    sendReliableToWholeRoom(room, makeDashguardSpawnEvent(skeleton), channel, { requireGameState: true });
+  }
+}
+
+function dashguardPickSkeletonSpawn(room, event, offset) {
+  const spawns = DASHGUARD_EVENT_CONFIG.skeletonSpawns;
+  const players = dashguardLivePlayers(room);
+  let best = null;
+  let bestScore = -Infinity;
+  for (let index = 0; index < spawns.length; index += 1) {
+    const candidate = spawns[(event.skeletonsSpawned + offset + index) % spawns.length];
+    let playerDistance = Infinity;
+    let actorDistance = Infinity;
+    for (const player of players) playerDistance = Math.min(playerDistance, dashguardDistance(candidate, player.lastTransform));
+    for (const actor of event.actors.values()) {
+      if (actor?.alive) actorDistance = Math.min(actorDistance, dashguardDistance(candidate, actor.position));
+    }
+    if (playerDistance < DASHGUARD_EVENT_CONFIG.skeletonSpawnSafeRadius) continue;
+    if (actorDistance < DASHGUARD_EVENT_CONFIG.skeletonNpcSeparation) continue;
+    const score = Math.min(playerDistance, 30) + Math.min(actorDistance, 20) * 0.35;
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  // Player safety is intentionally stricter than NPC spacing. A 7m player
+  // exclusion prevents unfair body spawns; 3.5m between skeleton capsule
+  // centers prevents visual overlap while allowing all ten authored slots.
+  if (!best) return null;
+  return { x: best.x, y: best.y, z: best.z, rotY: best.rotY };
+}
+
+function dashguardStartBossAttack(room, boss, target, now, channel) {
+  const phase = Math.max(1, boss.phase || 1);
+  const targetPoint = { x: target.lastTransform.x, y: target.lastTransform.y, z: target.lastTransform.z };
+  if (phase >= 3 && now >= boss.nextDrainAt && boss.hp <= boss.maxHp * 0.72) {
+    boss.state = DASHGUARD_EVENT.STATE_DRAIN;
+    boss.pending = { type: "drain", targetActorId: target.actorId, resolveAt: now + 1850, damage: 18 };
+    boss.nextDrainAt = now + 16500;
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_DRAIN, {
+      targetActorId: target.actorId,
+      resolveAt: boss.pending.resolveAt,
+      text: "ARCANE SYPHON",
+    }), channel, { requireGameState: true });
+    return;
+  }
+  if (phase >= 2 && now >= boss.nextAoeAt) {
+    boss.state = DASHGUARD_EVENT.STATE_AOE;
+    boss.pending = { type: "aoe", point: targetPoint, resolveAt: now + 1450, damage: 22 + phase * 3, radius: 7.25 };
+    boss.nextAoeAt = now + Math.max(7200, 11000 - phase * 950);
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_AOE_TELEGRAPH, {
+      position: targetPoint,
+      radius: boss.pending.radius,
+      resolveAt: boss.pending.resolveAt,
+      text: "VOID IMPACT",
+    }), channel, { requireGameState: true });
+    return;
+  }
+  boss.state = DASHGUARD_EVENT.STATE_CAST;
+  boss.pending = { type: "magic", targetActorId: target.actorId, resolveAt: now + 1100, damage: 16 + phase * 5 };
+  boss.nextMagicAt = now + Math.max(3800, 6100 - phase * 550);
+  sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_CAST, {
+    targetActorId: target.actorId,
+    resolveAt: boss.pending.resolveAt,
+  }), channel, { requireGameState: true });
+}
+
+function dashguardApplyDamageToPlayer(room, source, target, totalDamage, channel) {
+  if (!target || target.dead || !target.spawned) return 0;
+  const current = sessionCurrentHealthEnergy(target);
+  const damage = Math.max(0, Math.round(totalDamage));
+  const energyDamage = Math.min(current.energy, damage);
+  const healthDamage = Math.min(current.health, Math.max(0, damage - energyDamage));
+  target.energy = current.energy - energyDamage;
+  target.health = current.health - healthDamage;
+  const killed = current.health > 0 && target.health <= 0;
+  if (killed) {
+    target.dead = true;
+    target.waitingSelfSpawnMove = false;
+    target.deaths = numberOr(target.deaths, 0) + 1;
+    target.matchDeaths = numberOr(target.matchDeaths, 0) + 1;
+  }
+  sendReliableToWholeRoom(room, makeDashguardDamageEvent(source, target, healthDamage, energyDamage, killed), channel, { requireGameState: true });
+  return healthDamage + energyDamage;
+}
+
+function dashguardResolvePending(room, actor, now, channel) {
+  const pending = actor.pending;
+  if (!pending || now < pending.resolveAt) return;
+  actor.pending = null;
+  if (pending.type === "magic" || pending.type === "drain") {
+    const target = room.players.get(pending.targetActorId);
+    if (target && !target.dead && target.spawned && dashguardDistance(actor.position, target.lastTransform) <= DASHGUARD_EVENT_CONFIG.bossCastRange + 7) {
+      const applied = dashguardApplyDamageToPlayer(room, actor, target, pending.damage, channel);
+      if (pending.type === "drain" && applied > 0) actor.hp = Math.min(actor.maxHp, actor.hp + Math.min(2400, applied * 80));
+    }
+  } else if (pending.type === "aoe") {
+    for (const target of dashguardLivePlayers(room)) {
+      if (dashguardDistance(pending.point, target.lastTransform) <= pending.radius) {
+        dashguardApplyDamageToPlayer(room, actor, target, pending.damage, channel);
+      }
+    }
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_AOE_IMPACT, {
+      position: pending.point,
+      radius: pending.radius,
+    }), channel, { requireGameState: true });
+  } else if (pending.type === "skeleton") {
+    const target = room.players.get(pending.targetActorId);
+    if (target && !target.dead && target.spawned && dashguardDistance(actor.position, target.lastTransform) <= DASHGUARD_EVENT_CONFIG.skeletonAttackRange + 0.8) {
+      dashguardApplyDamageToPlayer(room, actor, target, pending.damage, channel);
+    }
+  }
+  if (actor.alive && actor.state !== DASHGUARD_EVENT.STATE_DEAD) actor.state = DASHGUARD_EVENT.STATE_IDLE;
+}
+
+function dashguardTickActor(room, actor, deltaSeconds, now, channel) {
+  if (!actor?.alive) return;
+  if (actor.state === DASHGUARD_EVENT.STATE_SPAWN || actor.state === DASHGUARD_EVENT.STATE_SUMMON) {
+    if (now >= actor.stateUntil) actor.state = DASHGUARD_EVENT.STATE_IDLE;
+    return;
+  }
+  dashguardResolvePending(room, actor, now, channel);
+  if (actor.pending) return;
+  const target = dashguardNearestTarget(room, actor);
+  if (!target) {
+    actor.targetActorId = -1;
+    actor.state = DASHGUARD_EVENT.STATE_IDLE;
+    return;
+  }
+  actor.targetActorId = target.actorId;
+  const distance = dashguardDistance(actor.position, target.lastTransform);
+  if (actor.kind === DASHGUARD_EVENT.KIND_BOSS) {
+    if (actor.hp <= actor.maxHp * 0.25) dashguardSetPhase(room, actor, 4, channel);
+    else if (actor.hp <= actor.maxHp * 0.5) dashguardSetPhase(room, actor, 3, channel);
+    else if (actor.hp <= actor.maxHp * 0.75) dashguardSetPhase(room, actor, 2, channel);
+    if (actor.state === DASHGUARD_EVENT.STATE_SUMMON) return;
+    if (distance > DASHGUARD_EVENT_CONFIG.bossCastRange * 0.74) {
+      actor.state = DASHGUARD_EVENT.STATE_CHASE;
+      dashguardMoveThroughCorridor(actor, target.lastTransform, DASHGUARD_EVENT_CONFIG.bossSpeed, deltaSeconds, now);
+      return;
+    }
+    dashguardStartBossAttack(room, actor, target, now, channel);
+    return;
+  }
+  if (distance > DASHGUARD_EVENT_CONFIG.skeletonAttackRange) {
+    actor.state = DASHGUARD_EVENT.STATE_CHASE;
+    dashguardMoveThroughCorridor(actor, target.lastTransform, DASHGUARD_EVENT_CONFIG.skeletonSpeed, deltaSeconds, now);
+    return;
+  }
+  if (now >= actor.nextAttackAt) {
+    actor.state = DASHGUARD_EVENT.STATE_ATTACK;
+    actor.pending = { type: "skeleton", targetActorId: target.actorId, resolveAt: now + 520, damage: 12 };
+    actor.nextAttackAt = now + 1650;
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_SKELETON_ATTACK, {
+      targetActorId: target.actorId,
+      resolveAt: actor.pending.resolveAt,
+    }), channel, { requireGameState: true });
+  }
+}
+
+function dashguardTick(room) {
+  const event = ensureDashguardEventState(room);
+  if (!event || event.status !== "active") return;
+  const now = Date.now();
+  const allRoomPlayers = Array.from(room?.players?.values?.() || []);
+  const players = dashguardLivePlayers(room);
+  if (!allRoomPlayers.length) {
+    event.emptyRoomSince = event.emptyRoomSince || now;
+    if (now - event.emptyRoomSince >= DASHGUARD_EVENT_CONFIG.emptyRoomResetMs) {
+      event.actors.clear();
+      event.skeletonsSpawned = 0;
+      event.nextSkeletonId = DASHGUARD_EVENT_CONFIG.skeletonFirstId;
+      event.phase = 0;
+      event.status = "waiting";
+      event.allPlayersDeadSince = 0;
+      event.emptyRoomSince = 0;
+      console.log(`[dashguard] reset empty room=${room.name}`);
+    }
+    return;
+  }
+  event.emptyRoomSince = 0;
+  if (!players.length) {
+    event.allPlayersDeadSince = event.allPlayersDeadSince || now;
+    for (const actor of event.actors.values()) {
+      if (!actor?.alive) continue;
+      actor.pending = null;
+      actor.targetActorId = -1;
+      actor.state = DASHGUARD_EVENT.STATE_IDLE;
+    }
+    if (now - event.allPlayersDeadSince >= DASHGUARD_EVENT_CONFIG.wipeRecoveryMs) {
+      for (const actor of event.actors.values()) {
+        if (!actor?.alive) continue;
+        const home = actor.homePosition || (actor.kind === DASHGUARD_EVENT.KIND_BOSS ? DASHGUARD_EVENT_CONFIG.bossSpawn : DASHGUARD_EVENT_CONFIG.skeletonSpawn);
+        actor.position = { x: home.x, y: home.y, z: home.z, rotY: home.rotY || 0 };
+        actor.route = [];
+      }
+      event.allPlayersDeadSince = now;
+      dashguardSendSnapshot(room, 0, true);
+      console.log(`[dashguard] wipe recovery room=${room.name} hp=${event.actors.get(DASHGUARD_EVENT_CONFIG.bossId)?.hp ?? "n/a"}`);
+    }
+    return;
+  }
+  event.allPlayersDeadSince = 0;
+  const deltaSeconds = Math.min(0.25, Math.max(0.02, (now - event.lastTickAt) / 1000));
+  event.lastTickAt = now;
+  for (const actor of event.actors.values()) dashguardTickActor(room, actor, deltaSeconds, now, 0);
+  dashguardSendSnapshot(room, 0);
+}
+
+function dashguardKillActor(room, actor, channel = 0, reason = "damage") {
+  if (!actor?.alive) return;
+  actor.alive = false;
+  actor.hp = 0;
+  actor.state = DASHGUARD_EVENT.STATE_DEAD;
+  actor.pending = null;
+  sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_DEATH, {
+    text: actor.kind === DASHGUARD_EVENT.KIND_BOSS ? "THE WARDEN FALLS" : "",
+  }), channel, { requireGameState: true });
+  const event = ensureDashguardEventState(room);
+  if (actor.kind !== DASHGUARD_EVENT.KIND_BOSS || !event) return;
+  event.status = "completed";
+  for (const other of event.actors.values()) {
+    if (other.id !== actor.id && other.alive) dashguardKillActor(room, other, channel, "boss-death");
+  }
+  sendReliableToWholeRoom(room, makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_COMPLETE, rawHashtable([
+    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(event.phase) },
+    { key: rawByte(DASHGUARD_EVENT.KEY_TEXT), value: rawString("DASHGUARD SECURED") },
+  ])), channel, { requireGameState: true });
+  event.cleanupTimer = setTimeout(() => {
+    if (rooms.get(room.name) !== room || event.status !== "completed") return;
+    event.actors.clear();
+    dashguardSendSnapshot(room, channel, true);
+  }, 10000);
+  if (typeof event.cleanupTimer.unref === "function") event.cleanupTimer.unref();
+  console.log(`[dashguard] complete room=${room.name} reason=${reason} phase=${event.phase}`);
+}
+
+function dashguardApplyShotDamage(shooter, data, damageState, weaponType, launchMode, target, targetIndex, result) {
+  const room = shooter?.room;
+  const event = ensureDashguardEventState(room);
+  const actor = event?.actors?.get(result.targetActorId);
+  if (!actor || !actor.alive) {
+    result.summary = `${result.targetActorId}:event-npc-not-live`;
+    return result;
+  }
+  const origin = pointFromHashtable(htGet(data, 11));
+  const actorDistance = distanceBetweenPoints(shooter.lastTransform, actor.position);
+  const originDistance = distanceBetweenPoints(origin, actor.position);
+  const explosive = isExplosiveDamageWeapon(weaponType, launchMode);
+  const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
+  if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
+    result.summary = `${actor.id}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
+    return result;
+  }
+  const range = damageRangeName(damageDistance);
+  const [minDamage, maxDamage] = damagePairForRange(damageState, range);
+  const seedParts = shotRandomSeedParts(data, shooter, actor.id, targetIndex, weaponType, range);
+  const roll = deterministicUnit(BUILD_ID, "dashguard-damage", ...seedParts);
+  const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
+  const critChance = clampNumber(numberOr(damageState?.crit, 0), 0, DAMAGE_MAX_CRIT_CHANCE);
+  const crit = deterministicUnit(BUILD_ID, "dashguard-crit", ...seedParts) * 100 < critChance;
+  const shooterStats = sessionRuntimeStats(shooter);
+  const headDamageBonus = result.hitZone === HIT_ZONE_CABIN
+    ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
+    : 0;
+  const explosionCoefficient = explosive ? explosionDistanceCoefficient(originDistance ?? actorDistance) : 1;
+  const totalDamage = Math.max(0, Math.round(
+    baseDamage * explosionCoefficient * hitZoneMultiplier(result.hitZone) * (1 + headDamageBonus / 100) * (crit ? DAMAGE_CRIT_MULTIPLIER : 1)
+  ));
+  const applied = Math.min(actor.hp, totalDamage);
+  actor.hp -= applied;
+  result.hit = applied > 0;
+  result.healthDamage = applied;
+  result.energyDamage = 0;
+  result.crit = crit && applied > 0;
+  result.summary = `${actor.id}:event-dmg=${applied}:hp=${actor.hp}/${actor.maxHp}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:crit=${result.crit ? 1 : 0}`;
+  if (applied > 0 && Date.now() - Number(actor.lastHitAt || 0) >= 400) {
+    actor.lastHitAt = Date.now();
+    sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_HIT), reliableChannelForSession(shooter, 0), { requireGameState: true });
+  }
+  if (actor.hp <= 0) {
+    result.killed = true;
+    dashguardKillActor(room, actor, reliableChannelForSession(shooter, 0), "player-damage");
+  }
+  dashguardSendSnapshot(room, reliableChannelForSession(shooter, 0), result.killed);
+  return result;
 }
 
 function isCtfRoom(room) { return Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG && Boolean(CTF_MAPS[mapKey(room?.map)]?.length); }
@@ -6863,6 +7665,7 @@ function describeShotDamageContext(session, data, state) {
 }
 
 const SHOT_TARGET_PLAYER = 1;
+const SHOT_TARGET_BOT = 3;
 const HIT_ZONE_ENGINE = 16;
 const HIT_ZONE_CABIN = 32;
 
@@ -7521,7 +8324,18 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:damage=off`;
     return result;
   }
-  if (targetType !== SHOT_TARGET_PLAYER || !Number.isFinite(targetActorId)) {
+  if (!Number.isFinite(targetActorId)) {
+    result.summary = `?:invalid-target`;
+    return result;
+  }
+  if (targetType === SHOT_TARGET_BOT) {
+    if (!isDashguardEventRoom(shooter.room)) {
+      result.summary = `${targetActorId}:bot-outside-event`;
+      return result;
+    }
+    return dashguardApplyShotDamage(shooter, data, damageState, weaponType, launchMode, target, targetIndex, result);
+  }
+  if (targetType !== SHOT_TARGET_PLAYER) {
     result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:non-player`;
     return result;
   }
@@ -8203,6 +9017,9 @@ function ensureRoom(settings) {
       standardRestartTimer: null,
       standardTeam1Wins: 0,
       standardTeam2Wins: 0,
+      dashguardEvent: normalizedMode === MAP_MODE_DASHGUARD_EVENT && mapKey(requestedMap) === DASHGUARD_EVENT.MAP
+        ? createDashguardEventState()
+        : null,
     });
   } else {
     const room = rooms.get(name);
@@ -8237,6 +9054,10 @@ function ensureRoom(settings) {
       room.standardRoundWinner = 0;
       room.standardTeam1Wins = 0;
       room.standardTeam2Wins = 0;
+      clearDashguardEventTimers(room);
+      room.dashguardEvent = room.mode === MAP_MODE_DASHGUARD_EVENT && mapKey(room.map) === DASHGUARD_EVENT.MAP
+        ? createDashguardEventState()
+        : null;
     }
     ensureRoomItems(room);
   }
@@ -8251,6 +9072,7 @@ function clearZombieTimers(room) {
   clearZombieRestartTimer(room);
   clearStandardRoundTimers(room);
   stopControlPointTicker(room);
+  clearDashguardEventTimers(room);
 }
 
 function nextRoomActorId(room) {
@@ -10171,6 +10993,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM} roomAge=${roomAgeMs(session.room)}ms`);
     postBattleEvent(session, "gamestate");
     if (MAP_PICKUPS_IN_GAMESTATE) markActiveRoomItemsVisible(session);
+    const dashguardEvent = isDashguardEventRoom(session.room)
+      ? ensureDashguardEvent(session.room, channel)
+      : null;
     if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
       startStandardRound(session.room, channel, "pre-gamestate");
     }
@@ -10181,6 +11006,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         { key: 245, value: makeGameStateRaw(session) },
       ]),
     ];
+    if (dashguardEvent) {
+      const snapshot = makeDashguardSnapshotEvent(session.room);
+      if (snapshot) responses.push(snapshot);
+    }
     if (isZombieRoom(session.room)) {
       const zombieStarted = maybeStartZombieRound(session.room, channel, "post-gamestate", session, responses);
       if (!zombieStarted) {
@@ -10289,6 +11118,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     if (firstMoveAfterSpawn) {
       queuePostSpawnPickupSync(session, "second-move-after-spawn");
+      if (isDashguardEventRoom(session.room)) {
+        ensureDashguardEvent(session.room, channel);
+        dashguardSendSnapshot(session.room, channel, true);
+      }
     }
     const pickup = firstMoveAfterSpawn ? null : buildProximityPickItemEvent(session, point);
     if (pickup?.pickEvent) {
