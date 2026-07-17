@@ -534,6 +534,16 @@ const MAP_SPAWN_POINTS = {
     ],
   },
   dashguard: {
+    // Event players never use the old imported DM respawns: some of them
+    // originate below/above the playable Dashguard floor. These positions are
+    // centred on the baked event arena and deliberately lifted 3.5m above it
+    // so the character controller settles onto the floor rather than clipping.
+    event: [
+      { x: 61.5, y: -15.611328, z: 205.5, rotY: 180 },
+      { x: 56.0, y: -15.611328, z: 201.5, rotY: 135 },
+      { x: 67.0, y: -15.611328, z: 201.5, rotY: 225 },
+      { x: 61.5, y: -15.611328, z: 211.0, rotY: 0 },
+    ],
     dm: [
       { x: 152.449, y: -24.553, z: 228.355, rotY: 330 },
       { x: 63.741, y: -18.398, z: 313.678, rotY: 180 },
@@ -686,6 +696,7 @@ function allSpawnPointsForDeathmatch(mapSpawns) {
 function pointListFor(session, team) {
   const mapSpawns = MAP_SPAWN_POINTS[mapKey(session.room?.map)];
   if (!mapSpawns) return null;
+  if (isDashguardEventRoom(session.room) && mapSpawns.event?.length) return mapSpawns.event;
   if (roomMode(session) === MAP_MODE_DEATHMATCH || roomMode(session) === MAP_MODE_ZOMBIE) {
     const points = allSpawnPointsForDeathmatch(mapSpawns);
     return points.length ? points : null;
