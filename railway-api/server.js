@@ -1284,6 +1284,9 @@ const MAP_MODE_DEATHMATCH = 1;
 const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
+// Client mode 16 initializes the Campaign NPC container. For Dashguard it is
+// presented as the dedicated Event mode rather than the legacy tower UI.
+const MAP_MODE_DASHGUARD_EVENT = 16;
 const MAP_MODE_ZOMBIE = 64;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
 const DOSSIER_GAME_MODE_STATS = [
@@ -1313,7 +1316,7 @@ const maps = [
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
-  mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH)
+  mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
