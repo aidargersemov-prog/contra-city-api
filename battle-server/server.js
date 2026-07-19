@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-20-remington-first-shell-700ms-test-v271";
+const BUILD_ID = "battle-server-2026-07-20-remington-reload-ready-400ms-test-v272";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -7714,7 +7714,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   resetWeaponActionState(state);
   state.reloading = true;
   state.reloadStartedAt = now;
-  state.reloadReadyAt = isComplexReloadWeaponState(state) ? now + reloadSingleDurationMs(state) : 0;
+  state.reloadReadyAt = isComplexReloadWeaponState(state) ? now + reloadFirstTickDurationMs(state) : 0;
   state.reloadFullUntil = now + reloadDurationForAmountMs(state, amount);
   setWeaponMode(state, WEAPON_MODE.RELOADING, now);
   const firstTickMs = isComplexReloadWeaponState(state)
