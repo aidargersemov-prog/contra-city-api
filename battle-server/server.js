@@ -8,9 +8,9 @@ const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
   .filter(Boolean);
 const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
-const PUBLIC_HOST = process.env.PUBLIC_HOST || "3.76.0.237";
+const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-16-enet-pending-gate-v272";
+const BUILD_ID = "battle-server-2026-07-20-remington-first-shell-early-test-v270";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -107,6 +107,7 @@ const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
 const NORMALIZE_WEAPON_RAPIDITY = process.env.NORMALIZE_WEAPON_RAPIDITY === "1";
 const SHOT_THROTTLE_SLACK_MS = Math.max(0, Number(process.env.SHOT_THROTTLE_SLACK_MS || 20));
 const COMPLEX_RELOAD_AMMO_CLIP_MS = Math.max(1, Number(process.env.COMPLEX_RELOAD_AMMO_CLIP_MS || 1000));
+const REMINGTON_FIRST_RELOAD_TICK_MS = Math.max(1, Number(process.env.REMINGTON_FIRST_RELOAD_TICK_MS || 1000));
 const ENABLE_MAP_PICKUPS = process.env.ENABLE_MAP_PICKUPS !== "0";
 const MAP_PICKUPS_IN_GAMESTATE = process.env.MAP_PICKUPS_IN_GAMESTATE === "1";
 const ITEM_RESPAWN_MS = Math.max(0, Number(process.env.ITEM_RESPAWN_MS || 15000));
@@ -146,78 +147,31 @@ const MAX_PLAYER_JUMP = Math.max(1, Number(process.env.MAX_PLAYER_JUMP || 32));
 const ROOM_INTERPOLATION_MODE_RAW = Number(process.env.ROOM_INTERPOLATION_MODE ?? 3);
 const ROOM_INTERPOLATION_MODE = Math.max(0, Math.min(255, Number.isFinite(ROOM_INTERPOLATION_MODE_RAW) ? ROOM_INTERPOLATION_MODE_RAW : 0));
 const ADD_MOVE_ROTATION_KEY = process.env.ADD_MOVE_ROTATION_KEY !== "0";
-const MAX_UDP_DATAGRAM_BYTES = Math.max(64, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
+const MAX_UDP_DATAGRAM_BYTES = Math.max(512, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
 const MAX_ENET_COMMANDS_PER_PACKET = Math.max(1, Number(process.env.MAX_ENET_COMMANDS_PER_PACKET || 64));
-// Defaults leave room for several Photon endpoints per client and multiple clients behind one NAT.
-// Every limit remains lowerable through the environment so staging can exercise the boundary.
-const MAX_SESSIONS_TOTAL = Math.max(1, Number(process.env.MAX_SESSIONS_TOTAL || 10000));
-const MAX_SESSIONS_PER_IP = Math.max(1, Number(process.env.MAX_SESSIONS_PER_IP || 128));
-const MAX_PENDING_SESSIONS_TOTAL = Math.max(1, Number(process.env.MAX_PENDING_SESSIONS_TOTAL || 4096));
-const MAX_PENDING_SESSIONS_PER_IP = Math.max(1, Number(process.env.MAX_PENDING_SESSIONS_PER_IP || 32));
-const PENDING_SESSION_TTL_MS = Math.max(250, Number(process.env.PENDING_SESSION_TTL_MS || 10000));
-const PREAUTH_SESSION_TTL_MS = Math.max(PENDING_SESSION_TTL_MS, Number(process.env.PREAUTH_SESSION_TTL_MS || 30000));
-const DETACHED_SESSION_TTL_MS = Math.max(1000, Number(process.env.DETACHED_SESSION_TTL_MS || 30000));
-const SESSION_SECURITY_SWEEP_MS = Math.max(100, Number(process.env.SESSION_SECURITY_SWEEP_MS || 1000));
-const SESSION_SECURITY_SWEEP_LIMIT = Math.max(1, Number(process.env.SESSION_SECURITY_SWEEP_LIMIT || 512));
-const NEW_ENDPOINT_WINDOW_MS = Math.max(1000, Number(process.env.NEW_ENDPOINT_WINDOW_MS || 10000));
-const NEW_ENDPOINTS_PER_IP = Math.max(1, Number(process.env.NEW_ENDPOINTS_PER_IP || 64));
-const UDP_RATE_WINDOW_MS = Math.max(250, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
-const UDP_RATE_PACKETS_PER_IP = Math.max(1, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
-const UDP_RATE_BYTES_PER_IP = Math.max(1, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
-const UDP_RATE_BUCKET_CAP = Math.max(128, Number(process.env.UDP_RATE_BUCKET_CAP || 16384));
-const INVALID_WINDOW_MS = Math.max(1000, Number(process.env.INVALID_WINDOW_MS || 10000));
-const INVALID_PACKETS_PER_IP = Math.max(1, Number(process.env.INVALID_PACKETS_PER_IP || 64));
-const QUARANTINE_SHORT_MS = Math.max(1000, Number(process.env.QUARANTINE_SHORT_MS || 30000));
-const QUARANTINE_REPEAT_MS = Math.max(QUARANTINE_SHORT_MS, Number(process.env.QUARANTINE_REPEAT_MS || 300000));
-const SECURITY_IP_STATE_CAP = Math.max(128, Number(process.env.SECURITY_IP_STATE_CAP || 16384));
-const AUTH_OPERATION_WINDOW_MS = Math.max(1000, Number(process.env.AUTH_OPERATION_WINDOW_MS || 10000));
-const AUTH_OPERATIONS_PER_SESSION = Math.max(1, Number(process.env.AUTH_OPERATIONS_PER_SESSION || 2000));
-const AUTH_OPERATIONS_PER_ACCOUNT = Math.max(1, Number(process.env.AUTH_OPERATIONS_PER_ACCOUNT || 4000));
-const ACCOUNT_OPERATION_BUCKET_CAP = Math.max(128, Number(process.env.ACCOUNT_OPERATION_BUCKET_CAP || 10000));
-const TCP_MAX_CONNECTIONS_PER_IP = Math.max(1, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
-const TCP_IDLE_TIMEOUT_MS = Math.max(1000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
-const TCP_MAX_BYTES_PER_CONNECTION = Math.max(1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
+// Compatibility-first defaults: one public/NAT address may represent many real players,
+// and every client maintains several Photon endpoints at the same time.
+const MAX_SESSIONS_TOTAL = Math.max(50000, Number(process.env.MAX_SESSIONS_TOTAL || 50000));
+const MAX_SESSIONS_PER_IP = Math.max(512, Number(process.env.MAX_SESSIONS_PER_IP || 512));
+const UDP_RATE_WINDOW_MS = Math.max(1000, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
+const UDP_RATE_PACKETS_PER_IP = Math.max(100000, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
+const UDP_RATE_BYTES_PER_IP = Math.max(512 * 1024 * 1024, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
+const TCP_MAX_CONNECTIONS_PER_IP = Math.max(128, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
+const TCP_IDLE_TIMEOUT_MS = Math.max(120000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
+const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
 
 const sessions = new Map();
-const pendingSessions = new Map();
 const rooms = new Map();
 const masterSessionsByPlayerId = new Map();
 const clanTreasuryLiveEvents = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
 const udpRateByIp = new Map();
-const fullSessionCountByIp = new Map();
-const pendingSessionCountByIp = new Map();
-const natRebindSessions = new Map();
-const newEndpointRateByIp = new Map();
-const securityStateByIp = new Map();
-const securityAuditLastAt = new Map();
-const accountOperationRate = new Map();
 const tcpConnectionsByIp = new Map();
 let clanTreasuryPollCursor = 0;
 let clanTreasuryPollInitialized = false;
 let clanTreasuryPollInFlight = false;
 let clanTreasuryPollLastErrorAt = 0;
-let lastSecuritySweepAt = 0;
-
-function incrementCount(map, keyValue) {
-  const count = Number(map.get(keyValue) || 0) + 1;
-  map.set(keyValue, count);
-  return count;
-}
-
-function decrementCount(map, keyValue) {
-  const count = Number(map.get(keyValue) || 0) - 1;
-  if (count > 0) map.set(keyValue, count);
-  else map.delete(keyValue);
-  return Math.max(0, count);
-}
-
-function boundedInsert(map, keyValue, value, cap) {
-  if (map.has(keyValue)) map.delete(keyValue);
-  map.set(keyValue, value);
-  while (map.size > cap) map.delete(map.keys().next().value);
-}
 
 function allowUdpPacket(rinfo, byteLength) {
   const address = String(rinfo?.address || "unknown");
@@ -225,17 +179,26 @@ function allowUdpPacket(rinfo, byteLength) {
   let bucket = udpRateByIp.get(address);
   if (!bucket || now - bucket.startedAt >= UDP_RATE_WINDOW_MS) {
     bucket = { startedAt: now, packets: 0, bytes: 0, dropped: 0 };
-    boundedInsert(udpRateByIp, address, bucket, UDP_RATE_BUCKET_CAP);
+    udpRateByIp.set(address, bucket);
   }
   bucket.packets++;
   bucket.bytes += Math.max(0, Number(byteLength || 0));
   const allowed = bucket.packets <= UDP_RATE_PACKETS_PER_IP && bucket.bytes <= UDP_RATE_BYTES_PER_IP;
   if (!allowed) bucket.dropped++;
+  if (udpRateByIp.size > 10000) {
+    for (const [ip, value] of udpRateByIp) {
+      if (now - value.startedAt > UDP_RATE_WINDOW_MS * 2) udpRateByIp.delete(ip);
+    }
+  }
   return allowed;
 }
 
 function sessionCountForIp(address) {
-  return Number(fullSessionCountByIp.get(String(address || "unknown")) || 0);
+  let count = 0;
+  for (const session of sessions.values()) {
+    if (session?.rinfo?.address === address || String(session?.remoteKey || "").startsWith(`${address}:`)) count++;
+  }
+  return count;
 }
 let shopCatalogCache = { loadedAt: 0, weapons: [], wears: [] };
 const PROCESS_START_MS = Date.now();
@@ -344,13 +307,6 @@ const MAP_PICKUP_POINTS = {
     // World positions from mapsnew/LegoTurnament_unity3d/Assets/LegoTurnament.unity.bak-large-fileids.
     { id: 36001, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 6.126, y: 36.396, z: 159.793, rotY: 90 },
     { id: 36002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 2.755, y: 22.209, z: 161.192, rotY: 270 },
-  ],
-  dashguard: [
-    { id: 38001, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 147.027, y: -16.897, z: 187.417, rotY: 270 },
-    { id: 38002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -28.712, y: -16.897, z: 287.682, rotY: 270 },
-    { id: 38003, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 60.257, y: -16.897, z: 266.146, rotY: 270 },
-    { id: 38004, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 68.092, y: -16.897, z: 411.424, rotY: 270 },
-    { id: 38005, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 115.696, y: -17.238, z: 264.747, rotY: 90 }
   ],
   inferno: [
     // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids.
@@ -533,28 +489,6 @@ const MAP_SPAWN_POINTS = {
       { x: 16.51, y: 20.676, z: 312.944, rotY: 180 },
     ],
   },
-  dashguard: {
-    // Event players never use the old imported DM respawns: some of them
-    // originate below/above the playable Dashguard floor. These positions are
-    // centred on the baked event arena and deliberately lifted 3.5m above it
-    // so the character controller settles onto the floor rather than clipping.
-    event: [
-      { x: 61.5, y: -15.611328, z: 205.5, rotY: 180 },
-      { x: 56.0, y: -15.611328, z: 201.5, rotY: 135 },
-      { x: 67.0, y: -15.611328, z: 201.5, rotY: 225 },
-      { x: 61.5, y: -15.611328, z: 211.0, rotY: 0 },
-    ],
-    dm: [
-      { x: 152.449, y: -24.553, z: 228.355, rotY: 330 },
-      { x: 63.741, y: -18.398, z: 313.678, rotY: 180 },
-      { x: 62.765, y: -18.43, z: 417.897, rotY: 180 },
-      { x: -35.083, y: -18.451, z: 314.706, rotY: 90 },
-      { x: 169.289, y: -18.284, z: 186.146, rotY: 270 },
-      { x: 182.13, y: -18.398, z: 244.876, rotY: 270 },
-      { x: 88.996, y: 10.842, z: 340.641, rotY: 180 },
-      { x: 3.285, y: -18.284, z: 225.055, rotY: 45 },
-    ],
-  },
   inferno: {
     // World positions from mapsnew/Inferno_unity3d/Assets/Inferno.unity.bak-large-fileids -> POINTS_RESCALE.
     dm: [
@@ -591,9 +525,6 @@ const MAP_MODE_DEATHMATCH = 1;
 const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
-// The client already owns mode 16 (Tower Defense) and initializes Campaign for it.
-// Dashguard reuses that exact client lifecycle under an Event presentation layer.
-const MAP_MODE_DASHGUARD_EVENT = 16;
 const MAP_MODE_ZOMBIE = 64;
 const ZOMBIE_MODE = {
   PAUSE: 1,
@@ -615,7 +546,6 @@ const MAP_ALLOWED_MODES = {
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
   arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
   inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
-  dashguard: [MAP_MODE_DEATHMATCH, MAP_MODE_DASHGUARD_EVENT],
 };
 const CTF_MAPS = {
   arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
@@ -696,7 +626,6 @@ function allSpawnPointsForDeathmatch(mapSpawns) {
 function pointListFor(session, team) {
   const mapSpawns = MAP_SPAWN_POINTS[mapKey(session.room?.map)];
   if (!mapSpawns) return null;
-  if (isDashguardEventRoom(session.room) && mapSpawns.event?.length) return mapSpawns.event;
   if (roomMode(session) === MAP_MODE_DEATHMATCH || roomMode(session) === MAP_MODE_ZOMBIE) {
     const points = allSpawnPointsForDeathmatch(mapSpawns);
     return points.length ? points : null;
@@ -814,272 +743,6 @@ function key(port, rinfo) {
   return `${port}:${rinfo.address}:${rinfo.port}`;
 }
 
-function endpointAddress(rinfo) {
-  return String(rinfo?.address || "unknown");
-}
-
-function natRebindKey(port, peerId, challenge) {
-  return `${Number(port) || 0}:${Number(peerId) || 0}:${Number(challenge) >>> 0}`;
-}
-
-function indexNatRebindSession(session) {
-  if (!session || session.isPending || !session.challenge) return;
-  const indexKey = natRebindKey(session.port, session.peerId, session.challenge);
-  let set = natRebindSessions.get(indexKey);
-  if (!set) {
-    set = new Set();
-    natRebindSessions.set(indexKey, set);
-  }
-  set.add(session);
-  session.natRebindIndexKey = indexKey;
-}
-
-function unindexNatRebindSession(session) {
-  const indexKey = session?.natRebindIndexKey;
-  if (!indexKey) return;
-  const set = natRebindSessions.get(indexKey);
-  if (set) {
-    set.delete(session);
-    if (set.size <= 0) natRebindSessions.delete(indexKey);
-  }
-  session.natRebindIndexKey = "";
-}
-
-function storePendingSession(session) {
-  pendingSessions.set(session.sessionId, session);
-  incrementCount(pendingSessionCountByIp, endpointAddress(session.rinfo));
-  return session;
-}
-
-function deletePendingSession(session, disconnect = true) {
-  if (!session?.sessionId || pendingSessions.get(session.sessionId) !== session) return false;
-  pendingSessions.delete(session.sessionId);
-  decrementCount(pendingSessionCountByIp, endpointAddress(session.rinfo));
-  if (disconnect) session.transportDisconnected = true;
-  return true;
-}
-
-function storeFullSession(session) {
-  sessions.set(session.sessionId, session);
-  incrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
-  indexNatRebindSession(session);
-  return session;
-}
-
-function deleteFullSession(session) {
-  if (!session?.sessionId || sessions.get(session.sessionId) !== session) return false;
-  sessions.delete(session.sessionId);
-  decrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
-  unindexNatRebindSession(session);
-  return true;
-}
-
-function touchBoundedState(map, address, value) {
-  boundedInsert(map, address, value, SECURITY_IP_STATE_CAP);
-  return value;
-}
-
-function noteInvalidUdp(address, reason, now = Date.now()) {
-  const ip = String(address || "unknown");
-  let state = securityStateByIp.get(ip);
-  if (!state || now - state.windowStartedAt >= INVALID_WINDOW_MS) {
-    state = {
-      windowStartedAt: now,
-      invalid: 0,
-      offenses: Number(state?.offenses || 0),
-      quarantineUntil: Number(state?.quarantineUntil || 0),
-      lastSeenAt: now,
-      lastReason: "",
-    };
-  }
-  state.invalid += 1;
-  state.lastSeenAt = now;
-  state.lastReason = String(reason || "invalid").slice(0, 80);
-  if (state.invalid === INVALID_PACKETS_PER_IP) {
-    state.offenses += 1;
-    const duration = state.offenses > 1 ? QUARANTINE_REPEAT_MS : QUARANTINE_SHORT_MS;
-    state.quarantineUntil = Math.max(state.quarantineUntil, now + duration);
-    console.log(`[security] udp quarantine ip=${ip} duration=${duration}ms offenses=${state.offenses} reason=${state.lastReason}`);
-    emitBattleSecurityAudit("udp_quarantine", {
-      ipAddress: ip,
-      severity: state.offenses > 1 ? "critical" : "warning",
-      description: `UDP pre-auth quarantine: ${state.lastReason}`,
-      durationMs: duration,
-      count: state.invalid,
-      stage: "preauth",
-      metadata: { offenses: state.offenses, reason: state.lastReason },
-    });
-  }
-  touchBoundedState(securityStateByIp, ip, state);
-  return state;
-}
-
-function isUdpQuarantined(address, now = Date.now()) {
-  return Number(securityStateByIp.get(String(address || "unknown"))?.quarantineUntil || 0) > now;
-}
-
-function allowNewEndpoint(address, now = Date.now()) {
-  const ip = String(address || "unknown");
-  let bucket = newEndpointRateByIp.get(ip);
-  if (!bucket || now - bucket.startedAt >= NEW_ENDPOINT_WINDOW_MS) {
-    bucket = { startedAt: now, count: 0, dropped: 0, lastSeenAt: now };
-  }
-  bucket.count += 1;
-  bucket.lastSeenAt = now;
-  const allowed = bucket.count <= NEW_ENDPOINTS_PER_IP;
-  if (!allowed) {
-    bucket.dropped += 1;
-    noteInvalidUdp(ip, "new-endpoint-rate", now);
-  }
-  touchBoundedState(newEndpointRateByIp, ip, bucket);
-  return allowed;
-}
-
-const ENET_COMMAND_MIN_LENGTH = new Map([
-  [0x01, 20],
-  [0x02, 44],
-  [0x03, 44],
-  [0x04, 12],
-  [0x05, 12],
-  [0x06, 12],
-  [0x07, 16],
-  [0x08, 32],
-  [0x0c, 12],
-]);
-
-function parseEnetPacketShape(msg) {
-  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) {
-    return { valid: false, reason: "datagram-size", commands: [] };
-  }
-  const commandCount = Number(msg[3] || 0);
-  if (commandCount <= 0 || commandCount > MAX_ENET_COMMANDS_PER_PACKET) {
-    return { valid: false, reason: "command-count", commands: [] };
-  }
-  let offset = 12;
-  const commands = [];
-  for (let index = 0; index < commandCount; index += 1) {
-    if (offset + 12 > msg.length) return { valid: false, reason: "command-header", commands: [] };
-    const type = msg[offset];
-    const minLength = ENET_COMMAND_MIN_LENGTH.get(type);
-    if (!minLength) return { valid: false, reason: `command-type-${type}`, commands: [] };
-    const length = readU32(msg, offset + 4);
-    if (length < minLength || offset + length > msg.length) {
-      return { valid: false, reason: "command-length", commands: [] };
-    }
-    if ((type === 0x02 || type === 0x03) && length !== 44) {
-      return { valid: false, reason: "connect-length", commands: [] };
-    }
-    commands.push({ type, offset, length, end: offset + length });
-    offset += length;
-  }
-  if (offset !== msg.length) return { valid: false, reason: "trailing-bytes", commands: [] };
-  return { valid: true, reason: "", commands };
-}
-
-function isValidInitialConnect(msg, packetShape) {
-  return Boolean(
-    packetShape?.valid &&
-    packetShape.commands.length === 1 &&
-    packetShape.commands[0].type === 0x02 &&
-    msg.readUInt16BE(0) === 0xffff &&
-    readU32(msg, 8) !== 0
-  );
-}
-
-function makePendingSession(port, socket, rinfo, sessionId, challenge, now = Date.now()) {
-  return {
-    isPending: true,
-    peerId: 1,
-    challenge,
-    serverSeq: 0,
-    unreliableSeq: 0,
-    serverSeqByChannel: new Map(),
-    unreliableSeqByChannel: new Map(),
-    verifySeq: null,
-    seenVerify: false,
-    outboundReliable: new Map(),
-    outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
-    outboundRoundTripVariance: 0,
-    reliableResponses: new Map(),
-    reliableInFlight: new Map(),
-    reliableFragments: new Map(),
-    reliableGeneration: 0,
-    lastChannel: 0,
-    port,
-    remoteKey: `${rinfo.address}:${rinfo.port}`,
-    sessionId,
-    socket,
-    rinfo: { address: rinfo.address, port: rinfo.port },
-    createdAt: now,
-    lastSeenAt: now,
-    transportDisconnected: false,
-  };
-}
-
-function isPhotonInitPayload(payload) {
-  return Buffer.isBuffer(payload) && payload.length >= 2 && payload.length <= 256 && payload[0] === 0xf3 && payload[1] === 0x00;
-}
-
-function isExactPendingJoin(parsed) {
-  if (!parsed || parsed.messageType !== 2 || parsed.opCode !== 255) return false;
-  const actor = parsed.params?.get(249);
-  const authId = Number(htGet(actor, 241)?.value || 0);
-  const authKey = String(htGet(actor, 240)?.value || "");
-  return Number.isInteger(authId) && authId > 0 && authKey.length > 0 && authKey.length <= 256;
-}
-
-function incrementWindowBucket(bucket, now, windowMs) {
-  if (!bucket || now - Number(bucket.startedAt || 0) >= windowMs) {
-    return { startedAt: now, count: 1, dropped: 0, offenses: Number(bucket?.offenses || 0) };
-  }
-  bucket.count += 1;
-  return bucket;
-}
-
-function allowAuthenticatedOperation(session, now = Date.now()) {
-  session.operationRate = incrementWindowBucket(session.operationRate, now, AUTH_OPERATION_WINDOW_MS);
-  if (session.operationRate.count > AUTH_OPERATIONS_PER_SESSION) {
-    session.operationRate.dropped += 1;
-    if (session.operationRate.count === AUTH_OPERATIONS_PER_SESSION + 1) {
-      session.operationRate.offenses += 1;
-      emitBattleSecurityAudit("session_operation_flood", {
-        playerId: Number(session.playerId || 0),
-        ipAddress: endpointAddress(session.rinfo),
-        port: session.port,
-        severity: "warning",
-        description: "Превышен лимит Photon операций одной сессии",
-        count: session.operationRate.count,
-        stage: session.applicationJoinedAt ? "authenticated" : "preauth",
-        metadata: { actorId: session.actorId || 0, offenses: session.operationRate.offenses },
-      });
-    }
-    return false;
-  }
-
-  const playerId = Number(session.playerId || 0);
-  if (!session.applicationJoinedAt || !Number.isInteger(playerId) || playerId <= 0) return true;
-  let accountBucket = incrementWindowBucket(accountOperationRate.get(playerId), now, AUTH_OPERATION_WINDOW_MS);
-  if (accountOperationRate.has(playerId)) accountOperationRate.delete(playerId);
-  accountOperationRate.set(playerId, accountBucket);
-  while (accountOperationRate.size > ACCOUNT_OPERATION_BUCKET_CAP) accountOperationRate.delete(accountOperationRate.keys().next().value);
-  if (accountBucket.count <= AUTH_OPERATIONS_PER_ACCOUNT) return true;
-  accountBucket.dropped += 1;
-  if (accountBucket.count === AUTH_OPERATIONS_PER_ACCOUNT + 1) {
-    accountBucket.offenses += 1;
-    emitBattleSecurityAudit("account_operation_flood", {
-      playerId,
-      ipAddress: endpointAddress(session.rinfo),
-      port: session.port,
-      severity: accountBucket.offenses > 1 ? "critical" : "warning",
-      description: "Превышен суммарный лимит Photon операций аккаунта",
-      count: accountBucket.count,
-      stage: "authenticated",
-      metadata: { actorId: session.actorId || 0, offenses: accountBucket.offenses },
-    });
-  }
-  return false;
-}
-
 function refreshSessionReliableEndpoint(session, socket, rinfo) {
   if (!session || !socket || !rinfo) return;
   const pending = session.outboundReliable;
@@ -1094,10 +757,9 @@ function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
   const incomingPeerId = msg.readUInt16BE(0);
   const incomingChallenge = readU32(msg, 8);
   if (!incomingChallenge || incomingPeerId === 0xffff) return null;
-  const candidates = natRebindSessions.get(natRebindKey(port, incomingPeerId, incomingChallenge));
-  if (!candidates || candidates.size !== 1) return null;
+
   const matches = [];
-  for (const candidate of candidates) {
+  for (const candidate of sessions.values()) {
     if (!candidate || candidate.transportDisconnected) continue;
     if (Number(candidate.port) !== Number(port)) continue;
     if (Number(candidate.peerId) !== Number(incomingPeerId)) continue;
@@ -1115,16 +777,12 @@ function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
   const previousRemote = session.remoteKey || "unknown";
   if (previousSessionId && previousSessionId !== sessionId && sessions.get(previousSessionId) === session) {
     sessions.delete(previousSessionId);
-    decrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
   }
-  unindexNatRebindSession(session);
+  sessions.set(sessionId, session);
   session.sessionId = sessionId;
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
-  sessions.set(sessionId, session);
-  incrementCount(fullSessionCountByIp, endpointAddress(session.rinfo));
-  indexNatRebindSession(session);
   refreshSessionReliableEndpoint(session, socket, rinfo);
   console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0}`);
   return session;
@@ -1406,7 +1064,7 @@ function runOutboundReliableRetries() {
     console.log(`[state] reliable timeout actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms`);
     detachMasterSession(session, "reliable-timeout");
     detachSessionFromRoom(session, "reliable-timeout");
-    deleteFullSession(session);
+    if (session.sessionId) sessions.delete(session.sessionId);
   }
 }
 
@@ -1439,7 +1097,7 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
       reliableCommands.push(...initCommands);
     }
     console.log(`[state] init accepted reply=${initModes.join("+")} seq=${initSeqs.join(",")}`);
-    if (PUSH_ROOM_LIST_AFTER_INIT && !session.isPending) {
+    if (PUSH_ROOM_LIST_AFTER_INIT) {
       const roomListCommands = makeReliableCommandsForPayload(session, makeRoomListEvent(session), channel);
       reliableCommands.push(...roomListCommands);
       console.log(`[event] room list pushed after init seq=${reliableCommandSeqSummary(roomListCommands)} rooms=${roomListSummary()}`);
@@ -4216,14 +3874,6 @@ function makeGameStateRaw(session) {
     entries.push({ key: rawByte(80), value: items });
   }
 
-  // The original client restores Campaign actors from GameState[70] before a
-  // late joiner starts receiving live Event81 updates. Dashguard uses that
-  // exact snapshot slot for its boss and skeletons.
-  const dashguardCampaign = makeDashguardCampaignRaw(session.room);
-  if (dashguardCampaign) {
-    entries.push({ key: rawByte(70), value: dashguardCampaign });
-  }
-
   if (INCLUDE_ACTOR_IN_GAMESTATE) {
     entries.unshift(
       { key: rawByte(98), value: session.actorRaw || rawHashtable([]) },
@@ -4232,797 +3882,6 @@ function makeGameStateRaw(session) {
   }
 
   return rawHashtable(entries);
-}
-
-// ---------------------------------------------------------------------------
-// Dashguard Event (Campaign mode 16)
-// ---------------------------------------------------------------------------
-// Event81 is the original Campaign transport.  We deliberately keep the
-// original SpawnBot payload fields (23..27, 239) so an unpatched legacy client
-// ignores the new actor kinds safely instead of throwing while decoding them.
-const DASHGUARD_EVENT = Object.freeze({
-  MAP: "dashguard",
-  BOSS_ACTION_TYPE: 240,
-  SKELETON_ACTION_TYPE: 241,
-  EVENT_SNAPSHOT: 40,
-  EVENT_ACTION: 41,
-  EVENT_DAMAGE: 42,
-  EVENT_DEATH: 43,
-  EVENT_NOTICE: 44,
-  EVENT_COMPLETE: 45,
-  KEY_ID: 200,
-  KEY_KIND: 201,
-  KEY_HP: 202,
-  KEY_MAX_HP: 203,
-  KEY_STATE: 204,
-  KEY_PHASE: 205,
-  KEY_X: 206,
-  KEY_Y: 207,
-  KEY_Z: 208,
-  KEY_ROTATION: 209,
-  KEY_TARGET: 210,
-  KEY_ACTION: 211,
-  KEY_EVENT_STATE: 212,
-  KEY_DAMAGE: 213,
-  KEY_RADIUS: 214,
-  KEY_RESOLVE_AT: 215,
-  KEY_ACTORS: 220,
-  KEY_TEXT: 221,
-  KEY_DEAD: 222,
-  KEY_PENDING_X: 223,
-  KEY_PENDING_Y: 224,
-  KEY_PENDING_Z: 225,
-  KIND_BOSS: 1,
-  KIND_SKELETON: 2,
-  STATE_SPAWN: 1,
-  STATE_IDLE: 2,
-  STATE_CHASE: 3,
-  STATE_CAST: 4,
-  STATE_AOE: 5,
-  STATE_DRAIN: 6,
-  STATE_SUMMON: 7,
-  STATE_ATTACK: 8,
-  STATE_DEAD: 9,
-  ACTION_SPAWN: 1,
-  ACTION_CAST: 2,
-  ACTION_AOE_TELEGRAPH: 3,
-  ACTION_AOE_IMPACT: 4,
-  ACTION_DRAIN: 5,
-  ACTION_SUMMON: 6,
-  ACTION_HIT: 7,
-  ACTION_DEATH: 8,
-  ACTION_PHASE: 9,
-  ACTION_SKELETON_ATTACK: 10,
-  ACTION_CLEANUP: 11,
-});
-
-const DASHGUARD_EVENT_CONFIG = Object.freeze({
-  bossId: 900001,
-  skeletonFirstId: 900100,
-  bossMaxHp: 250000,
-  skeletonMaxHp: 25000,
-  maxSkeletonsTotal: 10,
-  maxSkeletonsAlive: 10,
-  introMs: 7000,
-  spawnLockMs: 1600,
-  tickMs: 100,
-  snapshotMs: 160,
-  wipeRecoveryMs: 9000,
-  emptyRoomResetMs: 90000,
-  bossSpeed: 3.1,
-  skeletonSpeed: 3.75,
-  bossCastRange: 23,
-  skeletonAttackRange: 2.65,
-  arenaRadius: 82,
-  // Authored from Dashguard_Prototype: Artorias_Lo (1) and 2hmtaunta.
-  bossSpawn: { x: 49.49685, y: -19.111328, z: 198.1179, rotY: 0 },
-  skeletonSpawn: { x: 77, y: -19.111328, z: 189, rotY: 90 },
-  // Ten authored slots let the complete 3/4/3 encounter exist at once.
-  // Their final walkability is a required Unity NavMesh validation gate.
-  skeletonSpawns: [
-    { x: 70.0, y: -19.111328, z: 190.0, rotY: 45 },
-    { x: 77.0, y: -19.111328, z: 189.0, rotY: 90 },
-    { x: 84.0, y: -19.111328, z: 190.0, rotY: 135 },
-    { x: 70.0, y: -19.111328, z: 198.0, rotY: 30 },
-    { x: 84.0, y: -19.111328, z: 198.0, rotY: 150 },
-    { x: 70.0, y: -19.111328, z: 206.0, rotY: 330 },
-    { x: 77.0, y: -19.111328, z: 207.0, rotY: 270 },
-    { x: 84.0, y: -19.111328, z: 206.0, rotY: 210 },
-    { x: 72.0, y: -19.107962, z: 214.0, rotY: 315 },
-    { x: 82.0, y: -19.107962, z: 214.0, rotY: 225 },
-  ],
-  skeletonSpawnSafeRadius: 7,
-  skeletonNpcSeparation: 3.5,
-  arenaCenter: { x: 61.5, y: -19.111328, z: 205.5 },
-  // Safe authored corridors are deliberately explicit. They are the server
-  // side guardrail; the map NavMesh refines visual avoidance on the client.
-  navigation: [
-    { x: 49.5, y: -19.111328, z: 198.12 },
-    { x: 61, y: -19.111328, z: 197.8 },
-    { x: 73, y: -19.111328, z: 198.9 },
-    { x: 82, y: -19.111328, z: 190 },
-    { x: 78, y: -19.111328, z: 177 },
-    { x: 62, y: -19.111328, z: 176.5 },
-    { x: 48, y: -19.111328, z: 184 },
-  ],
-});
-
-function isDashguardEventRoom(room) {
-  return Boolean(room) && mapKey(room.map) === DASHGUARD_EVENT.MAP && Number(room.mode) === MAP_MODE_DASHGUARD_EVENT;
-}
-
-function createDashguardEventState() {
-  return {
-    status: "waiting",
-    phase: 0,
-    startedAt: 0,
-    introTimer: null,
-    ticker: null,
-    cleanupTimer: null,
-    lastTickAt: Date.now(),
-    lastSnapshotAt: 0,
-    actors: new Map(),
-    skeletonsSpawned: 0,
-    nextSkeletonId: DASHGUARD_EVENT_CONFIG.skeletonFirstId,
-    allPlayersDeadSince: 0,
-    emptyRoomSince: 0,
-  };
-}
-
-function ensureDashguardEventState(room) {
-  if (!isDashguardEventRoom(room)) return null;
-  if (!room.dashguardEvent) room.dashguardEvent = createDashguardEventState();
-  return room.dashguardEvent;
-}
-
-function clearDashguardEventTimers(room) {
-  const event = room?.dashguardEvent;
-  if (!event) return;
-  if (event.introTimer) clearTimeout(event.introTimer);
-  if (event.ticker) clearInterval(event.ticker);
-  if (event.cleanupTimer) clearTimeout(event.cleanupTimer);
-  event.introTimer = null;
-  event.ticker = null;
-  event.cleanupTimer = null;
-}
-
-function dashguardActorActionType(kind) {
-  return kind === DASHGUARD_EVENT.KIND_BOSS
-    ? DASHGUARD_EVENT.BOSS_ACTION_TYPE
-    : DASHGUARD_EVENT.SKELETON_ACTION_TYPE;
-}
-
-function makeDashguardActorRaw(actor) {
-  const point = actor.position || DASHGUARD_EVENT_CONFIG.bossSpawn;
-  const pending = actor.pending;
-  const pendingAction = pending?.type === "magic" ? DASHGUARD_EVENT.ACTION_CAST
-    : (pending?.type === "aoe" ? DASHGUARD_EVENT.ACTION_AOE_TELEGRAPH
-      : (pending?.type === "drain" ? DASHGUARD_EVENT.ACTION_DRAIN
-        : (pending?.type === "skeleton" ? DASHGUARD_EVENT.ACTION_SKELETON_ATTACK : 0)));
-  const entries = [
-    // Existing SpawnBot decoder reads these before its switch. Keep them valid.
-    { key: rawByte(27), value: rawByte(dashguardActorActionType(actor.kind)) },
-    { key: rawByte(26), value: rawInt(actor.id) },
-    { key: rawByte(25), value: rawLong(0) },
-    { key: rawByte(24), value: rawLong(0) },
-    { key: rawByte(23), value: rawInt(0) },
-    { key: rawByte(239), value: rawShort(0) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_ID), value: rawInt(actor.id) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_KIND), value: rawByte(actor.kind) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_HP), value: rawInt(Math.max(0, Math.round(actor.hp))) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_MAX_HP), value: rawInt(Math.round(actor.maxHp)) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_STATE), value: rawByte(actor.state) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(actor.phase || 0) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_X), value: rawFloat(point.x) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_Y), value: rawFloat(point.y) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_Z), value: rawFloat(point.z) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_ROTATION), value: rawFloat(point.rotY || 0) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_TARGET), value: rawInt(actor.targetActorId || -1) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_DEAD), value: rawBool(!actor.alive) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_ACTION), value: rawByte(pendingAction) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_RESOLVE_AT), value: rawLong(pending?.resolveAt || 0) },
-  ];
-  if (pending?.point) {
-    entries.push(
-      { key: rawByte(DASHGUARD_EVENT.KEY_PENDING_X), value: rawFloat(pending.point.x) },
-      { key: rawByte(DASHGUARD_EVENT.KEY_PENDING_Y), value: rawFloat(pending.point.y) },
-      { key: rawByte(DASHGUARD_EVENT.KEY_PENDING_Z), value: rawFloat(pending.point.z) },
-    );
-  }
-  if (Number.isFinite(pending?.radius)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_RADIUS), value: rawFloat(pending.radius) });
-  return rawHashtable(entries);
-}
-
-function makeDashguardCampaignRaw(room) {
-  if (!isDashguardEventRoom(room)) return null;
-  const event = ensureDashguardEventState(room);
-  if (!event?.actors?.size) return null;
-  return rawHashtable(Array.from(event.actors.values())
-    .filter((actor) => actor && actor.alive)
-    .map((actor) => ({ key: rawInt(actor.id), value: makeDashguardActorRaw(actor) })));
-}
-
-function makeDashguardEventPayload(type, data) {
-  return rawEvent(81, [
-    { key: 254, value: rawInt(0) },
-    { key: 245, value: rawHashtable([
-      { key: rawByte(72), value: rawByte(type) },
-      { key: rawByte(71), value: data },
-    ]) },
-  ]);
-}
-
-function makeDashguardSpawnEvent(actor) {
-  // Preserve CampaignEventType.SpawnBot (= 1) so the original dispatch path
-  // remains intact; patched SpawnBot consumes only action types 240/241.
-  return makeDashguardEventPayload(1, makeDashguardActorRaw(actor));
-}
-
-function makeDashguardSnapshotEvent(room) {
-  const event = ensureDashguardEventState(room);
-  if (!event) return null;
-  const actorEntries = Array.from(event.actors.values())
-    .filter((actor) => actor)
-    .map((actor) => ({ key: rawInt(actor.id), value: makeDashguardActorRaw(actor) }));
-  return makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_SNAPSHOT, rawHashtable([
-    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(event.phase) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_EVENT_STATE), value: rawByte(dashguardEventStateCode(event.status)) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_ACTORS), value: rawHashtable(actorEntries) },
-  ]));
-}
-
-function makeDashguardActionEvent(actor, action, extra = {}) {
-  const entries = [
-    { key: rawByte(DASHGUARD_EVENT.KEY_ID), value: rawInt(actor?.id || -1) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_KIND), value: rawByte(actor?.kind || 0) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_ACTION), value: rawByte(action) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(actor?.phase || 0) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_TARGET), value: rawInt(extra.targetActorId ?? actor?.targetActorId ?? -1) },
-  ];
-  if (extra.position) {
-    entries.push(
-      { key: rawByte(DASHGUARD_EVENT.KEY_X), value: rawFloat(extra.position.x) },
-      { key: rawByte(DASHGUARD_EVENT.KEY_Y), value: rawFloat(extra.position.y) },
-      { key: rawByte(DASHGUARD_EVENT.KEY_Z), value: rawFloat(extra.position.z) },
-    );
-  }
-  if (Number.isFinite(extra.radius)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_RADIUS), value: rawFloat(extra.radius) });
-  if (Number.isFinite(extra.resolveAt)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_RESOLVE_AT), value: rawLong(extra.resolveAt) });
-  if (Number.isFinite(extra.damage)) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_DAMAGE), value: rawInt(extra.damage) });
-  if (extra.text) entries.push({ key: rawByte(DASHGUARD_EVENT.KEY_TEXT), value: rawString(extra.text) });
-  return makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_ACTION, rawHashtable(entries));
-}
-
-function makeDashguardDamageEvent(source, targetSession, healthDamage, energyDamage, killed) {
-  return makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_DAMAGE, rawHashtable([
-    { key: rawByte(DASHGUARD_EVENT.KEY_ID), value: rawInt(source?.id || -1) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_TARGET), value: rawInt(targetSession.actorId) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_HP), value: rawInt(Math.max(0, Math.round(targetSession.health || 0))) },
-    { key: rawByte(92), value: rawShort(healthDamage) },
-    { key: rawByte(93), value: rawShort(energyDamage) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_DEAD), value: rawBool(killed) },
-  ]));
-}
-
-function dashguardEventStateCode(status) {
-  if (status === "intro") return 1;
-  if (status === "active") return 2;
-  if (status === "completed") return 3;
-  return 0;
-}
-
-function dashguardLivePlayers(room) {
-  return Array.from(room?.players?.values?.() || [])
-    .filter((session) => session && session.gameStateRequested && session.spawned && !session.dead && session.lastTransform);
-}
-
-function dashguardArenaPlayers(room) {
-  return dashguardLivePlayers(room)
-    .filter((session) => dashguardDistance(session.lastTransform, DASHGUARD_EVENT_CONFIG.arenaCenter) <= DASHGUARD_EVENT_CONFIG.arenaRadius);
-}
-
-function dashguardDistance(first, second) {
-  if (!first || !second) return Infinity;
-  return Math.hypot(Number(first.x) - Number(second.x), Number(first.z) - Number(second.z));
-}
-
-function dashguardCreateActor(kind, id, maxHp, point) {
-  return {
-    id,
-    kind,
-    hp: maxHp,
-    maxHp,
-    alive: true,
-    phase: kind === DASHGUARD_EVENT.KIND_BOSS ? 1 : 0,
-    state: DASHGUARD_EVENT.STATE_SPAWN,
-    stateUntil: Date.now() + DASHGUARD_EVENT_CONFIG.spawnLockMs,
-    position: { x: point.x, y: point.y, z: point.z, rotY: point.rotY || 0 },
-    homePosition: { x: point.x, y: point.y, z: point.z, rotY: point.rotY || 0 },
-    targetActorId: -1,
-    nextMagicAt: 0,
-    nextAoeAt: 0,
-    nextDrainAt: 0,
-    nextAttackAt: 0,
-    pending: null,
-    lastHitAt: 0,
-    route: [],
-    routeTargetIndex: -1,
-    nextRouteAt: 0,
-  };
-}
-
-function dashguardStartTicker(room) {
-  const event = ensureDashguardEventState(room);
-  if (!event || event.ticker) return;
-  event.lastTickAt = Date.now();
-  event.ticker = setInterval(() => {
-    try {
-      if (rooms.get(room.name) !== room || !isDashguardEventRoom(room)) {
-        clearDashguardEventTimers(room);
-        return;
-      }
-      dashguardTick(room);
-    } catch (error) {
-      console.error(`[dashguard] tick failed room=${room?.name || "unknown"}`, error);
-    }
-  }, DASHGUARD_EVENT_CONFIG.tickMs);
-  if (typeof event.ticker.unref === "function") event.ticker.unref();
-}
-
-function ensureDashguardEvent(room, channel = 0) {
-  const event = ensureDashguardEventState(room);
-  if (!event) return null;
-  dashguardStartTicker(room);
-  if (event.status !== "waiting") return event;
-
-  event.status = "intro";
-  event.startedAt = Date.now();
-  const noticeActor = { id: -1, kind: 0, phase: 0, targetActorId: -1 };
-  sendReliableToWholeRoom(room, makeDashguardActionEvent(noticeActor, DASHGUARD_EVENT.ACTION_SPAWN, {
-    text: "DASHGUARD BREACH DETECTED",
-    resolveAt: Date.now() + DASHGUARD_EVENT_CONFIG.introMs,
-  }), channel, { requireGameState: true });
-  event.introTimer = setTimeout(() => {
-    event.introTimer = null;
-    if (rooms.get(room.name) !== room || event.status !== "intro" || !dashguardLivePlayers(room).length) {
-      event.status = "waiting";
-      return;
-    }
-    const boss = dashguardCreateActor(
-      DASHGUARD_EVENT.KIND_BOSS,
-      DASHGUARD_EVENT_CONFIG.bossId,
-      DASHGUARD_EVENT_CONFIG.bossMaxHp,
-      DASHGUARD_EVENT_CONFIG.bossSpawn,
-    );
-    event.actors.set(boss.id, boss);
-    event.status = "active";
-    sendReliableToWholeRoom(room, makeDashguardSpawnEvent(boss), channel, { requireGameState: true });
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_SPAWN, {
-      text: "ARTORIAS // ARCANE WARDEN",
-      resolveAt: boss.stateUntil,
-    }), channel, { requireGameState: true });
-    dashguardSendSnapshot(room, channel, true);
-    console.log(`[dashguard] boss spawned room=${room.name} hp=${boss.hp} players=${dashguardLivePlayers(room).length}`);
-  }, DASHGUARD_EVENT_CONFIG.introMs);
-  if (typeof event.introTimer.unref === "function") event.introTimer.unref();
-  return event;
-}
-
-function dashguardSendSnapshot(room, channel = 0, force = false) {
-  const event = ensureDashguardEventState(room);
-  if (!event) return 0;
-  const now = Date.now();
-  if (!force && now - event.lastSnapshotAt < DASHGUARD_EVENT_CONFIG.snapshotMs) return 0;
-  event.lastSnapshotAt = now;
-  const payload = makeDashguardSnapshotEvent(room);
-  return payload ? sendReliableToWholeRoom(room, payload, channel, { requireGameState: true }) : 0;
-}
-
-function dashguardNearestTarget(room, actor) {
-  let best = null;
-  let bestDistance = Infinity;
-  for (const session of dashguardArenaPlayers(room)) {
-    const distance = dashguardDistance(actor.position, session.lastTransform);
-    if (distance < bestDistance) {
-      best = session;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
-
-function dashguardClampPosition(actor) {
-  const center = DASHGUARD_EVENT_CONFIG.arenaCenter;
-  const dx = actor.position.x - center.x;
-  const dz = actor.position.z - center.z;
-  const distance = Math.hypot(dx, dz);
-  if (distance <= DASHGUARD_EVENT_CONFIG.arenaRadius || distance < 0.001) return;
-  const scale = DASHGUARD_EVENT_CONFIG.arenaRadius / distance;
-  actor.position.x = center.x + dx * scale;
-  actor.position.z = center.z + dz * scale;
-}
-
-function dashguardMoveTowards(actor, destination, speed, deltaSeconds) {
-  const dx = Number(destination.x) - actor.position.x;
-  const dz = Number(destination.z) - actor.position.z;
-  const distance = Math.hypot(dx, dz);
-  if (distance < 0.05) return false;
-  const step = Math.min(distance, Math.max(0, speed * deltaSeconds));
-  actor.position.x += dx / distance * step;
-  actor.position.z += dz / distance * step;
-  actor.position.rotY = Math.atan2(dx, dz) * 180 / Math.PI;
-  dashguardClampPosition(actor);
-  return true;
-}
-
-function dashguardNearestNavigationIndex(point) {
-  let bestIndex = 0;
-  let bestDistance = Infinity;
-  for (let index = 0; index < DASHGUARD_EVENT_CONFIG.navigation.length; index += 1) {
-    const distance = dashguardDistance(point, DASHGUARD_EVENT_CONFIG.navigation[index]);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestIndex = index;
-    }
-  }
-  return bestIndex;
-}
-
-function dashguardPlanRoute(actor, destination, now) {
-  const nodes = DASHGUARD_EVENT_CONFIG.navigation;
-  const from = dashguardNearestNavigationIndex(actor.position);
-  const to = dashguardNearestNavigationIndex(destination);
-  const count = nodes.length;
-  const clockwise = (to - from + count) % count;
-  const counterClockwise = (from - to + count) % count;
-  const direction = clockwise <= counterClockwise ? 1 : -1;
-  const steps = Math.min(clockwise, counterClockwise);
-  const route = [];
-  for (let step = 1; step <= steps; step += 1) {
-    route.push(nodes[(from + direction * step + count) % count]);
-  }
-  actor.route = route;
-  actor.routeTargetIndex = to;
-  actor.nextRouteAt = now + 850;
-}
-
-function dashguardMoveThroughCorridor(actor, destination, speed, deltaSeconds, now) {
-  // Direct movement is allowed only near an authored navigation point. For
-  // longer chases the server walks the same fixed corridors that the map
-  // authoring script exposes to the client-side NavMesh validation.
-  const nearbyTarget = dashguardDistance(destination, DASHGUARD_EVENT_CONFIG.navigation[dashguardNearestNavigationIndex(destination)]) < 9;
-  if (dashguardDistance(actor.position, destination) < 9 && nearbyTarget) {
-    actor.route = [];
-    return dashguardMoveTowards(actor, destination, speed, deltaSeconds);
-  }
-  const targetIndex = dashguardNearestNavigationIndex(destination);
-  if (!actor.route.length || actor.routeTargetIndex !== targetIndex || now >= actor.nextRouteAt) {
-    dashguardPlanRoute(actor, destination, now);
-  }
-  const waypoint = actor.route[0];
-  if (!waypoint) return dashguardMoveTowards(actor, destination, speed, deltaSeconds);
-  const moved = dashguardMoveTowards(actor, waypoint, speed, deltaSeconds);
-  if (dashguardDistance(actor.position, waypoint) <= 0.6) actor.route.shift();
-  return moved;
-}
-
-function dashguardSetPhase(room, boss, phase, channel) {
-  const event = ensureDashguardEventState(room);
-  if (!event || phase <= event.phase) return;
-  event.phase = phase;
-  boss.phase = phase;
-  boss.state = DASHGUARD_EVENT.STATE_SUMMON;
-  boss.stateUntil = Date.now() + 1250;
-  const planned = phase === 2 ? 3 : (phase === 3 ? 4 : 3);
-  const remaining = Math.max(0, DASHGUARD_EVENT_CONFIG.maxSkeletonsTotal - event.skeletonsSpawned);
-  const count = Math.min(planned, remaining, DASHGUARD_EVENT_CONFIG.maxSkeletonsAlive);
-  sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_PHASE, {
-    text: phase === 2 ? "THE RIFT OPENS" : (phase === 3 ? "THE WARDEN AWAKENS" : "LAST SEAL BROKEN"),
-    resolveAt: boss.stateUntil,
-  }), channel, { requireGameState: true });
-  if (count > 0) {
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_SUMMON, {
-      text: "SKELETON GUARD DEPLOYING",
-      resolveAt: boss.stateUntil,
-    }), channel, { requireGameState: true });
-  }
-  for (let index = 0; index < count; index += 1) {
-    const spawn = dashguardPickSkeletonSpawn(room, event, index);
-    if (!spawn) continue;
-    const skeleton = dashguardCreateActor(
-      DASHGUARD_EVENT.KIND_SKELETON,
-      event.nextSkeletonId++,
-      DASHGUARD_EVENT_CONFIG.skeletonMaxHp,
-      spawn,
-    );
-    event.actors.set(skeleton.id, skeleton);
-    event.skeletonsSpawned += 1;
-    sendReliableToWholeRoom(room, makeDashguardSpawnEvent(skeleton), channel, { requireGameState: true });
-  }
-}
-
-function dashguardPickSkeletonSpawn(room, event, offset) {
-  const spawns = DASHGUARD_EVENT_CONFIG.skeletonSpawns;
-  const players = dashguardLivePlayers(room);
-  let best = null;
-  let bestScore = -Infinity;
-  for (let index = 0; index < spawns.length; index += 1) {
-    const candidate = spawns[(event.skeletonsSpawned + offset + index) % spawns.length];
-    let playerDistance = Infinity;
-    let actorDistance = Infinity;
-    for (const player of players) playerDistance = Math.min(playerDistance, dashguardDistance(candidate, player.lastTransform));
-    for (const actor of event.actors.values()) {
-      if (actor?.alive) actorDistance = Math.min(actorDistance, dashguardDistance(candidate, actor.position));
-    }
-    if (playerDistance < DASHGUARD_EVENT_CONFIG.skeletonSpawnSafeRadius) continue;
-    if (actorDistance < DASHGUARD_EVENT_CONFIG.skeletonNpcSeparation) continue;
-    const score = Math.min(playerDistance, 30) + Math.min(actorDistance, 20) * 0.35;
-    if (score > bestScore) {
-      best = candidate;
-      bestScore = score;
-    }
-  }
-  // Player safety is intentionally stricter than NPC spacing. A 7m player
-  // exclusion prevents unfair body spawns; 3.5m between skeleton capsule
-  // centers prevents visual overlap while allowing all ten authored slots.
-  if (!best) return null;
-  return { x: best.x, y: best.y, z: best.z, rotY: best.rotY };
-}
-
-function dashguardStartBossAttack(room, boss, target, now, channel) {
-  const phase = Math.max(1, boss.phase || 1);
-  const targetPoint = { x: target.lastTransform.x, y: target.lastTransform.y, z: target.lastTransform.z };
-  if (phase >= 3 && now >= boss.nextDrainAt && boss.hp <= boss.maxHp * 0.72) {
-    boss.state = DASHGUARD_EVENT.STATE_DRAIN;
-    boss.pending = { type: "drain", targetActorId: target.actorId, resolveAt: now + 1850, damage: 18 };
-    boss.nextDrainAt = now + 16500;
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_DRAIN, {
-      targetActorId: target.actorId,
-      resolveAt: boss.pending.resolveAt,
-      text: "ARCANE SYPHON",
-    }), channel, { requireGameState: true });
-    return;
-  }
-  if (phase >= 2 && now >= boss.nextAoeAt) {
-    boss.state = DASHGUARD_EVENT.STATE_AOE;
-    boss.pending = { type: "aoe", point: targetPoint, resolveAt: now + 1450, damage: 22 + phase * 3, radius: 7.25 };
-    boss.nextAoeAt = now + Math.max(7200, 11000 - phase * 950);
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_AOE_TELEGRAPH, {
-      position: targetPoint,
-      radius: boss.pending.radius,
-      resolveAt: boss.pending.resolveAt,
-      text: "VOID IMPACT",
-    }), channel, { requireGameState: true });
-    return;
-  }
-  boss.state = DASHGUARD_EVENT.STATE_CAST;
-  boss.pending = { type: "magic", targetActorId: target.actorId, resolveAt: now + 1100, damage: 16 + phase * 5 };
-  boss.nextMagicAt = now + Math.max(3800, 6100 - phase * 550);
-  sendReliableToWholeRoom(room, makeDashguardActionEvent(boss, DASHGUARD_EVENT.ACTION_CAST, {
-    targetActorId: target.actorId,
-    resolveAt: boss.pending.resolveAt,
-  }), channel, { requireGameState: true });
-}
-
-function dashguardApplyDamageToPlayer(room, source, target, totalDamage, channel) {
-  if (!target || target.dead || !target.spawned) return 0;
-  const current = sessionCurrentHealthEnergy(target);
-  const damage = Math.max(0, Math.round(totalDamage));
-  const energyDamage = Math.min(current.energy, damage);
-  const healthDamage = Math.min(current.health, Math.max(0, damage - energyDamage));
-  target.energy = current.energy - energyDamage;
-  target.health = current.health - healthDamage;
-  const killed = current.health > 0 && target.health <= 0;
-  if (killed) {
-    target.dead = true;
-    target.waitingSelfSpawnMove = false;
-    target.deaths = numberOr(target.deaths, 0) + 1;
-    target.matchDeaths = numberOr(target.matchDeaths, 0) + 1;
-  }
-  sendReliableToWholeRoom(room, makeDashguardDamageEvent(source, target, healthDamage, energyDamage, killed), channel, { requireGameState: true });
-  return healthDamage + energyDamage;
-}
-
-function dashguardResolvePending(room, actor, now, channel) {
-  const pending = actor.pending;
-  if (!pending || now < pending.resolveAt) return;
-  actor.pending = null;
-  if (pending.type === "magic" || pending.type === "drain") {
-    const target = room.players.get(pending.targetActorId);
-    if (target && !target.dead && target.spawned && dashguardDistance(actor.position, target.lastTransform) <= DASHGUARD_EVENT_CONFIG.bossCastRange + 7) {
-      const applied = dashguardApplyDamageToPlayer(room, actor, target, pending.damage, channel);
-      if (pending.type === "drain" && applied > 0) actor.hp = Math.min(actor.maxHp, actor.hp + Math.min(2400, applied * 80));
-    }
-  } else if (pending.type === "aoe") {
-    for (const target of dashguardLivePlayers(room)) {
-      if (dashguardDistance(pending.point, target.lastTransform) <= pending.radius) {
-        dashguardApplyDamageToPlayer(room, actor, target, pending.damage, channel);
-      }
-    }
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_AOE_IMPACT, {
-      position: pending.point,
-      radius: pending.radius,
-    }), channel, { requireGameState: true });
-  } else if (pending.type === "skeleton") {
-    const target = room.players.get(pending.targetActorId);
-    if (target && !target.dead && target.spawned && dashguardDistance(actor.position, target.lastTransform) <= DASHGUARD_EVENT_CONFIG.skeletonAttackRange + 0.8) {
-      dashguardApplyDamageToPlayer(room, actor, target, pending.damage, channel);
-    }
-  }
-  if (actor.alive && actor.state !== DASHGUARD_EVENT.STATE_DEAD) actor.state = DASHGUARD_EVENT.STATE_IDLE;
-}
-
-function dashguardTickActor(room, actor, deltaSeconds, now, channel) {
-  if (!actor?.alive) return;
-  if (actor.state === DASHGUARD_EVENT.STATE_SPAWN || actor.state === DASHGUARD_EVENT.STATE_SUMMON) {
-    if (now >= actor.stateUntil) actor.state = DASHGUARD_EVENT.STATE_IDLE;
-    return;
-  }
-  dashguardResolvePending(room, actor, now, channel);
-  if (actor.pending) return;
-  const target = dashguardNearestTarget(room, actor);
-  if (!target) {
-    actor.targetActorId = -1;
-    actor.state = DASHGUARD_EVENT.STATE_IDLE;
-    return;
-  }
-  actor.targetActorId = target.actorId;
-  const distance = dashguardDistance(actor.position, target.lastTransform);
-  if (actor.kind === DASHGUARD_EVENT.KIND_BOSS) {
-    if (actor.hp <= actor.maxHp * 0.25) dashguardSetPhase(room, actor, 4, channel);
-    else if (actor.hp <= actor.maxHp * 0.5) dashguardSetPhase(room, actor, 3, channel);
-    else if (actor.hp <= actor.maxHp * 0.75) dashguardSetPhase(room, actor, 2, channel);
-    if (actor.state === DASHGUARD_EVENT.STATE_SUMMON) return;
-    if (distance > DASHGUARD_EVENT_CONFIG.bossCastRange * 0.74) {
-      actor.state = DASHGUARD_EVENT.STATE_CHASE;
-      dashguardMoveThroughCorridor(actor, target.lastTransform, DASHGUARD_EVENT_CONFIG.bossSpeed, deltaSeconds, now);
-      return;
-    }
-    dashguardStartBossAttack(room, actor, target, now, channel);
-    return;
-  }
-  if (distance > DASHGUARD_EVENT_CONFIG.skeletonAttackRange) {
-    actor.state = DASHGUARD_EVENT.STATE_CHASE;
-    dashguardMoveThroughCorridor(actor, target.lastTransform, DASHGUARD_EVENT_CONFIG.skeletonSpeed, deltaSeconds, now);
-    return;
-  }
-  if (now >= actor.nextAttackAt) {
-    actor.state = DASHGUARD_EVENT.STATE_ATTACK;
-    actor.pending = { type: "skeleton", targetActorId: target.actorId, resolveAt: now + 520, damage: 12 };
-    actor.nextAttackAt = now + 1650;
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_SKELETON_ATTACK, {
-      targetActorId: target.actorId,
-      resolveAt: actor.pending.resolveAt,
-    }), channel, { requireGameState: true });
-  }
-}
-
-function dashguardTick(room) {
-  const event = ensureDashguardEventState(room);
-  if (!event || event.status !== "active") return;
-  const now = Date.now();
-  const allRoomPlayers = Array.from(room?.players?.values?.() || []);
-  const players = dashguardLivePlayers(room);
-  if (!allRoomPlayers.length) {
-    event.emptyRoomSince = event.emptyRoomSince || now;
-    if (now - event.emptyRoomSince >= DASHGUARD_EVENT_CONFIG.emptyRoomResetMs) {
-      event.actors.clear();
-      event.skeletonsSpawned = 0;
-      event.nextSkeletonId = DASHGUARD_EVENT_CONFIG.skeletonFirstId;
-      event.phase = 0;
-      event.status = "waiting";
-      event.allPlayersDeadSince = 0;
-      event.emptyRoomSince = 0;
-      console.log(`[dashguard] reset empty room=${room.name}`);
-    }
-    return;
-  }
-  event.emptyRoomSince = 0;
-  if (!players.length) {
-    event.allPlayersDeadSince = event.allPlayersDeadSince || now;
-    for (const actor of event.actors.values()) {
-      if (!actor?.alive) continue;
-      actor.pending = null;
-      actor.targetActorId = -1;
-      actor.state = DASHGUARD_EVENT.STATE_IDLE;
-    }
-    if (now - event.allPlayersDeadSince >= DASHGUARD_EVENT_CONFIG.wipeRecoveryMs) {
-      for (const actor of event.actors.values()) {
-        if (!actor?.alive) continue;
-        const home = actor.homePosition || (actor.kind === DASHGUARD_EVENT.KIND_BOSS ? DASHGUARD_EVENT_CONFIG.bossSpawn : DASHGUARD_EVENT_CONFIG.skeletonSpawn);
-        actor.position = { x: home.x, y: home.y, z: home.z, rotY: home.rotY || 0 };
-        actor.route = [];
-      }
-      event.allPlayersDeadSince = now;
-      dashguardSendSnapshot(room, 0, true);
-      console.log(`[dashguard] wipe recovery room=${room.name} hp=${event.actors.get(DASHGUARD_EVENT_CONFIG.bossId)?.hp ?? "n/a"}`);
-    }
-    return;
-  }
-  event.allPlayersDeadSince = 0;
-  const deltaSeconds = Math.min(0.25, Math.max(0.02, (now - event.lastTickAt) / 1000));
-  event.lastTickAt = now;
-  for (const actor of event.actors.values()) dashguardTickActor(room, actor, deltaSeconds, now, 0);
-  dashguardSendSnapshot(room, 0);
-}
-
-function dashguardKillActor(room, actor, channel = 0, reason = "damage") {
-  if (!actor?.alive) return;
-  actor.alive = false;
-  actor.hp = 0;
-  actor.state = DASHGUARD_EVENT.STATE_DEAD;
-  actor.pending = null;
-  sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_DEATH, {
-    text: actor.kind === DASHGUARD_EVENT.KIND_BOSS ? "THE WARDEN FALLS" : "",
-  }), channel, { requireGameState: true });
-  const event = ensureDashguardEventState(room);
-  if (actor.kind !== DASHGUARD_EVENT.KIND_BOSS || !event) return;
-  event.status = "completed";
-  for (const other of event.actors.values()) {
-    if (other.id !== actor.id && other.alive) dashguardKillActor(room, other, channel, "boss-death");
-  }
-  sendReliableToWholeRoom(room, makeDashguardEventPayload(DASHGUARD_EVENT.EVENT_COMPLETE, rawHashtable([
-    { key: rawByte(DASHGUARD_EVENT.KEY_PHASE), value: rawByte(event.phase) },
-    { key: rawByte(DASHGUARD_EVENT.KEY_TEXT), value: rawString("DASHGUARD SECURED") },
-  ])), channel, { requireGameState: true });
-  event.cleanupTimer = setTimeout(() => {
-    if (rooms.get(room.name) !== room || event.status !== "completed") return;
-    event.actors.clear();
-    dashguardSendSnapshot(room, channel, true);
-  }, 10000);
-  if (typeof event.cleanupTimer.unref === "function") event.cleanupTimer.unref();
-  console.log(`[dashguard] complete room=${room.name} reason=${reason} phase=${event.phase}`);
-}
-
-function dashguardApplyShotDamage(shooter, data, damageState, weaponType, launchMode, target, targetIndex, result) {
-  const room = shooter?.room;
-  const event = ensureDashguardEventState(room);
-  const actor = event?.actors?.get(result.targetActorId);
-  if (!actor || !actor.alive) {
-    result.summary = `${result.targetActorId}:event-npc-not-live`;
-    return result;
-  }
-  const origin = pointFromHashtable(htGet(data, 11));
-  const actorDistance = distanceBetweenPoints(shooter.lastTransform, actor.position);
-  const originDistance = distanceBetweenPoints(origin, actor.position);
-  const explosive = isExplosiveDamageWeapon(weaponType, launchMode);
-  const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
-  if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
-    result.summary = `${actor.id}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
-    return result;
-  }
-  const range = damageRangeName(damageDistance);
-  const [minDamage, maxDamage] = damagePairForRange(damageState, range);
-  const seedParts = shotRandomSeedParts(data, shooter, actor.id, targetIndex, weaponType, range);
-  const roll = deterministicUnit(BUILD_ID, "dashguard-damage", ...seedParts);
-  const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
-  const critChance = clampNumber(numberOr(damageState?.crit, 0), 0, DAMAGE_MAX_CRIT_CHANCE);
-  const crit = deterministicUnit(BUILD_ID, "dashguard-crit", ...seedParts) * 100 < critChance;
-  const shooterStats = sessionRuntimeStats(shooter);
-  const headDamageBonus = result.hitZone === HIT_ZONE_CABIN
-    ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
-    : 0;
-  const explosionCoefficient = explosive ? explosionDistanceCoefficient(originDistance ?? actorDistance) : 1;
-  const totalDamage = Math.max(0, Math.round(
-    baseDamage * explosionCoefficient * hitZoneMultiplier(result.hitZone) * (1 + headDamageBonus / 100) * (crit ? DAMAGE_CRIT_MULTIPLIER : 1)
-  ));
-  const applied = Math.min(actor.hp, totalDamage);
-  actor.hp -= applied;
-  result.hit = applied > 0;
-  result.healthDamage = applied;
-  result.energyDamage = 0;
-  result.crit = crit && applied > 0;
-  result.summary = `${actor.id}:event-dmg=${applied}:hp=${actor.hp}/${actor.maxHp}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:crit=${result.crit ? 1 : 0}`;
-  if (applied > 0 && Date.now() - Number(actor.lastHitAt || 0) >= 400) {
-    actor.lastHitAt = Date.now();
-    sendReliableToWholeRoom(room, makeDashguardActionEvent(actor, DASHGUARD_EVENT.ACTION_HIT), reliableChannelForSession(shooter, 0), { requireGameState: true });
-  }
-  if (actor.hp <= 0) {
-    result.killed = true;
-    dashguardKillActor(room, actor, reliableChannelForSession(shooter, 0), "player-damage");
-  }
-  dashguardSendSnapshot(room, reliableChannelForSession(shooter, 0), result.killed);
-  return result;
 }
 
 function isCtfRoom(room) { return Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG && Boolean(CTF_MAPS[mapKey(room?.map)]?.length); }
@@ -7118,6 +5977,14 @@ function reloadDurationForAmountMs(state, amount) {
   return Math.min(fullReloadMs, reloadSingleDurationMs(state) * shellCount);
 }
 
+function reloadFirstTickDurationMs(state) {
+  const clientSingleReloadMs = reloadSingleDurationMs(state);
+  if (String(state?.systemName || "").toLowerCase() !== "sg_remington") {
+    return clientSingleReloadMs;
+  }
+  return Math.min(clientSingleReloadMs, REMINGTON_FIRST_RELOAD_TICK_MS);
+}
+
 function isReloadWeaponMode(mode) {
   return mode === WEAPON_MODE.RELOADING || mode === WEAPON_MODE.RELOADING_READY;
 }
@@ -7676,7 +6543,6 @@ function describeShotDamageContext(session, data, state) {
 }
 
 const SHOT_TARGET_PLAYER = 1;
-const SHOT_TARGET_BOT = 3;
 const HIT_ZONE_ENGINE = 16;
 const HIT_ZONE_CABIN = 32;
 
@@ -8335,18 +7201,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:damage=off`;
     return result;
   }
-  if (!Number.isFinite(targetActorId)) {
-    result.summary = `?:invalid-target`;
-    return result;
-  }
-  if (targetType === SHOT_TARGET_BOT) {
-    if (!isDashguardEventRoom(shooter.room)) {
-      result.summary = `${targetActorId}:bot-outside-event`;
-      return result;
-    }
-    return dashguardApplyShotDamage(shooter, data, damageState, weaponType, launchMode, target, targetIndex, result);
-  }
-  if (targetType !== SHOT_TARGET_PLAYER) {
+  if (targetType !== SHOT_TARGET_PLAYER || !Number.isFinite(targetActorId)) {
     result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:non-player`;
     return result;
   }
@@ -8863,7 +7718,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   state.reloadFullUntil = now + reloadDurationForAmountMs(state, amount);
   setWeaponMode(state, WEAPON_MODE.RELOADING, now);
   const firstTickMs = isComplexReloadWeaponState(state)
-    ? Math.min(reloadSingleDurationMs(state), numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs)))
+    ? Math.min(reloadFirstTickDurationMs(state), numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs)))
     : numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
   scheduleReloadTick(session, state, channel, state.reloadSeq, firstTickMs);
   console.log(`[event] reload start actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} first=${firstTickMs}ms ready=${Math.max(0, numberOr(state.reloadReadyAt, 0) - now)}ms full=${state.reloadFullUntil - now}ms complex=${isComplexReloadWeaponState(state) ? 1 : 0}`);
@@ -9028,9 +7883,6 @@ function ensureRoom(settings) {
       standardRestartTimer: null,
       standardTeam1Wins: 0,
       standardTeam2Wins: 0,
-      dashguardEvent: normalizedMode === MAP_MODE_DASHGUARD_EVENT && mapKey(requestedMap) === DASHGUARD_EVENT.MAP
-        ? createDashguardEventState()
-        : null,
     });
   } else {
     const room = rooms.get(name);
@@ -9065,10 +7917,6 @@ function ensureRoom(settings) {
       room.standardRoundWinner = 0;
       room.standardTeam1Wins = 0;
       room.standardTeam2Wins = 0;
-      clearDashguardEventTimers(room);
-      room.dashguardEvent = room.mode === MAP_MODE_DASHGUARD_EVENT && mapKey(room.map) === DASHGUARD_EVENT.MAP
-        ? createDashguardEventState()
-        : null;
     }
     ensureRoomItems(room);
   }
@@ -9083,7 +7931,6 @@ function clearZombieTimers(room) {
   clearZombieRestartTimer(room);
   clearStandardRoundTimers(room);
   stopControlPointTicker(room);
-  clearDashguardEventTimers(room);
 }
 
 function nextRoomActorId(room) {
@@ -9432,7 +8279,6 @@ function resetTransportForReconnect(session, reason) {
   session.health = playerRuntimeStats(null).maxHealth;
   session.energy = playerRuntimeStats(null).maxEnergy;
   session.dead = false;
-  session.roomJoinInFlightAt = 0;
   session.waitingSelfSpawnMove = false;
   clearSpawnSelfRetryTimers(session);
   session.pendingSpawnBroadcast = null;
@@ -9481,7 +8327,7 @@ function maybePruneIdleRoomSessions(now = Date.now()) {
       if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
       if (removeRoomPlayer(room, actorId, playerSession, "idle-timeout", { broadcastReason: "idle-leave" })) {
         removed += 1;
-        deleteFullSession(playerSession);
+        if (playerSession.sessionId) sessions.delete(playerSession.sessionId);
       }
     }
   }
@@ -9499,7 +8345,7 @@ function maybePruneIdleMasterSessions(now = Date.now()) {
       const lastSeenAt = Number(session?.lastSeenAt || 0);
       if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
       set.delete(session);
-      deleteFullSession(session);
+      if (session?.sessionId) sessions.delete(session.sessionId);
       removed += 1;
     }
     if (set.size <= 0) {
@@ -10085,32 +8931,6 @@ function emitAchievementEvents(sourceSession, achievements) {
     const self = sendReliableToSession(ownerSession, payload, channel) ? 1 : 0;
     const peers = broadcastReliableToRoom(ownerSession, payload, channel, "achievement", { requireGameState: false });
     console.log(`[sync] achievement actor=${actorId} user=${achievement.userId} ach=${achievement.i} value=${achievement.currentValue}/${achievement.maxValue} reward=${achievement.reward} self=${self} peers=${peers}`);
-  }
-}
-
-function emitBattleSecurityAudit(kind, payload = {}, cooldownMs = 60000) {
-  if (!API_TOKEN || !API_BASE_URL || typeof fetch !== "function") return false;
-  const now = Date.now();
-  const auditKey = `${kind}:${payload.ipAddress || payload.ip || "global"}`;
-  if (now - Number(securityAuditLastAt.get(auditKey) || 0) < cooldownMs) return false;
-  boundedInsert(securityAuditLastAt, auditKey, now, 2048);
-  void postBattleSecurityEvent(kind, payload);
-  return true;
-}
-
-async function postBattleSecurityEvent(kind, payload = {}) {
-  try {
-    const response = await fetch(`${API_BASE_URL}/battle/security`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-battle-token": API_TOKEN,
-      },
-      body: JSON.stringify({ kind, ...payload }),
-    });
-    if (!response.ok) console.log(`[api] security ${kind} failed status=${response.status}`);
-  } catch (error) {
-    console.log(`[api] security ${kind} failed ${error.message}`);
   }
 }
 
@@ -10754,7 +9574,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[photon] unsupported messageType=${parsed?.messageType ?? "null"}`);
     return [];
   }
-  if (!allowAuthenticatedOperation(session)) return [];
 
   const eventCode = photonEventCode(parsed);
   if (shouldLogParsedPayload(parsed)) {
@@ -10808,14 +9627,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (parsed.opCode === 255) {
-    session.applicationJoinedAt = session.applicationJoinedAt || Date.now();
     const roomNameParam = parsed.params.get(255);
     const roomPropsParam = parsed.params.get(248);
     const actorParam = parsed.params.get(249);
     const requestedName = roomNameParam?.value || DEFAULT_ROOM;
 
     if (String(requestedName).includes("list_lobby")) {
-      session.roomJoinInFlightAt = 0;
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
@@ -10851,7 +9668,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const plainLobbyJoin = !roomPropsParam || !parsed.params.has(242) || !parsed.params.has(250);
     if (plainLobbyJoin) {
-      session.roomJoinInFlightAt = 0;
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
@@ -10882,7 +9698,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
     }
-    session.roomJoinInFlightAt = Date.now();
     resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
     session.listLobby = false;
     detachSessionFromRoom(session, "rejoin");
@@ -10935,7 +9750,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     pushRoomListToLobbySessions("room-join", channel);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
-    session.roomJoinInFlightAt = 0;
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     broadcastMasterUserState(session.playerId);
@@ -10951,7 +9765,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (parsed.opCode === 254) {
-    session.roomJoinInFlightAt = 0;
     if (isMasterSocialPort(port) && session.isMasterSession) {
       detachMasterSession(session, "op-leave");
     }
@@ -11004,9 +9817,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM} roomAge=${roomAgeMs(session.room)}ms`);
     postBattleEvent(session, "gamestate");
     if (MAP_PICKUPS_IN_GAMESTATE) markActiveRoomItemsVisible(session);
-    const dashguardEvent = isDashguardEventRoom(session.room)
-      ? ensureDashguardEvent(session.room, channel)
-      : null;
     if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
       startStandardRound(session.room, channel, "pre-gamestate");
     }
@@ -11017,10 +9827,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         { key: 245, value: makeGameStateRaw(session) },
       ]),
     ];
-    if (dashguardEvent) {
-      const snapshot = makeDashguardSnapshotEvent(session.room);
-      if (snapshot) responses.push(snapshot);
-    }
     if (isZombieRoom(session.room)) {
       const zombieStarted = maybeStartZombieRound(session.room, channel, "post-gamestate", session, responses);
       if (!zombieStarted) {
@@ -11129,10 +9935,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     if (firstMoveAfterSpawn) {
       queuePostSpawnPickupSync(session, "second-move-after-spawn");
-      if (isDashguardEventRoom(session.room)) {
-        ensureDashguardEvent(session.room, channel);
-        dashguardSendSnapshot(session.room, channel, true);
-      }
     }
     const pickup = firstMoveAfterSpawn ? null : buildProximityPickItemEvent(session, point);
     if (pickup?.pickEvent) {
@@ -11229,172 +10031,13 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   return [];
 }
 
-function promotePendingSession(pending, now = Date.now(), credentials = {}) {
-  if (!pending?.isPending || pendingSessions.get(pending.sessionId) !== pending) return null;
-  const address = endpointAddress(pending.rinfo);
-  if (sessions.size >= MAX_SESSIONS_TOTAL || sessionCountForIp(address) >= MAX_SESSIONS_PER_IP) {
-    deletePendingSession(pending);
-    noteInvalidUdp(address, "full-session-cap", now);
-    emitBattleSecurityAudit("full_session_cap", {
-      ipAddress: address,
-      severity: "warning",
-      description: "Отклонено повышение pre-auth сессии: достигнут лимит full sessions",
-      stage: "photon_init",
-      metadata: { sessions: sessions.size, perIp: sessionCountForIp(address) },
-    });
-    return null;
-  }
-
-  deletePendingSession(pending, false);
-  Object.assign(pending, {
-    isPending: false,
-    applicationInitAt: now,
-    applicationJoinedAt: 0,
-    roomJoinInFlightAt: 0,
-    listLobby: false,
-    room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
-    roomRaw: null,
-    actorId: 1,
-    actorRaw: null,
-    peerActorRaw: null,
-    peerActorRawBytes: 0,
-    peerActorLoadoutSlots: 0,
-    peerActorProfile: "",
-    joinActorRaw: null,
-    joinActorRawBytes: 0,
-    joinActorLoadoutSlots: 0,
-    joinActorProfile: "",
-    actorJoinParam: null,
-    team: -1,
-    zombieType: ZOMBIE_TYPE.HUMAN,
-    zombieInfectionHits: 0,
-    zombieLastInfectorActorId: 0,
-    spawned: false,
-    dead: false,
-    moveSeen: false,
-    moveCount: 0,
-    waitingSelfSpawnMove: false,
-    currentWeaponSlot: 1,
-    weaponStates: makeWeaponRuntimeState(null),
-    peerWeaponConfirmKeys: new Map(),
-    visibleItemIds: new Set(),
-    activeItemShots: new Map(),
-    impactTimers: new Map(),
-    spawnSeq: 0,
-    spawnRetry: null,
-    spawnMoveWarningTimer: null,
-    spawnSelfRetryTimers: new Set(),
-    joinSelfEventTimer: null,
-    joinStartEventTimer: null,
-    joinSettingsTimers: [],
-    joinLateStartTimers: [],
-    gameStateRequested: false,
-    lastGameStateResponseAt: 0,
-    knownActorIds: new Set(),
-    actorJoinAnnouncedAt: new Map(),
-    joinActorListIds: new Set(),
-    deferredJoinActorIds: new Set(),
-    peerSpawnTimers: new Set(),
-    pendingSpawnBroadcast: null,
-    pendingPickupSync: null,
-    pickupSpawnRepairTimers: new Set(),
-    playerId: Number(credentials.authId || 1),
-    playerAuthKey: String(credentials.authKey || ""),
-    playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
-    health: playerRuntimeStats(null).maxHealth,
-    energy: playerRuntimeStats(null).maxEnergy,
-    kills: 0,
-    deaths: 0,
-    points: 0,
-    domination: 0,
-    revenge: 0,
-    maxDomination: 0,
-    maxRevenge: 0,
-    revengeStreak: 0,
-    killStreakByVictim: new Map(),
-    dominatedBy: new Set(),
-    expEarned: 0,
-    exp2clan: 0,
-    matchStartedAt: 0,
-    matchStatsPosted: false,
-    matchShots: 0,
-    matchHits: 0,
-    matchKills: 0,
-    matchDeaths: 0,
-    matchHeadKills: 0,
-    matchNutsKills: 0,
-    matchSuicides: 0,
-    matchDomination: 0,
-    matchRevenge: 0,
-    matchExp: 0,
-    transportDisconnected: false,
-  });
-  pending.roomRaw = makeRoomSettingsRaw(pending.room);
-  storeFullSession(pending);
-  if (DEBUG_PACKETS) {
-    console.log(`[security] pending promoted ip=${address} port=${pending.port} pending=${pendingSessions.size} sessions=${sessions.size}`);
-  }
-  return pending;
-}
-
-let pendingSweepIterator = null;
-let fullSweepIterator = null;
-
-function sweepSessionMap(map, iteratorName, limit, visitor) {
-  let iterator = iteratorName === "pending" ? pendingSweepIterator : fullSweepIterator;
-  if (!iterator) iterator = map.values();
-  let checked = 0;
-  while (checked < limit) {
-    const item = iterator.next();
-    if (item.done) {
-      iterator = map.values();
-      break;
-    }
-    checked += 1;
-    visitor(item.value);
-  }
-  if (iteratorName === "pending") pendingSweepIterator = iterator;
-  else fullSweepIterator = iterator;
-}
-
-function maybePruneTransportSecurity(now = Date.now()) {
-  if (now - lastSecuritySweepAt < SESSION_SECURITY_SWEEP_MS) return;
-  lastSecuritySweepAt = now;
-  sweepSessionMap(pendingSessions, "pending", SESSION_SECURITY_SWEEP_LIMIT, (session) => {
-    if (now - Number(session?.lastSeenAt || 0) <= PENDING_SESSION_TTL_MS) return;
-    deletePendingSession(session);
-  });
-  sweepSessionMap(sessions, "full", SESSION_SECURITY_SWEEP_LIMIT, (session) => {
-    const joined = Number(session?.applicationJoinedAt || 0) > 0;
-    if (joined && session?.room) return;
-    const roomJoinStartedAt = Number(session?.roomJoinInFlightAt || 0);
-    const idleStartedAt = Math.max(Number(session?.lastSeenAt || 0), roomJoinStartedAt);
-    const ttlMs = joined
-      ? (roomJoinStartedAt ? Math.max(DETACHED_SESSION_TTL_MS, JOIN_PROFILE_MAX_WAIT_MS + 5000) : DETACHED_SESSION_TTL_MS)
-      : PREAUTH_SESSION_TTL_MS;
-    if (now - idleStartedAt <= ttlMs) return;
-    const reason = joined ? "detached-timeout" : "preauth-timeout";
-    detachMasterSession(session, reason);
-    detachSessionFromRoom(session, reason);
-    deleteFullSession(session);
-  });
-}
-
 async function handleUdp(port, socket, msg, rinfo) {
-  const packetNow = Date.now();
-  const knownSessionId = key(port, rinfo);
-  if (isUdpQuarantined(rinfo?.address, packetNow) && !sessions.has(knownSessionId)) return;
-  const packetShape = parseEnetPacketShape(msg);
-  if (!packetShape.valid) {
-    noteInvalidUdp(rinfo?.address, packetShape.reason, packetNow);
-    return;
-  }
+  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) return;
   if (!allowUdpPacket(rinfo, msg.length)) return;
-  maybePruneTransportSecurity(packetNow);
 
   let offset = 12;
-  const sessionId = knownSessionId;
-  let session = sessions.get(sessionId) || pendingSessions.get(sessionId);
+  const sessionId = key(port, rinfo);
+  let session = sessions.get(sessionId);
   if (!session) {
     const reboundSession = findNatRebindSession(port, msg, rinfo);
     if (reboundSession) {
@@ -11402,42 +10045,115 @@ async function handleUdp(port, socket, msg, rinfo) {
     }
   }
   if (!session) {
-    if (!isValidInitialConnect(msg, packetShape)) {
-      noteInvalidUdp(rinfo.address, "new-endpoint-without-connect", packetNow);
-      return;
-    }
-    if (isUdpQuarantined(rinfo.address, packetNow)) return;
-    if (!allowNewEndpoint(rinfo.address, packetNow)) return;
-    if (pendingSessions.size >= MAX_PENDING_SESSIONS_TOTAL) {
-      emitBattleSecurityAudit("pending_global_cap", {
-        severity: "critical",
-        description: "Достигнут глобальный лимит ENet pending sessions",
-        count: pendingSessions.size,
-        stage: "enet_connect",
-      });
-      return;
-    }
-    if (Number(pendingSessionCountByIp.get(endpointAddress(rinfo)) || 0) >= MAX_PENDING_SESSIONS_PER_IP) {
-      noteInvalidUdp(rinfo.address, "pending-ip-cap", packetNow);
-      return;
-    }
-    session = storePendingSession(makePendingSession(port, socket, rinfo, sessionId, readU32(msg, 8), packetNow));
+    if (sessions.size >= MAX_SESSIONS_TOTAL) return;
+    if (sessionCountForIp(rinfo.address) >= MAX_SESSIONS_PER_IP) return;
+    session = {
+      peerId: 1,
+      actorId: 1,
+      challenge: readU32(msg, 8),
+      // VerifyConnect is an ENet control command and is not dispatched through
+      // Photon payload order. The first real Photon payload must therefore use
+      // reliable sequence 1, otherwise the Unity client ACKs it but waits for
+      // missing sequence 1 forever.
+      serverSeq: 0,
+      unreliableSeq: 0,
+      serverSeqByChannel: new Map(),
+      unreliableSeqByChannel: new Map(),
+      outboundReliable: new Map(),
+      outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
+      outboundRoundTripVariance: 0,
+      verifySeq: null,
+      seenVerify: false,
+      listLobby: false,
+      room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
+      roomRaw: null,
+      actorRaw: null,
+      peerActorRaw: null,
+      peerActorRawBytes: 0,
+      peerActorLoadoutSlots: 0,
+      peerActorProfile: "",
+      joinActorRaw: null,
+      joinActorRawBytes: 0,
+      joinActorLoadoutSlots: 0,
+      joinActorProfile: "",
+      actorJoinParam: null,
+      team: -1,
+      zombieType: ZOMBIE_TYPE.HUMAN,
+      zombieInfectionHits: 0,
+      zombieLastInfectorActorId: 0,
+      spawned: false,
+      dead: false,
+      moveSeen: false,
+      moveCount: 0,
+      waitingSelfSpawnMove: false,
+      currentWeaponSlot: 1,
+      weaponStates: makeWeaponRuntimeState(null),
+      peerWeaponConfirmKeys: new Map(),
+      visibleItemIds: new Set(),
+      activeItemShots: new Map(),
+      impactTimers: new Map(),
+      spawnSeq: 0,
+      spawnRetry: null,
+      spawnMoveWarningTimer: null,
+      spawnSelfRetryTimers: new Set(),
+      joinSelfEventTimer: null,
+      joinStartEventTimer: null,
+      joinSettingsTimers: [],
+      joinLateStartTimers: [],
+      gameStateRequested: false,
+      lastGameStateResponseAt: 0,
+      reliableResponses: new Map(),
+      reliableInFlight: new Map(),
+      reliableFragments: new Map(),
+      reliableGeneration: 0,
+      knownActorIds: new Set(),
+      actorJoinAnnouncedAt: new Map(),
+      joinActorListIds: new Set(),
+      deferredJoinActorIds: new Set(),
+      peerSpawnTimers: new Set(),
+      pendingSpawnBroadcast: null,
+      pendingPickupSync: null,
+      pickupSpawnRepairTimers: new Set(),
+      lastChannel: 0,
+      port,
+      remoteKey: `${rinfo.address}:${rinfo.port}`,
+      playerId: 1,
+      playerAuthKey: "",
+      playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
+      lastSeenAt: Date.now(),
+      health: playerRuntimeStats(null).maxHealth,
+      energy: playerRuntimeStats(null).maxEnergy,
+      kills: 0,
+      deaths: 0,
+      points: 0,
+      domination: 0,
+      revenge: 0,
+      maxDomination: 0,
+      maxRevenge: 0,
+      revengeStreak: 0,
+      killStreakByVictim: new Map(),
+      dominatedBy: new Set(),
+      expEarned: 0,
+      exp2clan: 0,
+      matchStartedAt: 0,
+      matchStatsPosted: false,
+      matchShots: 0,
+      matchHits: 0,
+      matchKills: 0,
+      matchDeaths: 0,
+      matchHeadKills: 0,
+      matchNutsKills: 0,
+      matchSuicides: 0,
+      matchDomination: 0,
+      matchRevenge: 0,
+      matchExp: 0,
+    };
+    session.roomRaw = makeRoomSettingsRaw(session.room);
+    sessions.set(sessionId, session);
   }
   const incomingChallenge = readU32(msg, 8);
   if (session.challenge && incomingChallenge && session.challenge !== incomingChallenge) {
-    if (!isValidInitialConnect(msg, packetShape)) {
-      noteInvalidUdp(rinfo.address, "challenge-mismatch", packetNow);
-      return;
-    }
-    if (session.isPending) {
-      deletePendingSession(session);
-      session = storePendingSession(makePendingSession(port, socket, rinfo, sessionId, incomingChallenge, packetNow));
-    } else {
-      unindexNatRebindSession(session);
-      resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
-      session.challenge = incomingChallenge;
-      indexNatRebindSession(session);
-    }
+    resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
   }
   session.challenge = incomingChallenge;
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
@@ -11445,6 +10161,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
   refreshSessionReliableEndpoint(session, socket, rinfo);
+  const packetNow = Date.now();
   session.lastSeenAt = packetNow;
   maybePruneIdleRoomSessions(packetNow);
   maybePruneIdleMasterSessions(packetNow);
@@ -11453,7 +10170,8 @@ async function handleUdp(port, socket, msg, rinfo) {
   let peerIdOverride = null;
   let lastChannel = 0;
   let transportDisconnected = false;
-  const commandCount = packetShape.commands.length;
+  const commandCount = msg[3] || 0;
+  if (commandCount > MAX_ENET_COMMANDS_PER_PACKET) return;
   const sentTime = readU32(msg, 4);
   if (DEBUG_PACKETS) {
     console.log(`[udp:${port}] peer=${msg.readUInt16BE(0)} count=${commandCount} len=${msg.length}`);
@@ -11491,7 +10209,7 @@ async function handleUdp(port, socket, msg, rinfo) {
       const verifySeq = session.verifySeq;
       commands.push(makeVerifyConnect(verifySeq));
       peerIdOverride = 0xffff;
-      if (DEBUG_PACKETS) console.log(`[state] verify connect seq=${verifySeq}`);
+      console.log(`[state] verify connect seq=${verifySeq}`);
     } else if (commandType === 0x04) {
       commands.push(makeAck(channel, reliableSeq, sentTime));
       if (!session.transportDisconnected) {
@@ -11500,44 +10218,23 @@ async function handleUdp(port, socket, msg, rinfo) {
         const disconnectedRoom = session.room?.name || "none";
         detachMasterSession(session, "enet-disconnect");
         detachSessionFromRoom(session, "enet-disconnect");
-        if (session.isPending) deletePendingSession(session);
-        else deleteFullSession(session);
+        if (session.sessionId) sessions.delete(session.sessionId);
         console.log(`[state] enet disconnect port=${port} actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${disconnectedRoom}`);
       }
     } else if (commandType === 0x05 || commandType === 0x0c) {
       commands.push(makeAck(channel, reliableSeq, sentTime));
     } else if ((commandType === 0x06 || commandType === 0x07 || commandType === 0x08) && payloadOffset <= commandEnd) {
-      if (!session.seenVerify) {
-        noteInvalidUdp(rinfo.address, "data-before-connect", packetNow);
+      commands.push(makeAck(channel, reliableSeq, sentTime));
+      if (!session.seenVerify && session.verifySeq == null) {
+        session.verifySeq = session.serverSeq++;
+        commands.push(makeVerifyConnect(session.verifySeq));
+        peerIdOverride = 0xffff;
+        console.log(`[state] implicit verify connect seq=${session.verifySeq} reason=missing-handshake command=${commandType}`);
         offset = commandEnd;
         continue;
       }
       let cacheKey = commandType === 0x06 ? `${session.reliableGeneration || 0}:${channel}:${reliableSeq}` : null;
       let payload = msg.subarray(payloadOffset, commandEnd);
-      if (session.isPending) {
-        if (commandType !== 0x06) {
-          noteInvalidUdp(rinfo.address, "pending-non-init", packetNow);
-          offset = commandEnd;
-          continue;
-        }
-        if (!isPhotonInitPayload(payload)) {
-          let pendingParsed = null;
-          try {
-            pendingParsed = parsePhotonRequest(payload);
-          } catch {
-            pendingParsed = null;
-          }
-          if (!isExactPendingJoin(pendingParsed)) {
-            noteInvalidUdp(rinfo.address, "pending-non-join", packetNow);
-            offset = commandEnd;
-            continue;
-          }
-          session = promotePendingSession(session, packetNow, actorCredentials(pendingParsed.params.get(249)));
-          if (!session) return;
-          cacheKey = `${session.reliableGeneration || 0}:${channel}:${reliableSeq}`;
-        }
-      }
-      commands.push(makeAck(channel, reliableSeq, sentTime));
       let fragment = null;
       if (commandType === 0x08) {
         fragment = parseReliableFragmentCommand(msg, offset, commandEnd, channel, reliableSeq);
@@ -11622,17 +10319,15 @@ async function handleUdp(port, socket, msg, rinfo) {
 }
 
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
-console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
+console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
-console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms detachedTtl=${DETACHED_SESSION_TTL_MS}ms newEndpoints=${NEW_ENDPOINTS_PER_IP}/${NEW_ENDPOINT_WINDOW_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms quarantine=${QUARANTINE_SHORT_MS}/${QUARANTINE_REPEAT_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
+console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
 if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
-const transportSecurityInterval = setInterval(() => maybePruneTransportSecurity(Date.now()), SESSION_SECURITY_SWEEP_MS);
-if (typeof transportSecurityInterval.unref === "function") transportSecurityInterval.unref();
 const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREASURY_POLL_MS);
 if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
 const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
