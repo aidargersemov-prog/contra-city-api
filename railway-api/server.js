@@ -8,7 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-16-origin-load-shed-audit-v48";
+const API_BUILD_ID = "railway-api-2026-07-20-workshop-prices-ammo-v49";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -680,14 +680,14 @@ const canonicalShopWeaponStats = {
   ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
   ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
 
-  hg_taurus: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
-  hg_usp: { rap: 205, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
-  hg_desertb01: { rap: 280, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
-  hg_desert: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
+  hg_taurus: { rap: 460, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
+  hg_usp: { rap: 240, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
+  hg_desertb01: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
+  hg_desert: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
   hg_glockb01_s: { rap: 150, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
 
   mg_assaultrifle02: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26 },
+  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
   mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 30, ammo_tot: 180, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_aug5_o: { rap: 135, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
   mg_aug4_o: { rap: 130, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
@@ -717,7 +717,7 @@ const canonicalShopWeaponStats = {
     wsp: 15,
     shake: 1
   },
-  sg_spas: { rap: 650, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
+  sg_spas: { rap: 860, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
 
   rl_m202a1: {
     desc: "Карающая длань Четырех Вождей Красного Фронта.",
@@ -745,12 +745,12 @@ const canonicalShopWeaponStats = {
   gl_milkor: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 30, smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48 },
   gl_grenadelauncher03: { rap: 880, rt: 4000, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 5, krit: 4, ammo: 3, ammo_tot: 18, smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62 },
   rl_rpg7b02: { rap: 900, rt: 2967, lt: 1150, vel: 65, rad: 28, ang: 0, dev: 6, krit: 4, ammo: 1, ammo_tot: 9, smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78 },
-  gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50 },
+  gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 36, smaxdam: 56, mmindam: 55, mmaxdam: 68, lmindam: 56, lmaxdam: 75 },
 
-  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 42, smaxdam: 58, mmindam: 48, mmaxdam: 66, lmindam: 54, lmaxdam: 74 },
-  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 54, smaxdam: 72, mmindam: 62, mmaxdam: 82, lmindam: 70, lmaxdam: 88 },
-  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 50, smaxdam: 68, mmindam: 58, mmaxdam: 78, lmindam: 66, lmaxdam: 84 },
-  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 46, smaxdam: 62, mmindam: 54, mmaxdam: 72, lmindam: 62, lmaxdam: 82 }
+  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
+  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
+  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
+  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 }
 };
 
 function withCanonicalShopWeaponStats(item) {
@@ -832,9 +832,28 @@ function scaledStat(value, multiplier, fallback = 0) {
   return Math.max(0, Math.round(numericField(value, fallback) * multiplier));
 }
 
+const workshopPriceOverrides = Object.freeze({
+  73: 25,  // Вождь
+  75: 15,  // Шершень
+  80: 25,  // Повстанец
+  104: 25, // Ворчун
+  105: 25, // Скиф
+  107: 25, // Вымпел
+  108: 30, // Палач
+  109: 15  // Советник
+});
+
+const workshopAmmoOverrides = Object.freeze({
+  80: Object.freeze({ ammo: 35, ammo_tot: 206 }),   // Повстанец
+  104: Object.freeze({ ammo: 5, ammo_tot: 14 }),    // Ворчун
+  105: Object.freeze({ ammo: 16, ammo_tot: 48 }),   // Скиф
+  107: Object.freeze({ ammo: 8, ammo_tot: 41 }),    // Вымпел
+  109: Object.freeze({ ammo: 3, ammo_tot: 17 })     // Советник
+});
+
 function stableWorkshopPrice(weaponId) {
   const id = Math.max(0, Math.trunc(numericField(weaponId, 0)));
-  return 10 + ((id * 17 + 11) % 31);
+  return workshopPriceOverrides[id] ?? (10 + ((id * 17 + 11) % 31));
 }
 
 const workshopUpgradeTextFallbacks = {
@@ -933,6 +952,11 @@ function upgradedWeaponItem(item) {
     if (!enabled) continue;
     upgraded[minKey] = scaledStat(base[minKey], 1.1, 0);
     upgraded[maxKey] = Math.max(upgraded[minKey], scaledStat(base[maxKey], 1.1, 0));
+  }
+  const ammoOverride = workshopAmmoOverrides[weaponId];
+  if (ammoOverride) {
+    upgraded.ammo = ammoOverride.ammo;
+    upgraded.ammo_tot = ammoOverride.ammo_tot;
   }
   return upgraded;
 }
