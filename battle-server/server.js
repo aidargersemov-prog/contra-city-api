@@ -107,7 +107,7 @@ const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
 const NORMALIZE_WEAPON_RAPIDITY = process.env.NORMALIZE_WEAPON_RAPIDITY === "1";
 const SHOT_THROTTLE_SLACK_MS = Math.max(0, Number(process.env.SHOT_THROTTLE_SLACK_MS || 20));
 const COMPLEX_RELOAD_AMMO_CLIP_MS = Math.max(1, Number(process.env.COMPLEX_RELOAD_AMMO_CLIP_MS || 1000));
-const REMINGTON_FIRST_RELOAD_TICK_MS = Math.max(1, Number(process.env.REMINGTON_FIRST_RELOAD_TICK_MS || 700));
+const REMINGTON_FIRST_RELOAD_TICK_MS = Math.max(1, Number(process.env.REMINGTON_FIRST_RELOAD_TICK_MS || 400));
 const ENABLE_MAP_PICKUPS = process.env.ENABLE_MAP_PICKUPS !== "0";
 const MAP_PICKUPS_IN_GAMESTATE = process.env.MAP_PICKUPS_IN_GAMESTATE === "1";
 const ITEM_RESPAWN_MS = Math.max(0, Number(process.env.ITEM_RESPAWN_MS || 15000));
