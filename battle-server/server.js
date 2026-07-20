@@ -10,7 +10,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-20-remington-reload-ready-400ms-test-v272";
+const BUILD_ID = "battle-server-2026-07-20-transport-recovery-remington-v273";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -89,7 +89,16 @@ const OUTBOUND_RELIABLE_INITIAL_RTO_MS = Math.max(50, Number(process.env.OUTBOUN
 const OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE || 5));
 const OUTBOUND_RELIABLE_DISCONNECT_MS = Math.max(1000, Number(process.env.OUTBOUND_RELIABLE_DISCONNECT_MS || 10000));
 const OUTBOUND_RELIABLE_SWEEP_MS = Math.max(25, Number(process.env.OUTBOUND_RELIABLE_SWEEP_MS || 50));
-const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 15000));
+const OUTBOUND_RELIABLE_RECOVERY_MS = Math.max(10000, Number(process.env.OUTBOUND_RELIABLE_RECOVERY_MS || 60000));
+const OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS || 16));
+const OUTBOUND_RELIABLE_RETRY_MAX_RTO_MS = Math.max(OUTBOUND_RELIABLE_INITIAL_RTO_MS, Number(process.env.OUTBOUND_RELIABLE_RETRY_MAX_RTO_MS || 5000));
+const OUTBOUND_RELIABLE_PENDING_MAX = Math.max(128, Number(process.env.OUTBOUND_RELIABLE_PENDING_MAX || 2048));
+const RELIABLE_RESPONSE_CACHE_TTL_MS = Math.max(1000, Number(process.env.RELIABLE_RESPONSE_CACHE_TTL_MS || 60000));
+const RELIABLE_RESPONSE_CACHE_MAX = Math.max(128, Number(process.env.RELIABLE_RESPONSE_CACHE_MAX || 4096));
+const RELIABLE_REPLAY_LOG_INTERVAL_MS = Math.max(100, Number(process.env.RELIABLE_REPLAY_LOG_INTERVAL_MS || 1000));
+const INBOUND_RELIABLE_PENDING_MAX = Math.max(32, Number(process.env.INBOUND_RELIABLE_PENDING_MAX || 2048));
+const API_REQUEST_TIMEOUT_MS = Math.max(1000, Number(process.env.API_REQUEST_TIMEOUT_MS || 8000));
+const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 60000));
 const ENET_FRAGMENT_TRACE = process.env.ENET_FRAGMENT_TRACE !== "0";
 const ENET_MAX_FRAGMENT_COUNT = Math.max(1, Number(process.env.ENET_MAX_FRAGMENT_COUNT || 128));
 const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX_FRAGMENT_TOTAL_BYTES || 65536));
@@ -764,7 +773,8 @@ function findNatRebindSession(port, msg, rinfo, now = Date.now()) {
     if (Number(candidate.port) !== Number(port)) continue;
     if (Number(candidate.peerId) !== Number(incomingPeerId)) continue;
     if (Number(candidate.challenge) !== Number(incomingChallenge)) continue;
-    if (!candidate.room || !candidate.actorId || !candidate.spawned) continue;
+    if (!candidate.seenVerify && candidate.verifySeq == null) continue;
+    if (Number(candidate.transportGeneration || 0) !== Number(candidate.reliableGeneration || 0)) continue;
     if (now - numberOr(candidate.lastSeenAt, 0) > ENET_NAT_REBIND_MAX_IDLE_MS) continue;
     matches.push(candidate);
     if (matches.length > 1) return null;
@@ -784,7 +794,7 @@ function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
   refreshSessionReliableEndpoint(session, socket, rinfo);
-  console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0}`);
+  console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0} generation=${session.transportGeneration || 0}`);
   return session;
 }
 
@@ -850,12 +860,148 @@ function makeUnreliable(lastReliableSeq, unreliableSeq, payload, channel = 0) {
 }
 
 function cacheReliableResponse(session, cacheKey, reliableCommands) {
+  if (!(session.reliableResponses instanceof Map)) session.reliableResponses = new Map();
+  const now = Date.now();
+  reliableCommands.cachedAt = now;
+  reliableCommands.expiresAt = now + RELIABLE_RESPONSE_CACHE_TTL_MS;
   session.reliableResponses.set(cacheKey, reliableCommands);
-  while (session.reliableResponses.size > 128) {
+  for (const [key, cached] of session.reliableResponses.entries()) {
+    if (Number(cached?.expiresAt || 0) > now) continue;
+    session.reliableResponses.delete(key);
+  }
+  while (session.reliableResponses.size > RELIABLE_RESPONSE_CACHE_MAX) {
     const firstKey = session.reliableResponses.keys().next().value;
     session.reliableResponses.delete(firstKey);
   }
   return reliableCommands;
+}
+
+function getCachedReliableResponse(session, cacheKey) {
+  const cached = session?.reliableResponses?.get?.(cacheKey);
+  if (!cached) return null;
+  if (Number(cached.expiresAt || 0) <= Date.now()) {
+    session.reliableResponses.delete(cacheKey);
+    return null;
+  }
+  return cached;
+}
+
+function logReliableReplay(session, channel, reliableSeq, cachedCount, details = "") {
+  if (!(session.reliableReplayLogState instanceof Map)) session.reliableReplayLogState = new Map();
+  const key = normalizeChannelId(channel, 0);
+  const now = Date.now();
+  const state = session.reliableReplayLogState.get(key) || { lastAt: 0, suppressed: 0 };
+  if (now - state.lastAt < RELIABLE_REPLAY_LOG_INTERVAL_MS) {
+    state.suppressed += 1;
+    session.reliableReplayLogState.set(key, state);
+    return;
+  }
+  const suppressed = state.suppressed > 0 ? ` suppressed=${state.suppressed}` : "";
+  console.log(`[state] reliable replay actor=${session?.actorId || 0} channel=${key} seq=${Number(reliableSeq) >>> 0} cached=${cachedCount}${suppressed}${details}`);
+  session.reliableReplayLogState.set(key, { lastAt: now, suppressed: 0 });
+}
+
+function reliableSequenceCompare(left, right) {
+  const a = Number(left) >>> 0;
+  const b = Number(right) >>> 0;
+  if (a === b) return 0;
+  return ((a - b) >>> 0) < 0x80000000 ? 1 : -1;
+}
+
+function nextReliableSequence(sequence) {
+  return ((Number(sequence) >>> 0) + 1) >>> 0;
+}
+
+function ensureInboundReliableChannel(session, channel) {
+  if (!(session.inboundReliableChannels instanceof Map)) session.inboundReliableChannels = new Map();
+  const targetChannel = normalizeChannelId(channel, 0);
+  let state = session.inboundReliableChannels.get(targetChannel);
+  if (!state) {
+    state = { expectedSeq: 1, pending: new Map(), running: false };
+    session.inboundReliableChannels.set(targetChannel, state);
+  }
+  return state;
+}
+
+function prepareInboundReliableRequest(request) {
+  if (request.completion) return request;
+  request.completion = new Promise((resolve, reject) => {
+    request.resolve = resolve;
+    request.reject = reject;
+  });
+  return request;
+}
+
+async function drainInboundReliableChannel(session, channel, state) {
+  if (state.running) return;
+  state.running = true;
+  try {
+    while (true) {
+      const expected = Number(state.expectedSeq) >>> 0;
+      const request = state.pending.get(expected);
+      if (!request) break;
+      state.pending.delete(expected);
+      let result = [];
+      let failure = null;
+      try {
+        result = await request.execute();
+      } catch (error) {
+        failure = error;
+      }
+      state.expectedSeq = nextReliableSequence(request.endSeq);
+      if (failure) {
+        request.reject?.(failure);
+        try {
+          request.onError?.(failure);
+        } catch (error) {
+          console.log(`[guard] inbound-reliable-error-handler actor=${session?.actorId || 0} channel=${channel} reason=${error.message}`);
+        }
+      } else {
+        request.resolve?.(result);
+        try {
+          request.onComplete?.(result);
+        } catch (error) {
+          console.log(`[guard] inbound-reliable-complete-handler actor=${session?.actorId || 0} channel=${channel} reason=${error.message}`);
+        }
+      }
+    }
+  } finally {
+    state.running = false;
+    const expected = Number(state.expectedSeq) >>> 0;
+    if (state.pending.has(expected)) {
+      Promise.resolve().then(() => drainInboundReliableChannel(session, channel, state));
+    }
+  }
+}
+
+function enqueueInboundReliableRequest(session, rawRequest) {
+  const request = prepareInboundReliableRequest(rawRequest);
+  const channel = normalizeChannelId(request.channel, 0);
+  const state = ensureInboundReliableChannel(session, channel);
+  request.startSeq = Number(request.startSeq) >>> 0;
+  request.endSeq = Number(request.endSeq ?? request.startSeq) >>> 0;
+
+  if (reliableSequenceCompare(request.startSeq, state.expectedSeq) < 0) {
+    request.resolve?.([]);
+    return { status: "stale", completion: request.completion, request };
+  }
+  if (state.pending.has(request.startSeq)) {
+    const existing = state.pending.get(request.startSeq);
+    request.resolve?.([]);
+    return { status: "duplicate", completion: existing.completion, request: existing };
+  }
+  if (state.pending.size >= INBOUND_RELIABLE_PENDING_MAX) {
+    const error = new Error(`inbound reliable pending overflow channel=${channel} size=${state.pending.size}`);
+    request.reject?.(error);
+    return { status: "overflow", completion: request.completion, request };
+  }
+
+  const ready = reliableSequenceCompare(request.startSeq, state.expectedSeq) === 0 && !state.running;
+  state.pending.set(request.startSeq, request);
+  drainInboundReliableChannel(session, channel, state).catch((error) => {
+    console.log(`[guard] inbound-reliable-drain actor=${session?.actorId || 0} channel=${channel} reason=${error.message}`);
+  });
+  return { status: ready ? "ready" : "buffered", completion: request.completion, request };
 }
 
 function commandBytes(commands) {
@@ -943,6 +1089,14 @@ function ensureOutboundReliableMap(session) {
   return session.outboundReliable;
 }
 
+function ensureOutboundReliableRecoveryMap(session) {
+  if (!session) return null;
+  if (!(session.outboundReliableRecoveryByChannel instanceof Map)) {
+    session.outboundReliableRecoveryByChannel = new Map();
+  }
+  return session.outboundReliableRecoveryByChannel;
+}
+
 function outboundReliableKey(channel, reliableSeq) {
   return `${normalizeChannelId(channel, 0)}:${Number(reliableSeq) >>> 0}`;
 }
@@ -979,6 +1133,14 @@ function trackOutboundReliableCommands(socket, rinfo, session, commands) {
       existing.lastSentAt = now;
       continue;
     }
+    if (pending.size >= OUTBOUND_RELIABLE_PENDING_MAX) {
+      if (!session.outboundReliableOverflowAt) {
+        session.outboundReliableOverflowAt = now;
+        console.log(`[warn] reliable pending overflow actor=${session.actorId || 0} size=${pending.size} max=${OUTBOUND_RELIABLE_PENDING_MAX}`);
+      }
+      continue;
+    }
+    const recovery = ensureOutboundReliableRecoveryMap(session)?.get(info.channel);
     pending.set(key, {
       ...info,
       command: Buffer.from(command),
@@ -988,6 +1150,7 @@ function trackOutboundReliableCommands(socket, rinfo, session, commands) {
       lastSentAt: now,
       sentCount: 1,
       roundTripTimeout: outboundReliableRto(session),
+      recoveryStartedAt: Number(recovery?.startedAt || 0),
     });
   }
 }
@@ -1005,6 +1168,8 @@ function acknowledgeOutboundReliable(session, channel, reliableSeq) {
   const previousVariance = Math.max(0, numberOr(session.outboundRoundTripVariance, 0));
   session.outboundRoundTripVariance = Math.round(previousVariance * 0.75 + Math.abs(previousRtt - sample) * 0.25);
   session.outboundRoundTripTime = Math.round(previousRtt * 0.875 + sample * 0.125);
+  const channelPending = Array.from(pending.values()).some((candidate) => Number(candidate.channel) === Number(channel));
+  if (!channelPending) ensureOutboundReliableRecoveryMap(session)?.delete(normalizeChannelId(channel, 0));
   if (DEBUG_PACKETS) {
     console.log(`[ack] actor=${session.actorId || 0} channel=${channel} seq=${reliableSeq} sample=${sample}ms pending=${pending.size}`);
   }
@@ -1014,57 +1179,80 @@ function acknowledgeOutboundReliable(session, channel, reliableSeq) {
 function clearOutboundReliableState(session) {
   if (!session) return;
   session.outboundReliable = new Map();
+  session.outboundReliableRecoveryByChannel = new Map();
+  session.outboundReliableOverflowAt = 0;
   session.outboundRoundTripTime = OUTBOUND_RELIABLE_INITIAL_RTO_MS;
   session.outboundRoundTripVariance = 0;
 }
 
-function sendOutboundReliableRetry(session, entry) {
-  if (!session || !entry?.socket || !entry?.rinfo || !entry.command) return false;
-  const sentTime = photonNow();
-  const packet = Buffer.concat([
-    makeHeader(session.peerId, 1, sentTime, session.challenge),
-    entry.command,
-  ]);
-  try {
-    entry.socket.send(packet, entry.rinfo.port, entry.rinfo.address);
-  } catch (error) {
-    console.log(`[warn] reliable-retry failed actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} reason=${error.message}`);
-    return false;
-  }
+function expireTransportSession(session, reason, entry = null) {
+  if (!session || session.transportDisconnected) return false;
+  session.transportDisconnected = true;
+  const detail = entry
+    ? ` channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${Date.now() - entry.firstSentAt}ms`
+    : "";
+  console.log(`[state] transport expired actor=${session.actorId || 0} player=${session.playerId || "unknown"} reason=${reason}${detail}`);
+  detachMasterSession(session, reason);
+  detachSessionFromRoom(session, reason);
+  if (session.sessionId && sessions.get(session.sessionId) === session) sessions.delete(session.sessionId);
   return true;
+}
+
+function beginOutboundReliableChannelRecovery(session, entry, now) {
+  const recoveryByChannel = ensureOutboundReliableRecoveryMap(session);
+  const channel = normalizeChannelId(entry.channel, 0);
+  let recovery = recoveryByChannel.get(channel);
+  if (!recovery) {
+    recovery = { startedAt: now, lastLoggedAt: now };
+    recoveryByChannel.set(channel, recovery);
+    const transportIdle = Math.max(0, now - numberOr(session.lastSeenAt, 0));
+    console.log(`[recovery] reliable-channel actor=${session.actorId || 0} channel=${channel} seq=${entry.reliableSeq} pending=${session.outboundReliable?.size || 0} transportIdle=${transportIdle}ms hard=${OUTBOUND_RELIABLE_RECOVERY_MS}ms`);
+  }
+  entry.recoveryStartedAt = Number(recovery.startedAt || now);
+  return recovery;
 }
 
 function runOutboundReliableRetries() {
   const now = Date.now();
   const expiredSessions = new Map();
+  let retryBudget = OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS;
   for (const session of sessions.values()) {
     const pending = session?.outboundReliable;
     if (!(pending instanceof Map) || pending.size <= 0) continue;
-    for (const [key, entry] of pending.entries()) {
+    const dueEntries = [];
+    for (const entry of pending.values()) {
       if (now - entry.lastSentAt <= entry.roundTripTimeout) continue;
-      if (
+      const normalRetryWindowExpired =
         entry.sentCount > OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE ||
-        now - entry.firstSentAt > OUTBOUND_RELIABLE_DISCONNECT_MS
-      ) {
-        pending.delete(key);
-        if (!expiredSessions.has(session)) expiredSessions.set(session, entry);
-        continue;
+        now - entry.firstSentAt > OUTBOUND_RELIABLE_DISCONNECT_MS;
+      if (normalRetryWindowExpired) {
+        const recovery = beginOutboundReliableChannelRecovery(session, entry, now);
+        if (now - recovery.startedAt > OUTBOUND_RELIABLE_RECOVERY_MS) {
+          if (!expiredSessions.has(session)) expiredSessions.set(session, entry);
+          break;
+        }
       }
-      if (!sendOutboundReliableRetry(session, entry)) continue;
+      if (retryBudget > 0) dueEntries.push(entry);
+      if (dueEntries.length >= retryBudget) break;
+    }
+    if (expiredSessions.has(session) || dueEntries.length <= 0) continue;
+    const retryCommands = dueEntries.map((entry) => entry.command);
+    const sent = sendPacket(session.socket, session.rinfo, session, retryCommands);
+    if (!sent) continue;
+    for (const entry of dueEntries) {
       entry.sentCount += 1;
       entry.lastSentAt = now;
-      entry.roundTripTimeout *= 2;
-      console.log(`[retry] reliable actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} type=${entry.commandType} count=${entry.sentCount} next=${entry.roundTripTimeout}ms pending=${pending.size}`);
+      entry.roundTripTimeout = Math.min(
+        OUTBOUND_RELIABLE_RETRY_MAX_RTO_MS,
+        Math.max(OUTBOUND_RELIABLE_INITIAL_RTO_MS, entry.roundTripTimeout * 2),
+      );
     }
+    retryBudget -= dueEntries.length;
+    console.log(`[retry] reliable-batch actor=${session.actorId || 0} commands=${dueEntries.length} pending=${pending.size} budget=${retryBudget} seq=${dueEntries.map((entry) => `${entry.channel}:${entry.reliableSeq}`).join(",")}`);
   }
 
   for (const [session, entry] of expiredSessions.entries()) {
-    if (session.transportDisconnected) continue;
-    session.transportDisconnected = true;
-    console.log(`[state] reliable timeout actor=${session.actorId || 0} channel=${entry.channel} seq=${entry.reliableSeq} count=${entry.sentCount} age=${now - entry.firstSentAt}ms`);
-    detachMasterSession(session, "reliable-timeout");
-    detachSessionFromRoom(session, "reliable-timeout");
-    if (session.sessionId) sessions.delete(session.sessionId);
+    expireTransportSession(session, "reliable-recovery-exhausted", entry);
   }
 }
 
@@ -1180,6 +1368,7 @@ function addReliableFragment(session, fragment) {
 }
 
 function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
+  if (!socket || !rinfo || !session || !Array.isArray(commands) || commands.length === 0) return false;
   const outgoingCommands = fragmentOutgoingReliableCommands(session, commands);
   const sentTime = photonNow();
   const buildPacket = (packetCommands) => Buffer.concat([
@@ -1190,22 +1379,28 @@ function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
 
   if (MAX_UDP_PACKET_BYTES > 0 && outgoingCommands.length > 1 && packet.length > MAX_UDP_PACKET_BYTES) {
     let chunk = [];
+    let allSent = true;
     for (const command of outgoingCommands) {
       const nextChunk = [...chunk, command];
       if (chunk.length > 0 && buildPacket(nextChunk).length > MAX_UDP_PACKET_BYTES) {
-        sendPacket(socket, rinfo, session, chunk, peerIdOverride);
+        allSent = sendPacket(socket, rinfo, session, chunk, peerIdOverride) && allSent;
         chunk = [command];
       } else {
         chunk = nextChunk;
       }
     }
     if (chunk.length > 0) {
-      sendPacket(socket, rinfo, session, chunk, peerIdOverride);
+      allSent = sendPacket(socket, rinfo, session, chunk, peerIdOverride) && allSent;
     }
-    return;
+    return allSent;
   }
 
-  socket.send(packet, rinfo.port, rinfo.address);
+  try {
+    socket.send(packet, rinfo.port, rinfo.address);
+  } catch (error) {
+    console.log(`[send] failed to=${rinfo.address}:${rinfo.port} bytes=${packet.length} reason=${error.message}`);
+    return false;
+  }
   trackOutboundReliableCommands(socket, rinfo, session, outgoingCommands);
   const ackOnly = outgoingCommands.every((command) => command[0] === 0x01);
   if (LOG_SEND_PACKETS || (!ackOnly && MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES)) {
@@ -1214,6 +1409,7 @@ function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
   if (MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES) {
     console.log(`[warn] udp-packet-large bytes=${packet.length} max=${MAX_UDP_PACKET_BYTES} cmds=${outgoingCommands.length}`);
   }
+  return true;
 }
 
 function nextReliableSeqForSession(session, channel = 0) {
@@ -1244,7 +1440,7 @@ function nextUnreliableSeqForSession(session, channel = 0) {
 }
 
 function sendReliablePayload(socket, rinfo, session, payload, channel = 0) {
-  sendPacket(socket, rinfo, session, makeReliableCommandsForPayload(session, payload, channel));
+  return sendPacket(socket, rinfo, session, makeReliableCommandsForPayload(session, payload, channel));
 }
 
 function reliableChannelForSession(session, fallback = 0, options = {}) {
@@ -3513,30 +3709,22 @@ async function profileForJoin(incomingActor, options = {}) {
   const cached = cachedPlayerProfile(incomingActor);
   if (cached && !options.forceRefresh) return { profile: cached, source: "cache" };
 
-  const loading = options.forceRefresh
-    ? loadPlayerProfile(incomingActor, { forceRefresh: true }).catch((error) => {
-        const { authId } = actorCredentials(incomingActor);
-        console.log(`[profile] refresh failed id=${authId} reason=room-join ${error.message}`);
-        return cached || fallbackPlayerProfile(incomingActor);
-      })
-    : warmPlayerProfile(incomingActor, "room-join");
-  const joinWaitMs = options.forceRefresh && !ALLOW_FALLBACK_JOIN_PROFILE
-    ? JOIN_PROFILE_MAX_WAIT_MS
-    : (options.forceRefresh ? Math.max(PROFILE_JOIN_WAIT_MS, JOIN_SELF_PROFILE_WAIT_MS) : PROFILE_JOIN_WAIT_MS);
-  if (joinWaitMs > 0) {
-    const loaded = await Promise.race([
-      loading.then((profile) => (isFallbackBattleProfile(profile) ? null : { profile, source: "loaded" })),
-      new Promise((resolve) => setTimeout(() => resolve(null), joinWaitMs)),
-    ]);
-    if (loaded?.profile) return loaded;
-  }
-
-  if (cached) return { profile: cached, source: "cache", pendingProfile: loading };
-  return { profile: fallbackPlayerProfile(incomingActor), source: "fallback", pendingProfile: loading };
+  const loaded = options.forceRefresh
+    ? await loadPlayerProfile(incomingActor, { forceRefresh: true })
+    : await warmPlayerProfile(incomingActor, "room-join");
+  if (!isFallbackBattleProfile(loaded)) return { profile: loaded, source: "loaded" };
+  if (cached && !isFallbackBattleProfile(cached)) return { profile: cached, source: "cache" };
+  return { profile: fallbackPlayerProfile(incomingActor), source: "fallback" };
 }
 
 function applyLateProfile(session, profile, incomingActor = null) {
-  if (isFallbackBattleProfile(profile)) return;
+  if (isFallbackBattleProfile(profile)) return false;
+  const battleActive = Boolean(session?.room && (session.gameStateRequested || session.spawned || session.matchStartedAt));
+  if (battleActive) {
+    session.pendingBattleProfile = { profile, incomingActor, stagedAt: Date.now() };
+    console.log(`[profile] late staged actor=${session.actorId || 0} id=${profile.authId} reason=active-battle`);
+    return false;
+  }
   session.loadedProfile = profile;
   session.playerId = profile.authId;
   session.playerAuthKey = profile.authKey || session.playerAuthKey || "";
@@ -3552,18 +3740,41 @@ function applyLateProfile(session, profile, incomingActor = null) {
     session.energy = stats.maxEnergy;
   }
   console.log(`[profile] late ready actor=${session.actorId} id=${profile.authId} name=${profile.name} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} taunts=${selectedTaunts(profile).length} tauntSlots=${selectedTauntSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} armorPct=${stats.modifiers.armorPercent} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)} wearDmg=${formatDamageBonuses(stats.modifiers.damageBonuses)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
+  return true;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+  if (typeof fetch !== "function") return null;
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortFromExternal = () => controller.abort(externalSignal.reason);
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener?.("abort", abortFromExternal, { once: true });
+  const timeout = setTimeout(() => controller.abort(new Error(`api timeout ${timeoutMs}ms`)), timeoutMs);
+  if (typeof timeout.unref === "function") timeout.unref();
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted && !externalSignal?.aborted) {
+      throw new Error(`api timeout ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener?.("abort", abortFromExternal);
+  }
 }
 
 async function fetchApiJson(path) {
   if (!API_BASE_URL || typeof fetch !== "function") return null;
-  const response = await fetch(`${API_BASE_URL}${path}`, { headers: { accept: "application/json" } });
+  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, { headers: { accept: "application/json" } });
   if (!response.ok) throw new Error(`status=${response.status}`);
   return response.json();
 }
 
 async function postApiJson(path, body) {
   if (!API_BASE_URL || typeof fetch !== "function") return null;
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: {
       accept: "application/json",
@@ -3612,6 +3823,13 @@ async function loadPlayerProfile(incomingActor, options = {}) {
     ]);
 
     const info = profilePayload?.info || {};
+    const loadedAuthId = Number(info.u_id || 0);
+    if (!Number.isFinite(loadedAuthId) || loadedAuthId <= 0) {
+      throw new Error("profile-unavailable missing-ccid");
+    }
+    if (Number.isFinite(authId) && authId > 0 && loadedAuthId !== authId) {
+      throw new Error(`profile-ccid-mismatch requested=${authId} loaded=${loadedAuthId}`);
+    }
     const clanPayload = profilePayload?.cl || null;
     const clan = clanPayload
       ? {
@@ -3624,7 +3842,7 @@ async function loadPlayerProfile(incomingActor, options = {}) {
     const personalInventory = parseJsonArray(inventoryPayload?.data?.items);
     const clanInventory = Array.isArray(profilePayload?.clinv) ? profilePayload.clinv : [];
     const profile = {
-      authId: numberOr(info.u_id, authId),
+      authId: loadedAuthId,
       authKey,
       name: stringOr(info.un, process.env.DEFAULT_PLAYER_NAME || "ContraCity"),
       level: numberOr(info.lvl, Number(process.env.DEFAULT_PLAYER_LEVEL || 1)),
@@ -4384,12 +4602,11 @@ function sendReliablePayloadsToSession(targetSession, payloads, channel = 0) {
   const targetChannel = reliableChannelForSession(targetSession, channel);
   const commands = reliablePayloads.flatMap((payload) => makeReliableCommandsForPayload(targetSession, payload, targetChannel));
   try {
-    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
+    return sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
   } catch (error) {
     console.log(`[warn] peer-send failed actor=${targetSession.actorId || "?"} cmds=${commands.length} reason=${error.message}`);
     return false;
   }
-  return true;
 }
 
 function sendReliableToSession(targetSession, payload, channel = 0) {
@@ -4418,12 +4635,11 @@ function sendReliableCommandToSession(targetSession, reliableCommand) {
   const commands = reliableCommandCommands(reliableCommand);
   if (!targetSession?.socket || !targetSession?.rinfo || !commands.length) return false;
   try {
-    sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
+    return sendPacket(targetSession.socket, targetSession.rinfo, targetSession, commands);
   } catch (error) {
     console.log(`[warn] peer-send failed actor=${targetSession.actorId || "?"} seq=${reliableCommand.seqs ?? reliableCommand.seq ?? "?"} reason=${error.message}`);
     return false;
   }
-  return true;
 }
 
 function makeSessionUnreliableCommand(session, payload, channel = 0, options = {}) {
@@ -7955,6 +8171,13 @@ function resetReliableDedupe(session, reason = "reset", options = {}) {
     session.reliableInFlight?.clear?.();
   }
   if (options.bumpGeneration) {
+    for (const channelState of session.inboundReliableChannels?.values?.() || []) {
+      for (const request of channelState.pending?.values?.() || []) {
+        request.reject?.(new Error(`reliable generation reset reason=${reason}`));
+      }
+    }
+    session.inboundReliableChannels = new Map();
+    session.reliableReplayLogState = new Map();
     session.reliableGeneration = (session.reliableGeneration || 0) + 1;
   }
   if (cached || inFlight || fragments || options.bumpGeneration) {
@@ -8207,6 +8430,13 @@ function sameBattleIdentity(left, right) {
   return Boolean(left.remoteKey && right.remoteKey && left.remoteKey === right.remoteKey);
 }
 
+function sameAuthenticatedCcid(left, right) {
+  if (!left || !right || left === right) return false;
+  const leftId = Number(left.playerId || 0);
+  const rightId = Number(right.playerId || 0);
+  return Number.isFinite(leftId) && leftId > 0 && leftId === rightId;
+}
+
 function removeRoomPlayer(room, actorId, playerSession, reason = "leave", options = {}) {
   if (!room?.players || room.players.get(actorId) !== playerSession) return false;
   playerSession.room = room;
@@ -8252,6 +8482,8 @@ function detachSessionFromRoom(session, reason = "leave") {
 function resetTransportForReconnect(session, reason) {
   detachSessionFromRoom(session, reason);
   resetReliableDedupe(session, reason, { bumpGeneration: true });
+  clearOutboundReliableState(session);
+  session.transportGeneration = session.reliableGeneration;
   session.serverSeq = 0;
   session.unreliableSeq = 0;
   session.serverSeqByChannel = new Map();
@@ -8299,20 +8531,44 @@ function removeDuplicatePlayerSessions(room, session) {
 }
 
 function removeDuplicatePlayerSessionsFromAllRooms(session, reason = "duplicate-global") {
-  let removed = 0;
+  const candidates = new Set(sessions.values());
   for (const room of Array.from(rooms.values())) {
     if (!room?.players) continue;
-    for (const [actorId, playerSession] of Array.from(room.players.entries())) {
-      if (!sameBattleIdentity(playerSession, session)) continue;
-      if (removeRoomPlayer(room, actorId, playerSession, reason, { broadcastReason: "stale-leave" })) {
-        removed += 1;
+    for (const playerSession of room.players.values()) candidates.add(playerSession);
+  }
+
+  let removedActors = 0;
+  let removedSessions = 0;
+  for (const candidate of candidates) {
+    if (!sameAuthenticatedCcid(candidate, session)) continue;
+    if (candidate.isMasterSession) continue;
+    if (!isBattleListSession(candidate)) continue;
+    candidate.joinAttemptGeneration = (candidate.joinAttemptGeneration || 0) + 1;
+    candidate.transportDisconnected = true;
+    for (const room of Array.from(rooms.values())) {
+      if (!room?.players) continue;
+      for (const [actorId, playerSession] of Array.from(room.players.entries())) {
+        if (playerSession !== candidate) continue;
+        if (removeRoomPlayer(room, actorId, candidate, reason, { broadcastReason: "stale-leave" })) {
+          removedActors += 1;
+        }
       }
     }
+    clearOutboundReliableState(candidate);
+    resetReliableDedupe(candidate, reason, { bumpGeneration: true });
+    candidate.transportGeneration = candidate.reliableGeneration;
+    for (const [sessionId, mappedSession] of Array.from(sessions.entries())) {
+      if (mappedSession === candidate) sessions.delete(sessionId);
+    }
+    candidate.sessionId = null;
+    candidate.socket = null;
+    candidate.rinfo = null;
+    removedSessions += 1;
   }
-  if (removed > 0) {
-    console.log(`[state] duplicate identity cleanup player=${session.playerId || "unknown"} removed=${removed}`);
+  if (removedSessions > 0) {
+    console.log(`[state] duplicate ccid cleanup player=${session.playerId || "unknown"} sessions=${removedSessions} actors=${removedActors}`);
   }
-  return removed;
+  return removedSessions;
 }
 
 function maybePruneIdleRoomSessions(now = Date.now()) {
@@ -9698,14 +9954,41 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
     }
+    const requestedAuthId = Number(htGet(actorParam, 241)?.value || 0);
+    const requestedAuthKey = String(htGet(actorParam, 240)?.value || "").trim();
+    if (!Number.isFinite(requestedAuthId) || requestedAuthId <= 0 || !requestedAuthKey) {
+      console.log(`[state] room join rejected reason=missing-auth requested=${settings.name}`);
+      return [rawOperationResponse(255, [], -3, "profile-unavailable")];
+    }
+    const joinAttempt = (session.joinAttemptGeneration || 0) + 1;
+    session.joinAttemptGeneration = joinAttempt;
+    const { profile, source: profileSource } = await profileForJoin(actorParam, { forceRefresh: true });
+    if (session.transportDisconnected || session.joinAttemptGeneration !== joinAttempt || !session.sessionId || sessions.get(session.sessionId) !== session) {
+      console.log(`[state] room join rejected reason=join-superseded requested=${settings.name} player=${session.playerId || "unknown"}`);
+      return [rawOperationResponse(255, [], -3, "join-superseded")];
+    }
+    if (isFallbackBattleProfile(profile)) {
+      const requestedCcid = actorCredentials(actorParam).authId;
+      console.log(`[state] room join rejected reason=profile-unavailable requested=${settings.name} player=${requestedCcid}`);
+      return [rawOperationResponse(255, [], -3, "profile-unavailable")];
+    }
+    if (settings.hasFullSettings === false) {
+      const joinRoom = rooms.get(settings.name);
+      if (!joinRoom || (joinRoom.players?.size || 0) <= 0) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
+        console.log(`[state] room join rejected reason=missing-room-after-profile name=${settings.name}`);
+        return [rawOperationResponse(255, [], -17, "room-not-found")];
+      }
+    }
+
     resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
     session.listLobby = false;
     detachSessionFromRoom(session, "rejoin");
-    const { profile, source: profileSource, pendingProfile } = await profileForJoin(actorParam, { forceRefresh: true });
     session.playerId = profile.authId;
     session.playerAuthKey = profile.authKey || actorCredentials(actorParam).authKey || "";
     session.playerName = profile.name;
     session.loadedProfile = profile;
+    session.pendingBattleProfile = null;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
     session.peerWeaponConfirmKeys = new Map();
@@ -9725,23 +10008,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     removeDuplicatePlayerSessionsFromAllRooms(session, "room-join-duplicate");
     session.room = ensureRoom(settings);
     session.roomRaw = makeRoomSettingsRaw(session.room);
-    removeDuplicatePlayerSessions(session.room, session);
     session.actorId = nextRoomActorId(session.room);
     updateActorWireData(session, actorParam, profile, channel);
-    const joinActorId = session.actorId;
-    if (profileSource === "fallback") {
-      (pendingProfile || warmPlayerProfile(actorParam, "late-room-profile")).then((loadedProfile) => {
-        if (sessions.get(key(port, rinfo)) === session && session.actorId === joinActorId) {
-          applyLateProfile(session, loadedProfile, actorParam);
-        }
-      });
-    } else if (profileSource === "cache") {
-      loadPlayerProfile(actorParam, { forceRefresh: true }).then((loadedProfile) => {
-        if (sessions.get(key(port, rinfo)) === session && session.actorId === joinActorId) {
-          applyLateProfile(session, loadedProfile, actorParam);
-        }
-      });
-    }
     const actorListRaw = makeRoomActorListRaw(session.room, session);
     session.knownActorIds = new Set();
     session.actorJoinAnnouncedAt = new Map();
@@ -9754,7 +10022,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     broadcastMasterUserState(session.playerId);
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
-      waitForProfile: profileSource === "fallback",
+      waitForProfile: false,
       incomingActor: actorParam,
     });
     broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
@@ -10060,6 +10328,8 @@ async function handleUdp(port, socket, msg, rinfo) {
       serverSeqByChannel: new Map(),
       unreliableSeqByChannel: new Map(),
       outboundReliable: new Map(),
+      outboundReliableRecoveryByChannel: new Map(),
+      outboundReliableOverflowAt: 0,
       outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
       outboundRoundTripVariance: 0,
       verifySeq: null,
@@ -10106,6 +10376,9 @@ async function handleUdp(port, socket, msg, rinfo) {
       reliableInFlight: new Map(),
       reliableFragments: new Map(),
       reliableGeneration: 0,
+      transportGeneration: 0,
+      inboundReliableChannels: new Map(),
+      reliableReplayLogState: new Map(),
       knownActorIds: new Set(),
       actorJoinAnnouncedAt: new Map(),
       joinActorListIds: new Set(),
@@ -10233,6 +10506,7 @@ async function handleUdp(port, socket, msg, rinfo) {
         offset = commandEnd;
         continue;
       }
+      const reliableCommand = commandType === 0x06 || commandType === 0x08;
       let cacheKey = commandType === 0x06 ? `${session.reliableGeneration || 0}:${channel}:${reliableSeq}` : null;
       let payload = msg.subarray(payloadOffset, commandEnd);
       let fragment = null;
@@ -10245,17 +10519,16 @@ async function handleUdp(port, socket, msg, rinfo) {
         }
         cacheKey = reliableFragmentCacheKey(session, channel, fragment.startSeq);
       }
-      if (cacheKey && session.reliableResponses.has(cacheKey)) {
-        const cached = session.reliableResponses.get(cacheKey);
+      const cachedResponse = cacheKey ? getCachedReliableResponse(session, cacheKey) : null;
+      if (cachedResponse) {
+        const cached = cachedResponse;
         commands.push(...cached);
-        console.log(`[state] reliable replay seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
+        logReliableReplay(session, channel, commandType === 0x08 ? fragment.startSeq : reliableSeq, cached.length, commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : "");
         offset = commandEnd;
         continue;
       }
       if (cacheKey && session.reliableInFlight.has(cacheKey)) {
-        const cached = await session.reliableInFlight.get(cacheKey);
-        commands.push(...cached);
-        console.log(`[state] reliable replay-wait seq=${reliableSeq} cached=${cached.length}${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""}`);
+        logReliableReplay(session, channel, commandType === 0x08 ? fragment.startSeq : reliableSeq, 0, `${commandType === 0x08 ? ` fragmentStart=${fragment.startSeq}` : ""} inFlight=yes`);
         offset = commandEnd;
         continue;
       }
@@ -10289,14 +10562,60 @@ async function handleUdp(port, socket, msg, rinfo) {
 
         const buildReliableCommands = () => buildReliableCommandsForParsedPayload(port, socket, rinfo, session, parsed, payload, channel);
 
-        if (cacheKey) {
+        if (!reliableCommand) {
+          commands.push(...await buildReliableCommands());
+          offset = commandEnd;
+          continue;
+        }
+
+        const startSeq = Number(commandType === 0x08 ? fragment.startSeq : reliableSeq) >>> 0;
+        const endSeq = commandType === 0x08
+          ? ((startSeq + Math.max(1, Number(fragment.fragmentCount) || 1) - 1) >>> 0)
+          : startSeq;
+        const generation = Number(session.reliableGeneration || 0);
+        const execute = () => {
+          const existing = getCachedReliableResponse(session, cacheKey);
+          if (existing) return Promise.resolve(existing);
+          const inFlight = session.reliableInFlight.get(cacheKey);
+          if (inFlight) return inFlight;
           const promise = buildReliableCommands()
             .then((reliableCommands) => cacheReliableResponse(session, cacheKey, reliableCommands))
-            .finally(() => session.reliableInFlight.delete(cacheKey));
+            .finally(() => {
+              if (session.reliableInFlight.get(cacheKey) === promise) session.reliableInFlight.delete(cacheKey);
+            });
           session.reliableInFlight.set(cacheKey, promise);
-          commands.push(...await promise);
-        } else {
-          commands.push(...await buildReliableCommands());
+          return promise;
+        };
+        const queued = enqueueInboundReliableRequest(session, {
+          channel,
+          startSeq,
+          endSeq,
+          cacheKey,
+          execute,
+        });
+        if (queued.status === "ready" || queued.status === "buffered") {
+          queued.request.onComplete = (reliableCommands) => {
+            if (session.transportDisconnected || Number(session.reliableGeneration || 0) !== generation) return;
+            if (!reliableCommands?.length || !session.socket || !session.rinfo) return;
+            sendPacket(session.socket, session.rinfo, session, reliableCommands);
+          };
+          queued.request.onError = (error) => {
+            console.log(`[guard] inbound-reliable-buffered actor=${session.actorId || 0} channel=${channel} seq=${startSeq} reason=${error.message}`);
+          };
+          queued.completion.catch(() => {});
+          if (DEBUG_PACKETS && queued.status === "buffered") {
+            console.log(`[state] reliable buffered actor=${session.actorId || 0} channel=${channel} seq=${startSeq} expected=${ensureInboundReliableChannel(session, channel).expectedSeq}`);
+          }
+        } else if (queued.status === "stale") {
+          const staleCached = getCachedReliableResponse(session, cacheKey);
+          if (staleCached) commands.push(...staleCached);
+          logReliableReplay(session, channel, startSeq, staleCached?.length || 0, " stale=yes");
+        } else if (queued.status === "duplicate") {
+          logReliableReplay(session, channel, startSeq, 0, " pending=yes");
+        } else if (queued.status === "overflow") {
+          queued.completion.catch((error) => {
+            console.log(`[security] inbound reliable overflow actor=${session.actorId || 0} channel=${channel} seq=${startSeq} reason=${error.message}`);
+          });
         }
       } catch (error) {
         console.log(`[parse] ${error.message}`);
@@ -10320,6 +10639,7 @@ async function handleUdp(port, socket, msg, rinfo) {
 
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
+console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms atomicProfileJoin=required`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
@@ -10335,6 +10655,9 @@ if (typeof clanTreasuryInitialPoll.unref === "function") clanTreasuryInitialPoll
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
+  udp.on("error", (error) => {
+    console.log(`[udp:${port}] socket error ${error.stack || error.message}`);
+  });
   udp.on("message", (msg, rinfo) => {
     handleUdp(port, udp, msg, rinfo).catch((error) => {
       console.log(`[udp:${port}] handler failed ${error.stack || error.message}`);
@@ -10373,6 +10696,9 @@ for (const port of PORTS) {
       }
       if (DEBUG_PACKETS) console.log(`[tcp:${port}] ${data.length} bytes`);
     });
+  });
+  tcp.on("error", (error) => {
+    console.log(`[tcp:${port}] server error ${error.stack || error.message}`);
   });
   tcp.maxConnections = Math.max(100, MAX_SESSIONS_TOTAL);
   tcp.listen(port, "0.0.0.0", () => console.log(`[tcp] ${port} listening`));
