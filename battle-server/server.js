@@ -1,6 +1,13 @@
 ﻿const dgram = require("dgram");
 const net = require("net");
 const { TextDecoder } = require("util");
+const { monitorEventLoopDelay } = require("perf_hooks");
+
+function boundedEnvInt(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number(process.env[name]);
+  const value = Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+  return Math.max(min, Math.min(max, value));
+}
 
 const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
   .split(",")
@@ -10,7 +17,7 @@ const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-produ
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-20-transport-recovery-remington-v273";
+const BUILD_ID = "battle-server-2026-07-21-capacity-retry-fairness-v278";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -53,6 +60,7 @@ const MOVE_BROADCAST_UNRELIABLE = process.env.MOVE_BROADCAST_UNRELIABLE !== "0";
 const DEBUG_PACKETS = process.env.DEBUG_PACKETS === "1";
 const DEBUG_MOVE_PACKETS = process.env.DEBUG_MOVE_PACKETS === "1";
 const LOG_SEND_PACKETS = DEBUG_PACKETS || process.env.LOG_SEND_PACKETS === "1";
+const VERBOSE_GAMEPLAY_LOGS = process.env.VERBOSE_GAMEPLAY_LOGS === "1";
 const ENABLE_BATTLE_EXP = process.env.ENABLE_BATTLE_EXP !== "0";
 const BATTLE_EXP_PER_KILL = Math.max(0, Number(process.env.BATTLE_EXP_PER_KILL || 25));
 const DOMINATION_STREAK_KILLS = Math.max(0, Number(process.env.DOMINATION_STREAK_KILLS || 4));
@@ -66,6 +74,7 @@ const DEFAULT_ROOM = process.env.DEFAULT_ROOM || "restore-room";
 const DEFAULT_MAP = process.env.DEFAULT_MAP || "Arena_3lvl";
 const ROOM_SESSION_IDLE_MS = Math.max(0, Number(process.env.ROOM_SESSION_IDLE_MS || 90000));
 const ROOM_SESSION_PRUNE_INTERVAL_MS = Math.max(1000, Number(process.env.ROOM_SESSION_PRUNE_INTERVAL_MS || 5000));
+const ROOM_LIST_COALESCE_MS = Math.max(100, Math.min(250, Number(process.env.ROOM_LIST_COALESCE_MS || 150) || 150));
 const INIT_REPLY = ["callback", "legacy", "both"].includes((process.env.INIT_REPLY || "").toLowerCase())
   ? process.env.INIT_REPLY.toLowerCase()
   : "callback";
@@ -73,7 +82,14 @@ const PUSH_ROOM_LIST_AFTER_INIT = process.env.PUSH_ROOM_LIST_AFTER_INIT === "1";
 const REPLAY_PEER_SPAWNS_AFTER_SELF = process.env.REPLAY_PEER_SPAWNS_AFTER_SELF !== "0";
 const CONFIRM_PEER_SPAWN_AFTER_ISENEMY = process.env.CONFIRM_PEER_SPAWN_AFTER_ISENEMY !== "0";
 const PROFILE_CACHE_TTL_MS = Number(process.env.PROFILE_CACHE_TTL_MS || 30000);
+const PROFILE_CACHE_MAX = boundedEnvInt("PROFILE_CACHE_MAX", 2048);
+const PROFILE_LOAD_CONCURRENCY = boundedEnvInt("PROFILE_LOAD_CONCURRENCY", 16, 1, 64);
+const PROFILE_LOAD_QUEUE_MAX = boundedEnvInt("PROFILE_LOAD_QUEUE_MAX", 1024);
 const CATALOG_CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS || 300000);
+const BATTLE_EVENT_CONCURRENCY = boundedEnvInt("BATTLE_EVENT_CONCURRENCY", 12, 8, 16);
+const BATTLE_EVENT_QUEUE_MAX = boundedEnvInt("BATTLE_EVENT_QUEUE_MAX", 2048, 16);
+const BATTLE_EVENT_TIMEOUT_MS = boundedEnvInt("BATTLE_EVENT_TIMEOUT_MS", 8000, 1000);
+const BATTLE_MOVE_FLUSH_MS = boundedEnvInt("BATTLE_MOVE_FLUSH_MS", 7500, 5000, 10000);
 const PROFILE_JOIN_WAIT_MS = Math.max(0, Number(process.env.PROFILE_JOIN_WAIT_MS || 2500));
 const JOIN_LOADOUT_SLOT_LIMIT = Math.max(1, Math.min(7, Number(process.env.JOIN_LOADOUT_SLOT_LIMIT || 7)));
 const FULL_LOADOUT_SLOT_LIMIT = 7;
@@ -84,7 +100,11 @@ const INCLUDE_JOIN_ACTOR_ECHO_FIELDS = process.env.INCLUDE_JOIN_ACTOR_ECHO_FIELD
 const INCLUDE_ACTOR_IN_GAMESTATE = process.env.INCLUDE_ACTOR_IN_GAMESTATE === "1";
 const INCLUDE_PEERS_IN_GAMESTATE = process.env.INCLUDE_PEERS_IN_GAMESTATE === "1";
 const GAMESTATE_REPEAT_MIN_MS = Math.max(0, Number(process.env.GAMESTATE_REPEAT_MIN_MS || 750));
-const MAX_UDP_PACKET_BYTES = Math.max(0, Number(process.env.MAX_UDP_PACKET_BYTES || 1200));
+const MAX_UDP_PACKET_BYTES = boundedEnvInt("MAX_UDP_PACKET_BYTES", 1200, 128, 1200);
+const UDP_OUTBOX_FLUSH_MS = boundedEnvInt("UDP_OUTBOX_FLUSH_MS", 15, 10, 20);
+const UDP_OUTBOX_MAX_COMMANDS = boundedEnvInt("UDP_OUTBOX_MAX_COMMANDS", 128, 1, 255);
+const UDP_OUTBOX_MAX_BYTES = boundedEnvInt("UDP_OUTBOX_MAX_BYTES", 64 * 1024, MAX_UDP_PACKET_BYTES);
+const RUNTIME_METRICS_INTERVAL_MS = boundedEnvInt("RUNTIME_METRICS_INTERVAL_MS", 5000, 3000, 10000);
 const OUTBOUND_RELIABLE_INITIAL_RTO_MS = Math.max(50, Number(process.env.OUTBOUND_RELIABLE_INITIAL_RTO_MS || 300));
 const OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE = Math.max(1, Number(process.env.OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE || 5));
 const OUTBOUND_RELIABLE_DISCONNECT_MS = Math.max(1000, Number(process.env.OUTBOUND_RELIABLE_DISCONNECT_MS || 10000));
@@ -97,12 +117,15 @@ const RELIABLE_RESPONSE_CACHE_TTL_MS = Math.max(1000, Number(process.env.RELIABL
 const RELIABLE_RESPONSE_CACHE_MAX = Math.max(128, Number(process.env.RELIABLE_RESPONSE_CACHE_MAX || 4096));
 const RELIABLE_REPLAY_LOG_INTERVAL_MS = Math.max(100, Number(process.env.RELIABLE_REPLAY_LOG_INTERVAL_MS || 1000));
 const INBOUND_RELIABLE_PENDING_MAX = Math.max(32, Number(process.env.INBOUND_RELIABLE_PENDING_MAX || 2048));
+const PENDING_RELIABLE_STATE_MAX = boundedEnvInt("PENDING_RELIABLE_STATE_MAX", 32, 4, 256);
 const API_REQUEST_TIMEOUT_MS = Math.max(1000, Number(process.env.API_REQUEST_TIMEOUT_MS || 8000));
 const ENET_NAT_REBIND_MAX_IDLE_MS = Math.max(1000, Number(process.env.ENET_NAT_REBIND_MAX_IDLE_MS || 60000));
-const ENET_FRAGMENT_TRACE = process.env.ENET_FRAGMENT_TRACE !== "0";
+const ENET_FRAGMENT_TRACE = process.env.ENET_FRAGMENT_TRACE === "1";
 const ENET_MAX_FRAGMENT_COUNT = Math.max(1, Number(process.env.ENET_MAX_FRAGMENT_COUNT || 128));
 const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX_FRAGMENT_TOTAL_BYTES || 65536));
-const SHOT_LOCAL_RESPONSE_TRACE = process.env.SHOT_LOCAL_RESPONSE_TRACE !== "0";
+const PENDING_FRAGMENT_COUNT_MAX = boundedEnvInt("PENDING_FRAGMENT_COUNT_MAX", 16, 1, ENET_MAX_FRAGMENT_COUNT);
+const PENDING_FRAGMENT_TOTAL_BYTES_MAX = boundedEnvInt("PENDING_FRAGMENT_TOTAL_BYTES_MAX", 16384, 1024, ENET_MAX_FRAGMENT_TOTAL_BYTES);
+const SHOT_LOCAL_RESPONSE_TRACE = process.env.SHOT_LOCAL_RESPONSE_TRACE === "1";
 const ACTOR_JOIN_MAX_PACKET_BYTES = Math.max(0, Number(process.env.ACTOR_JOIN_MAX_PACKET_BYTES || 1160));
 const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 0));
 const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
@@ -158,35 +181,116 @@ const ROOM_INTERPOLATION_MODE = Math.max(0, Math.min(255, Number.isFinite(ROOM_I
 const ADD_MOVE_ROTATION_KEY = process.env.ADD_MOVE_ROTATION_KEY !== "0";
 const MAX_UDP_DATAGRAM_BYTES = Math.max(512, Number(process.env.MAX_UDP_DATAGRAM_BYTES || 4096));
 const MAX_ENET_COMMANDS_PER_PACKET = Math.max(1, Number(process.env.MAX_ENET_COMMANDS_PER_PACKET || 64));
-// Compatibility-first defaults: one public/NAT address may represent many real players,
-// and every client maintains several Photon endpoints at the same time.
-const MAX_SESSIONS_TOTAL = Math.max(50000, Number(process.env.MAX_SESSIONS_TOTAL || 50000));
-const MAX_SESSIONS_PER_IP = Math.max(512, Number(process.env.MAX_SESSIONS_PER_IP || 512));
-const UDP_RATE_WINDOW_MS = Math.max(1000, Number(process.env.UDP_RATE_WINDOW_MS || 10000));
-const UDP_RATE_PACKETS_PER_IP = Math.max(100000, Number(process.env.UDP_RATE_PACKETS_PER_IP || 100000));
-const UDP_RATE_BYTES_PER_IP = Math.max(512 * 1024 * 1024, Number(process.env.UDP_RATE_BYTES_PER_IP || 512 * 1024 * 1024));
-const TCP_MAX_CONNECTIONS_PER_IP = Math.max(128, Number(process.env.TCP_MAX_CONNECTIONS_PER_IP || 128));
-const TCP_IDLE_TIMEOUT_MS = Math.max(120000, Number(process.env.TCP_IDLE_TIMEOUT_MS || 120000));
-const TCP_MAX_BYTES_PER_CONNECTION = Math.max(64 * 1024 * 1024, Number(process.env.TCP_MAX_BYTES_PER_CONNECTION || 64 * 1024 * 1024));
+// Every limit is deliberately reducible through env so small hosts can fail closed.
+// Defaults still allow 100 players behind one NAT with several Photon endpoints each.
+const MAX_SESSIONS_TOTAL = boundedEnvInt("MAX_SESSIONS_TOTAL", 8192);
+const MAX_SESSIONS_PER_IP = boundedEnvInt("MAX_SESSIONS_PER_IP", 512);
+const MAX_PENDING_SESSIONS_TOTAL = boundedEnvInt("MAX_PENDING_SESSIONS_TOTAL", 4096);
+const MAX_PENDING_SESSIONS_PER_IP = boundedEnvInt("MAX_PENDING_SESSIONS_PER_IP", 512);
+const PENDING_SESSION_TTL_MS = boundedEnvInt("PENDING_SESSION_TTL_MS", 5000, 250);
+const PREAUTH_SESSION_TTL_MS = boundedEnvInt("PREAUTH_SESSION_TTL_MS", 30000, 1000);
+const SESSION_SECURITY_SWEEP_MS = boundedEnvInt("SESSION_SECURITY_SWEEP_MS", 500, 50);
+const SESSION_SECURITY_SWEEP_LIMIT = boundedEnvInt("SESSION_SECURITY_SWEEP_LIMIT", 512);
+const UDP_RATE_WINDOW_MS = boundedEnvInt("UDP_RATE_WINDOW_MS", 10000, 250);
+const UDP_RATE_PACKETS_PER_IP = boundedEnvInt("UDP_RATE_PACKETS_PER_IP", 50000);
+const UDP_RATE_BYTES_PER_IP = boundedEnvInt("UDP_RATE_BYTES_PER_IP", 128 * 1024 * 1024);
+const UDP_RATE_BUCKET_CAP = boundedEnvInt("UDP_RATE_BUCKET_CAP", 65536);
+const UDP_RATE_SWEEP_MS = boundedEnvInt("UDP_RATE_SWEEP_MS", 1000, 100);
+const UDP_RATE_SWEEP_LIMIT = boundedEnvInt("UDP_RATE_SWEEP_LIMIT", 1024);
+const INVALID_PACKETS_PER_IP = boundedEnvInt("INVALID_PACKETS_PER_IP", 64);
+const INVALID_WINDOW_MS = boundedEnvInt("INVALID_WINDOW_MS", 10000, 250);
+const QUARANTINE_SHORT_MS = boundedEnvInt("QUARANTINE_SHORT_MS", 2000, 100);
+const QUARANTINE_REPEAT_MS = boundedEnvInt("QUARANTINE_REPEAT_MS", 10000, QUARANTINE_SHORT_MS);
+const SECURITY_IP_STATE_CAP = boundedEnvInt("SECURITY_IP_STATE_CAP", 65536);
+const AUTH_OPERATION_WINDOW_MS = boundedEnvInt("AUTH_OPERATION_WINDOW_MS", 10000, 250);
+const AUTH_OPERATIONS_PER_SESSION = boundedEnvInt("AUTH_OPERATIONS_PER_SESSION", 2000);
+const AUTH_OPERATIONS_PER_ACCOUNT = boundedEnvInt("AUTH_OPERATIONS_PER_ACCOUNT", 5000);
+const ACCOUNT_OPERATION_BUCKET_CAP = boundedEnvInt("ACCOUNT_OPERATION_BUCKET_CAP", 16384);
+const TCP_MAX_CONNECTIONS_PER_IP = boundedEnvInt("TCP_MAX_CONNECTIONS_PER_IP", 512);
+const TCP_IDLE_TIMEOUT_MS = boundedEnvInt("TCP_IDLE_TIMEOUT_MS", 120000, 1000);
+const TCP_MAX_BYTES_PER_CONNECTION = boundedEnvInt("TCP_MAX_BYTES_PER_CONNECTION", 64 * 1024 * 1024, 1024);
 
 const sessions = new Map();
+const pendingSessions = new Map();
 const rooms = new Map();
 const masterSessionsByPlayerId = new Map();
 const clanTreasuryLiveEvents = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
+const profileLoadQueue = [];
+let profileLoadInFlight = 0;
+let shopCatalogLoad = null;
+const battleEventHighQueue = [];
+const battleEventNormalQueue = [];
+let battleEventInFlight = 0;
+let battleMoveTelemetry = new Map();
+const battleApiStats = {
+  queued: 0,
+  completed: 0,
+  failed: 0,
+  timedOut: 0,
+  dropped: 0,
+  moveFlushes: 0,
+  moveSamples: 0,
+};
+const runtimeMetrics = {
+  startedAt: Date.now(),
+  lastReportAt: Date.now(),
+  udpInboundPackets: 0,
+  udpInboundBytes: 0,
+  udpInboundDropped: 0,
+  udpOutboundPackets: 0,
+  udpOutboundBytes: 0,
+  udpOutboundCommands: 0,
+  udpOutboundDropped: 0,
+  outboxFlushes: 0,
+  outboxCommands: 0,
+  moves: 0,
+  shots: 0,
+  reliableRetryCommands: 0,
+  reliableRecoveriesStarted: 0,
+  reliableRecoveriesCompleted: 0,
+};
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
+eventLoopDelay.enable();
 const udpRateByIp = new Map();
 const tcpConnectionsByIp = new Map();
+const fullSessionCountByIp = new Map();
+const pendingSessionCountByIp = new Map();
+const securityStateByIp = new Map();
+const accountOperationRate = new Map();
 let clanTreasuryPollCursor = 0;
 let clanTreasuryPollInitialized = false;
 let clanTreasuryPollInFlight = false;
 let clanTreasuryPollLastErrorAt = 0;
+let roomListPushTimer = null;
+let roomListPushChannel = 0;
+const roomListPushReasons = new Set();
+let udpRateSweepIterator = null;
+let pendingSessionSweepIterator = null;
+let fullSessionSweepIterator = null;
+let securityIpSweepIterator = null;
+let accountOperationSweepIterator = null;
+let outboundReliableRetryCursor = 0;
+
+function incrementCount(map, keyValue) {
+  const key = String(keyValue || "unknown");
+  map.set(key, Number(map.get(key) || 0) + 1);
+}
+
+function decrementCount(map, keyValue) {
+  const key = String(keyValue || "unknown");
+  const next = Number(map.get(key) || 0) - 1;
+  if (next > 0) map.set(key, next);
+  else map.delete(key);
+}
 
 function allowUdpPacket(rinfo, byteLength) {
   const address = String(rinfo?.address || "unknown");
   const now = Date.now();
   let bucket = udpRateByIp.get(address);
   if (!bucket || now - bucket.startedAt >= UDP_RATE_WINDOW_MS) {
+    if (!bucket && udpRateByIp.size >= UDP_RATE_BUCKET_CAP) return false;
     bucket = { startedAt: now, packets: 0, bytes: 0, dropped: 0 };
     udpRateByIp.set(address, bucket);
   }
@@ -194,20 +298,206 @@ function allowUdpPacket(rinfo, byteLength) {
   bucket.bytes += Math.max(0, Number(byteLength || 0));
   const allowed = bucket.packets <= UDP_RATE_PACKETS_PER_IP && bucket.bytes <= UDP_RATE_BYTES_PER_IP;
   if (!allowed) bucket.dropped++;
-  if (udpRateByIp.size > 10000) {
-    for (const [ip, value] of udpRateByIp) {
-      if (now - value.startedAt > UDP_RATE_WINDOW_MS * 2) udpRateByIp.delete(ip);
-    }
-  }
   return allowed;
 }
 
-function sessionCountForIp(address) {
-  let count = 0;
-  for (const session of sessions.values()) {
-    if (session?.rinfo?.address === address || String(session?.remoteKey || "").startsWith(`${address}:`)) count++;
+function runtimeMetricsSnapshot(now = Date.now()) {
+  const elapsedMs = Math.max(1, now - Number(runtimeMetrics.lastReportAt || now));
+  const elapsedSeconds = elapsedMs / 1000;
+  const activePlayers = new Set();
+  for (const room of rooms.values()) {
+    for (const playerSession of room?.players?.values?.() || []) {
+      if (playerSession && !playerSession.transportDisconnected) activePlayers.add(playerSession);
+    }
   }
-  return count;
+  let reliablePending = 0;
+  let outboxQueued = 0;
+  for (const session of sessions.values()) {
+    if (!session || session.transportDisconnected) continue;
+    reliablePending += Number(session.outboundReliable?.size || 0);
+    outboxQueued += Number(session.udpOutbox?.commandCount || 0);
+  }
+  const memory = typeof process.memoryUsage === "function"
+    ? process.memoryUsage()
+    : { rss: 0, heapUsed: 0, heapTotal: 0 };
+  const api = battleApiQueueSnapshot();
+  const p95 = Number(eventLoopDelay.percentile(95)) / 1e6;
+  const p99 = Number(eventLoopDelay.percentile(99)) / 1e6;
+  return {
+    elapsedMs,
+    players: activePlayers.size,
+    sessions: sessions.size,
+    pendingSessions: pendingSessions.size,
+    rooms: rooms.size,
+    movePerSecond: runtimeMetrics.moves / elapsedSeconds,
+    shotPerSecond: runtimeMetrics.shots / elapsedSeconds,
+    udpInboundPps: runtimeMetrics.udpInboundPackets / elapsedSeconds,
+    udpInboundMbps: runtimeMetrics.udpInboundBytes * 8 / elapsedSeconds / 1e6,
+    udpInboundDropped: runtimeMetrics.udpInboundDropped,
+    udpOutboundPps: runtimeMetrics.udpOutboundPackets / elapsedSeconds,
+    udpOutboundMbps: runtimeMetrics.udpOutboundBytes * 8 / elapsedSeconds / 1e6,
+    udpOutboundCommands: runtimeMetrics.udpOutboundCommands,
+    udpOutboundDropped: runtimeMetrics.udpOutboundDropped,
+    eventLoopP95Ms: Number.isFinite(p95) ? p95 : 0,
+    eventLoopP99Ms: Number.isFinite(p99) ? p99 : 0,
+    rssMb: Number(memory.rss || 0) / 1024 / 1024,
+    heapUsedMb: Number(memory.heapUsed || 0) / 1024 / 1024,
+    heapTotalMb: Number(memory.heapTotal || 0) / 1024 / 1024,
+    apiInFlight: api.inFlight,
+    apiQueued: api.queued,
+    profileInFlight: api.profileInFlight,
+    profileQueued: api.profileQueued,
+    reliablePending,
+    reliableRetryCommands: runtimeMetrics.reliableRetryCommands,
+    reliableRecoveriesStarted: runtimeMetrics.reliableRecoveriesStarted,
+    reliableRecoveriesCompleted: runtimeMetrics.reliableRecoveriesCompleted,
+    outboxFlushes: runtimeMetrics.outboxFlushes,
+    outboxCommands: runtimeMetrics.outboxCommands,
+    outboxAverageCommands: runtimeMetrics.outboxFlushes > 0
+      ? runtimeMetrics.outboxCommands / runtimeMetrics.outboxFlushes
+      : 0,
+    outboxQueued,
+  };
+}
+
+function resetRuntimeMetricsInterval(now = Date.now()) {
+  runtimeMetrics.lastReportAt = now;
+  for (const key of [
+    "udpInboundPackets",
+    "udpInboundBytes",
+    "udpInboundDropped",
+    "udpOutboundPackets",
+    "udpOutboundBytes",
+    "udpOutboundCommands",
+    "udpOutboundDropped",
+    "outboxFlushes",
+    "outboxCommands",
+    "moves",
+    "shots",
+    "reliableRetryCommands",
+    "reliableRecoveriesStarted",
+    "reliableRecoveriesCompleted",
+  ]) runtimeMetrics[key] = 0;
+  eventLoopDelay.reset();
+}
+
+function reportRuntimeMetrics() {
+  const now = Date.now();
+  const metrics = runtimeMetricsSnapshot(now);
+  console.log(
+    `[metrics] players=${metrics.players} sessions=${metrics.sessions} pending=${metrics.pendingSessions} rooms=${metrics.rooms}` +
+    ` move=${metrics.movePerSecond.toFixed(1)}/s shot=${metrics.shotPerSecond.toFixed(1)}/s` +
+    ` udpIn=${metrics.udpInboundPps.toFixed(1)}pps/${metrics.udpInboundMbps.toFixed(2)}Mbps/drop${metrics.udpInboundDropped}` +
+    ` udpOut=${metrics.udpOutboundPps.toFixed(1)}pps/${metrics.udpOutboundMbps.toFixed(2)}Mbps/cmd${metrics.udpOutboundCommands}/drop${metrics.udpOutboundDropped}` +
+    ` loop=${metrics.eventLoopP95Ms.toFixed(2)}/${metrics.eventLoopP99Ms.toFixed(2)}ms` +
+    ` mem=${metrics.rssMb.toFixed(1)}rss/${metrics.heapUsedMb.toFixed(1)}heapMB` +
+    ` api=${metrics.apiInFlight}/${metrics.apiQueued} profile=${metrics.profileInFlight}/${metrics.profileQueued}` +
+    ` reliable=${metrics.reliablePending}/retry${metrics.reliableRetryCommands}/recovery${metrics.reliableRecoveriesStarted}:${metrics.reliableRecoveriesCompleted}` +
+    ` outbox=${metrics.outboxFlushes}/${metrics.outboxAverageCommands.toFixed(2)}avg/queued${metrics.outboxQueued}`,
+  );
+  resetRuntimeMetricsInterval(now);
+  return metrics;
+}
+
+function sessionCountForIp(address) {
+  return Number(fullSessionCountByIp.get(String(address || "unknown")) || 0);
+}
+
+function isIpQuarantined(address, now = Date.now()) {
+  return Number(securityStateByIp.get(String(address || "unknown"))?.quarantineUntil || 0) > now;
+}
+
+function recordInvalidUdpPacket(address, now = Date.now()) {
+  const ip = String(address || "unknown");
+  let state = securityStateByIp.get(ip);
+  if (!state) {
+    if (securityStateByIp.size >= SECURITY_IP_STATE_CAP) return false;
+    state = { startedAt: now, lastSeenAt: now, invalid: 0, offenses: 0, quarantineUntil: 0 };
+    securityStateByIp.set(ip, state);
+  }
+  if (now - Number(state.startedAt || 0) >= INVALID_WINDOW_MS) {
+    state.startedAt = now;
+    state.invalid = 0;
+  }
+  state.lastSeenAt = now;
+  state.invalid = Number(state.invalid || 0) + 1;
+  if (state.invalid < INVALID_PACKETS_PER_IP) return false;
+  state.invalid = 0;
+  state.startedAt = now;
+  state.offenses = Number(state.offenses || 0) + 1;
+  const penalty = state.offenses > 1 ? QUARANTINE_REPEAT_MS : QUARANTINE_SHORT_MS;
+  state.quarantineUntil = Math.max(Number(state.quarantineUntil || 0), now + penalty);
+  return true;
+}
+
+function consumeRateBucket(holder, field, limit, now = Date.now()) {
+  let bucket = holder[field];
+  if (!bucket || now - Number(bucket.startedAt || 0) >= AUTH_OPERATION_WINDOW_MS) {
+    bucket = { startedAt: now, count: 0, dropped: 0 };
+    holder[field] = bucket;
+  }
+  if (bucket.count >= limit) {
+    bucket.dropped += 1;
+    return false;
+  }
+  bucket.count += 1;
+  return true;
+}
+
+function allowAuthenticatedOperation(session, now = Date.now()) {
+  if (!session || !consumeRateBucket(session, "operationRate", AUTH_OPERATIONS_PER_SESSION, now)) return false;
+  const playerId = Number(session.playerId || 0);
+  if (!session.applicationJoinedAt || playerId <= 1) return true;
+  let bucket = accountOperationRate.get(playerId);
+  if (!bucket || now - Number(bucket.startedAt || 0) >= AUTH_OPERATION_WINDOW_MS) {
+    if (!bucket && accountOperationRate.size >= ACCOUNT_OPERATION_BUCKET_CAP) return false;
+    bucket = { startedAt: now, count: 0, dropped: 0, lastSeenAt: now };
+    accountOperationRate.set(playerId, bucket);
+  }
+  bucket.lastSeenAt = now;
+  if (bucket.count >= AUTH_OPERATIONS_PER_ACCOUNT) {
+    bucket.dropped += 1;
+    return false;
+  }
+  bucket.count += 1;
+  return true;
+}
+
+function sweepIteratorBatch(map, iterator, limit, visit) {
+  let activeIterator = iterator || map.entries();
+  let processed = 0;
+  while (processed < limit) {
+    const next = activeIterator.next();
+    if (next.done) return null;
+    processed += 1;
+    visit(next.value[0], next.value[1]);
+  }
+  return activeIterator;
+}
+
+function sweepUdpRateBuckets(now = Date.now()) {
+  udpRateSweepIterator = sweepIteratorBatch(udpRateByIp, udpRateSweepIterator, UDP_RATE_SWEEP_LIMIT, (ip, bucket) => {
+    if (now - Number(bucket?.startedAt || 0) > UDP_RATE_WINDOW_MS * 2) udpRateByIp.delete(ip);
+  });
+}
+
+function sweepSecurityState(now = Date.now()) {
+  pendingSessionSweepIterator = sweepIteratorBatch(pendingSessions, pendingSessionSweepIterator, SESSION_SECURITY_SWEEP_LIMIT, (_sessionId, pending) => {
+    if (now - Number(pending?.lastSeenAt || pending?.createdAt || 0) > PENDING_SESSION_TTL_MS) deletePendingSession(pending);
+  });
+  fullSessionSweepIterator = sweepIteratorBatch(sessions, fullSessionSweepIterator, SESSION_SECURITY_SWEEP_LIMIT, (_sessionId, session) => {
+    if (session?.applicationJoinedAt) return;
+    if (now - Number(session?.promotedAt || session?.createdAt || 0) > PREAUTH_SESSION_TTL_MS) {
+      expireTransportSession(session, "preauth-ttl");
+    }
+  });
+  securityIpSweepIterator = sweepIteratorBatch(securityStateByIp, securityIpSweepIterator, SESSION_SECURITY_SWEEP_LIMIT, (ip, state) => {
+    const keepUntil = Math.max(Number(state?.quarantineUntil || 0), Number(state?.lastSeenAt || 0) + INVALID_WINDOW_MS * 2);
+    if (keepUntil <= now) securityStateByIp.delete(ip);
+  });
+  accountOperationSweepIterator = sweepIteratorBatch(accountOperationRate, accountOperationSweepIterator, SESSION_SECURITY_SWEEP_LIMIT, (playerId, holder) => {
+    if (now - Number(holder?.lastSeenAt || 0) > AUTH_OPERATION_WINDOW_MS * 2) accountOperationRate.delete(playerId);
+  });
 }
 let shopCatalogCache = { loadedAt: 0, weapons: [], wears: [] };
 const PROCESS_START_MS = Date.now();
@@ -752,6 +1042,196 @@ function key(port, rinfo) {
   return `${port}:${rinfo.address}:${rinfo.port}`;
 }
 
+function isExactEnetConnectPacket(msg) {
+  if (!Buffer.isBuffer(msg) || msg.length !== 56) return false;
+  if (readU16(msg, 0) !== 0xffff || msg[3] !== 1) return false;
+  if (msg[12] !== 0x02 || ![0, 0xff].includes(msg[13])) return false;
+  if (readU32(msg, 16) !== 44 || 12 + readU32(msg, 16) !== msg.length) return false;
+  const mtu = readU16(msg, 26);
+  const channelCount = readU32(msg, 28);
+  return readU32(msg, 20) > 0 && mtu >= 576 && mtu <= 4096 && channelCount >= 1 && channelCount <= 255;
+}
+
+function makePendingSession(port, socket, rinfo, sessionId, challenge, now = Date.now()) {
+  return {
+    pendingHandshake: true,
+    peerId: 1,
+    actorId: 0,
+    challenge: Number(challenge || 0) >>> 0,
+    serverSeq: 0,
+    unreliableSeq: 0,
+    serverSeqByChannel: new Map(),
+    unreliableSeqByChannel: new Map(),
+    outboundReliable: new Map(),
+    outboundReliableRecoveryByChannel: new Map(),
+    outboundReliableOverflowAt: 0,
+    outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
+    outboundRoundTripVariance: 0,
+    verifySeq: null,
+    seenVerify: false,
+    reliableResponses: new Map(),
+    reliableInFlight: new Map(),
+    reliableFragments: new Map(),
+    reliableGeneration: 0,
+    transportGeneration: 0,
+    inboundReliableChannels: new Map(),
+    reliableReplayLogState: new Map(),
+    transportDisconnected: false,
+    lastChannel: 0,
+    port,
+    remoteKey: `${rinfo.address}:${rinfo.port}`,
+    sessionId,
+    socket,
+    rinfo: { address: rinfo.address, port: rinfo.port },
+    createdAt: now,
+    lastSeenAt: now,
+    playerId: 0,
+    playerAuthKey: "",
+    room: null,
+  };
+}
+
+function storePendingSession(pending) {
+  if (!pending?.sessionId || pendingSessions.has(pending.sessionId)) return pending || null;
+  const ip = String(pending.rinfo?.address || "unknown");
+  if (pendingSessions.size >= MAX_PENDING_SESSIONS_TOTAL) return null;
+  if (Number(pendingSessionCountByIp.get(ip) || 0) >= MAX_PENDING_SESSIONS_PER_IP) return null;
+  pendingSessions.set(pending.sessionId, pending);
+  pending.pendingCountedIp = ip;
+  incrementCount(pendingSessionCountByIp, ip);
+  return pending;
+}
+
+function deletePendingSession(pendingOrSessionId, options = {}) {
+  const sessionId = typeof pendingOrSessionId === "string" ? pendingOrSessionId : pendingOrSessionId?.sessionId;
+  const pending = sessionId ? pendingSessions.get(sessionId) : null;
+  if (!pending || (typeof pendingOrSessionId === "object" && pending !== pendingOrSessionId)) return false;
+  pendingSessions.delete(sessionId);
+  if (pending.pendingCountedIp) decrementCount(pendingSessionCountByIp, pending.pendingCountedIp);
+  pending.pendingCountedIp = "";
+  if (!options.preserveOutbox) clearSessionUdpOutbox(pending);
+  return true;
+}
+
+function storeFullSession(sessionId, session) {
+  if (!sessionId || !session) return null;
+  const current = sessions.get(sessionId);
+  if (current && current !== session) return null;
+  if (!session.fullSessionCountedIp) {
+    const ip = String(session.rinfo?.address || "unknown");
+    incrementCount(fullSessionCountByIp, ip);
+    session.fullSessionCountedIp = ip;
+  }
+  sessions.set(sessionId, session);
+  return session;
+}
+
+function deleteFullSession(sessionOrId, expectedSession = null, options = {}) {
+  const sessionId = typeof sessionOrId === "string" ? sessionOrId : sessionOrId?.sessionId;
+  const session = expectedSession || (typeof sessionOrId === "object" ? sessionOrId : sessions.get(sessionId));
+  if (!sessionId || !session || sessions.get(sessionId) !== session) return false;
+  sessions.delete(sessionId);
+  if (session.fullSessionCountedIp) decrementCount(fullSessionCountByIp, session.fullSessionCountedIp);
+  session.fullSessionCountedIp = "";
+  if (!options.preserveOutbox) clearSessionUdpOutbox(session);
+  return true;
+}
+
+function promotePendingSession(pending, now = Date.now(), credentials = {}) {
+  if (!pending?.pendingHandshake || pendingSessions.get(pending.sessionId) !== pending) return null;
+  const ip = String(pending.rinfo?.address || "unknown");
+  if (sessions.size >= MAX_SESSIONS_TOTAL || sessionCountForIp(ip) >= MAX_SESSIONS_PER_IP) {
+    deletePendingSession(pending);
+    return null;
+  }
+  deletePendingSession(pending, { preserveOutbox: true });
+  const runtimeStats = playerRuntimeStats(null);
+  Object.assign(pending, {
+    pendingHandshake: false,
+    promotedAt: now,
+    applicationJoinedAt: 0,
+    actorId: 1,
+    listLobby: false,
+    room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
+    roomRaw: null,
+    actorRaw: null,
+    peerActorRaw: null,
+    peerActorRawBytes: 0,
+    peerActorLoadoutSlots: 0,
+    peerActorProfile: "",
+    joinActorRaw: null,
+    joinActorRawBytes: 0,
+    joinActorLoadoutSlots: 0,
+    joinActorProfile: "",
+    actorJoinParam: null,
+    team: -1,
+    zombieType: ZOMBIE_TYPE.HUMAN,
+    zombieInfectionHits: 0,
+    zombieLastInfectorActorId: 0,
+    spawned: false,
+    dead: false,
+    moveSeen: false,
+    moveCount: 0,
+    waitingSelfSpawnMove: false,
+    currentWeaponSlot: 1,
+    weaponStates: makeWeaponRuntimeState(null),
+    peerWeaponConfirmKeys: new Map(),
+    visibleItemIds: new Set(),
+    activeItemShots: new Map(),
+    impactTimers: new Map(),
+    spawnSeq: 0,
+    spawnRetry: null,
+    spawnMoveWarningTimer: null,
+    spawnSelfRetryTimers: new Set(),
+    joinSelfEventTimer: null,
+    joinStartEventTimer: null,
+    joinSettingsTimers: [],
+    joinLateStartTimers: [],
+    gameStateRequested: false,
+    lastGameStateResponseAt: 0,
+    knownActorIds: new Set(),
+    actorJoinAnnouncedAt: new Map(),
+    joinActorListIds: new Set(),
+    deferredJoinActorIds: new Set(),
+    peerSpawnTimers: new Set(),
+    pendingSpawnBroadcast: null,
+    pendingPickupSync: null,
+    pickupSpawnRepairTimers: new Set(),
+    playerId: Number(credentials.authId || 0) > 0 ? Number(credentials.authId) : 1,
+    playerAuthKey: String(credentials.authKey || ""),
+    playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
+    health: runtimeStats.maxHealth,
+    energy: runtimeStats.maxEnergy,
+    kills: 0,
+    deaths: 0,
+    points: 0,
+    domination: 0,
+    revenge: 0,
+    maxDomination: 0,
+    maxRevenge: 0,
+    revengeStreak: 0,
+    killStreakByVictim: new Map(),
+    dominatedBy: new Set(),
+    expEarned: 0,
+    exp2clan: 0,
+    matchStartedAt: 0,
+    matchStatsPosted: false,
+    matchShots: 0,
+    matchHits: 0,
+    matchKills: 0,
+    matchDeaths: 0,
+    matchHeadKills: 0,
+    matchNutsKills: 0,
+    matchSuicides: 0,
+    matchDomination: 0,
+    matchRevenge: 0,
+    matchExp: 0,
+    operationRate: null,
+  });
+  pending.roomRaw = makeRoomSettingsRaw(pending.room);
+  return storeFullSession(pending.sessionId, pending);
+}
+
 function refreshSessionReliableEndpoint(session, socket, rinfo) {
   if (!session || !socket || !rinfo) return;
   const pending = session.outboundReliable;
@@ -786,13 +1266,13 @@ function rebindSessionEndpoint(session, sessionId, socket, rinfo) {
   const previousSessionId = session.sessionId;
   const previousRemote = session.remoteKey || "unknown";
   if (previousSessionId && previousSessionId !== sessionId && sessions.get(previousSessionId) === session) {
-    sessions.delete(previousSessionId);
+    deleteFullSession(previousSessionId, session, { preserveOutbox: true });
   }
-  sessions.set(sessionId, session);
   session.sessionId = sessionId;
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
   session.socket = socket;
   session.rinfo = { address: rinfo.address, port: rinfo.port };
+  storeFullSession(sessionId, session);
   refreshSessionReliableEndpoint(session, socket, rinfo);
   console.log(`[state] enet nat-rebind actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${session.room?.name || "none"} from=${previousRemote} to=${session.remoteKey} pending=${session.outboundReliable?.size || 0} generation=${session.transportGeneration || 0}`);
   return session;
@@ -869,7 +1349,8 @@ function cacheReliableResponse(session, cacheKey, reliableCommands) {
     if (Number(cached?.expiresAt || 0) > now) continue;
     session.reliableResponses.delete(key);
   }
-  while (session.reliableResponses.size > RELIABLE_RESPONSE_CACHE_MAX) {
+  const cacheMax = session.pendingHandshake ? PENDING_RELIABLE_STATE_MAX : RELIABLE_RESPONSE_CACHE_MAX;
+  while (session.reliableResponses.size > cacheMax) {
     const firstKey = session.reliableResponses.keys().next().value;
     session.reliableResponses.delete(firstKey);
   }
@@ -990,7 +1471,8 @@ function enqueueInboundReliableRequest(session, rawRequest) {
     request.resolve?.([]);
     return { status: "duplicate", completion: existing.completion, request: existing };
   }
-  if (state.pending.size >= INBOUND_RELIABLE_PENDING_MAX) {
+  const pendingMax = session.pendingHandshake ? PENDING_RELIABLE_STATE_MAX : INBOUND_RELIABLE_PENDING_MAX;
+  if (state.pending.size >= pendingMax) {
     const error = new Error(`inbound reliable pending overflow channel=${channel} size=${state.pending.size}`);
     request.reject?.(error);
     return { status: "overflow", completion: request.completion, request };
@@ -1133,10 +1615,11 @@ function trackOutboundReliableCommands(socket, rinfo, session, commands) {
       existing.lastSentAt = now;
       continue;
     }
-    if (pending.size >= OUTBOUND_RELIABLE_PENDING_MAX) {
+    const pendingMax = session.pendingHandshake ? PENDING_RELIABLE_STATE_MAX : OUTBOUND_RELIABLE_PENDING_MAX;
+    if (pending.size >= pendingMax) {
       if (!session.outboundReliableOverflowAt) {
         session.outboundReliableOverflowAt = now;
-        console.log(`[warn] reliable pending overflow actor=${session.actorId || 0} size=${pending.size} max=${OUTBOUND_RELIABLE_PENDING_MAX}`);
+        console.log(`[warn] reliable pending overflow actor=${session.actorId || 0} size=${pending.size} max=${pendingMax}`);
       }
       continue;
     }
@@ -1169,7 +1652,13 @@ function acknowledgeOutboundReliable(session, channel, reliableSeq) {
   session.outboundRoundTripVariance = Math.round(previousVariance * 0.75 + Math.abs(previousRtt - sample) * 0.25);
   session.outboundRoundTripTime = Math.round(previousRtt * 0.875 + sample * 0.125);
   const channelPending = Array.from(pending.values()).some((candidate) => Number(candidate.channel) === Number(channel));
-  if (!channelPending) ensureOutboundReliableRecoveryMap(session)?.delete(normalizeChannelId(channel, 0));
+  if (!channelPending) {
+    const recoveryByChannel = ensureOutboundReliableRecoveryMap(session);
+    if (recoveryByChannel?.has(normalizeChannelId(channel, 0))) {
+      runtimeMetrics.reliableRecoveriesCompleted += 1;
+      recoveryByChannel.delete(normalizeChannelId(channel, 0));
+    }
+  }
   if (DEBUG_PACKETS) {
     console.log(`[ack] actor=${session.actorId || 0} channel=${channel} seq=${reliableSeq} sample=${sample}ms pending=${pending.size}`);
   }
@@ -1194,7 +1683,7 @@ function expireTransportSession(session, reason, entry = null) {
   console.log(`[state] transport expired actor=${session.actorId || 0} player=${session.playerId || "unknown"} reason=${reason}${detail}`);
   detachMasterSession(session, reason);
   detachSessionFromRoom(session, reason);
-  if (session.sessionId && sessions.get(session.sessionId) === session) sessions.delete(session.sessionId);
+  if (session.sessionId && sessions.get(session.sessionId) === session) deleteFullSession(session.sessionId, session);
   return true;
 }
 
@@ -1205,6 +1694,7 @@ function beginOutboundReliableChannelRecovery(session, entry, now) {
   if (!recovery) {
     recovery = { startedAt: now, lastLoggedAt: now };
     recoveryByChannel.set(channel, recovery);
+    runtimeMetrics.reliableRecoveriesStarted += 1;
     const transportIdle = Math.max(0, now - numberOr(session.lastSeenAt, 0));
     console.log(`[recovery] reliable-channel actor=${session.actorId || 0} channel=${channel} seq=${entry.reliableSeq} pending=${session.outboundReliable?.size || 0} transportIdle=${transportIdle}ms hard=${OUTBOUND_RELIABLE_RECOVERY_MS}ms`);
   }
@@ -1216,7 +1706,17 @@ function runOutboundReliableRetries() {
   const now = Date.now();
   const expiredSessions = new Map();
   let retryBudget = OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS;
-  for (const session of sessions.values()) {
+  const sessionList = Array.from(sessions.values());
+  if (sessionList.length <= 0) {
+    outboundReliableRetryCursor = 0;
+    return;
+  }
+  const startIndex = outboundReliableRetryCursor % sessionList.length;
+  let visitedSessions = 0;
+  for (let offset = 0; offset < sessionList.length && retryBudget > 0; offset += 1) {
+    const index = (startIndex + offset) % sessionList.length;
+    const session = sessionList[index];
+    visitedSessions = offset + 1;
     const pending = session?.outboundReliable;
     if (!(pending instanceof Map) || pending.size <= 0) continue;
     const dueEntries = [];
@@ -1237,7 +1737,7 @@ function runOutboundReliableRetries() {
     }
     if (expiredSessions.has(session) || dueEntries.length <= 0) continue;
     const retryCommands = dueEntries.map((entry) => entry.command);
-    const sent = sendPacket(session.socket, session.rinfo, session, retryCommands);
+    const sent = sendPacketNow(session.socket, session.rinfo, session, retryCommands);
     if (!sent) continue;
     for (const entry of dueEntries) {
       entry.sentCount += 1;
@@ -1248,8 +1748,12 @@ function runOutboundReliableRetries() {
       );
     }
     retryBudget -= dueEntries.length;
-    console.log(`[retry] reliable-batch actor=${session.actorId || 0} commands=${dueEntries.length} pending=${pending.size} budget=${retryBudget} seq=${dueEntries.map((entry) => `${entry.channel}:${entry.reliableSeq}`).join(",")}`);
+    runtimeMetrics.reliableRetryCommands += dueEntries.length;
+    if (VERBOSE_GAMEPLAY_LOGS || DEBUG_PACKETS) {
+      console.log(`[retry] reliable-batch actor=${session.actorId || 0} commands=${dueEntries.length} pending=${pending.size} budget=${retryBudget} seq=${dueEntries.map((entry) => `${entry.channel}:${entry.reliableSeq}`).join(",")}`);
+    }
   }
+  outboundReliableRetryCursor = (startIndex + Math.max(1, visitedSessions)) % sessionList.length;
 
   for (const [session, entry] of expiredSessions.entries()) {
     expireTransportSession(session, "reliable-recovery-exhausted", entry);
@@ -1293,7 +1797,17 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
     return reliableCommands;
   }
 
+  if (session.pendingHandshake) {
+    if (parsed?.messageType !== 2 || parsed.opCode !== 255 || !(parsed.params instanceof Map)) return [];
+    const actorParam = parsed.params.get(249);
+    const credentials = actorParam ? actorCredentials(actorParam) : {};
+    if (!promotePendingSession(session, Date.now(), credentials)) return [];
+  }
+
   const responses = await handleOperation(port, socket, rinfo, session, parsed, channel);
+  if (parsed?.opCode === 255 && responses.length > 0 && !session.applicationJoinedAt) {
+    session.applicationJoinedAt = Date.now();
+  }
   const reliableCommands = responses.flatMap((response) => makeReliableCommandsForPayload(session, response, channel));
   if (SHOT_LOCAL_RESPONSE_TRACE && photonEventCode(parsed) === 97) {
     console.log(`[sync] shot-response actor=${session.actorId} ${describeShotRequest(parsed)} responses=${responses.length} commands=${reliableCommands.length} bytes=${commandBytes(reliableCommands)} seq=${reliableCommandSeqSummary(reliableCommands)} channel=${channel}`);
@@ -1367,7 +1881,7 @@ function addReliableFragment(session, fragment) {
   return entry.received.size === entry.fragmentCount ? { key, payload: entry.buffer } : null;
 }
 
-function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
+function sendPacketNow(socket, rinfo, session, commands, peerIdOverride = null) {
   if (!socket || !rinfo || !session || !Array.isArray(commands) || commands.length === 0) return false;
   const outgoingCommands = fragmentOutgoingReliableCommands(session, commands);
   const sentTime = photonNow();
@@ -1383,33 +1897,140 @@ function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
     for (const command of outgoingCommands) {
       const nextChunk = [...chunk, command];
       if (chunk.length > 0 && buildPacket(nextChunk).length > MAX_UDP_PACKET_BYTES) {
-        allSent = sendPacket(socket, rinfo, session, chunk, peerIdOverride) && allSent;
+        allSent = sendPacketNow(socket, rinfo, session, chunk, peerIdOverride) && allSent;
         chunk = [command];
       } else {
         chunk = nextChunk;
       }
     }
     if (chunk.length > 0) {
-      allSent = sendPacket(socket, rinfo, session, chunk, peerIdOverride) && allSent;
+      allSent = sendPacketNow(socket, rinfo, session, chunk, peerIdOverride) && allSent;
     }
     return allSent;
+  }
+
+  if (packet.length > MAX_UDP_PACKET_BYTES) {
+    runtimeMetrics.udpOutboundDropped += outgoingCommands.length;
+    console.log(`[warn] udp-packet-dropped bytes=${packet.length} max=${MAX_UDP_PACKET_BYTES} cmds=${outgoingCommands.length}`);
+    return false;
   }
 
   try {
     socket.send(packet, rinfo.port, rinfo.address);
   } catch (error) {
+    runtimeMetrics.udpOutboundDropped += outgoingCommands.length;
     console.log(`[send] failed to=${rinfo.address}:${rinfo.port} bytes=${packet.length} reason=${error.message}`);
     return false;
   }
+  runtimeMetrics.udpOutboundPackets += 1;
+  runtimeMetrics.udpOutboundBytes += packet.length;
+  runtimeMetrics.udpOutboundCommands += outgoingCommands.length;
   trackOutboundReliableCommands(socket, rinfo, session, outgoingCommands);
   const ackOnly = outgoingCommands.every((command) => command[0] === 0x01);
-  if (LOG_SEND_PACKETS || (!ackOnly && MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES)) {
+  if (LOG_SEND_PACKETS) {
     console.log(`[send] bytes=${packet.length} to=${rinfo.address}:${rinfo.port} cmds=${outgoingCommands.length}`);
   }
-  if (MAX_UDP_PACKET_BYTES > 0 && packet.length > MAX_UDP_PACKET_BYTES) {
-    console.log(`[warn] udp-packet-large bytes=${packet.length} max=${MAX_UDP_PACKET_BYTES} cmds=${outgoingCommands.length}`);
-  }
   return true;
+}
+
+function ensureSessionUdpOutbox(session, socket, rinfo) {
+  if (!session) return null;
+  if (!session.udpOutbox) {
+    session.udpOutbox = {
+      groups: [],
+      commandCount: 0,
+      commandBytes: 0,
+      timer: null,
+      socket: null,
+      rinfo: null,
+    };
+  }
+  const outbox = session.udpOutbox;
+  if (socket) outbox.socket = socket;
+  if (rinfo) outbox.rinfo = { address: rinfo.address, port: rinfo.port };
+  return outbox;
+}
+
+function clearSessionUdpOutbox(session) {
+  const outbox = session?.udpOutbox;
+  if (!outbox) return 0;
+  if (outbox.timer) clearTimeout(outbox.timer);
+  const dropped = Number(outbox.commandCount || 0);
+  if (dropped > 0) runtimeMetrics.udpOutboundDropped += dropped;
+  outbox.groups = [];
+  outbox.commandCount = 0;
+  outbox.commandBytes = 0;
+  outbox.timer = null;
+  outbox.socket = null;
+  outbox.rinfo = null;
+  return dropped;
+}
+
+function flushSessionUdpOutbox(session) {
+  const outbox = session?.udpOutbox;
+  if (!outbox || outbox.commandCount <= 0) return true;
+  if (outbox.timer) clearTimeout(outbox.timer);
+  const groups = outbox.groups;
+  const socket = session.socket || outbox.socket;
+  const rinfo = session.rinfo || outbox.rinfo;
+  const flushedCommands = outbox.commandCount;
+  outbox.groups = [];
+  outbox.commandCount = 0;
+  outbox.commandBytes = 0;
+  outbox.timer = null;
+  outbox.socket = socket;
+  outbox.rinfo = rinfo;
+
+  if (!socket || !rinfo || session.transportDisconnected) {
+    runtimeMetrics.udpOutboundDropped += flushedCommands;
+    return false;
+  }
+  runtimeMetrics.outboxFlushes += 1;
+  runtimeMetrics.outboxCommands += flushedCommands;
+  let allSent = true;
+  for (const group of groups) {
+    allSent = sendPacketNow(socket, rinfo, session, group.commands, group.peerId) && allSent;
+  }
+  return allSent;
+}
+
+function scheduleSessionUdpOutboxFlush(session, outbox) {
+  if (outbox.timer) return;
+  outbox.timer = setTimeout(() => flushSessionUdpOutbox(session), UDP_OUTBOX_FLUSH_MS);
+  if (typeof outbox.timer?.unref === "function") outbox.timer.unref();
+}
+
+function sendPacket(socket, rinfo, session, commands, peerIdOverride = null) {
+  if (!socket || !rinfo || !session || !Array.isArray(commands) || commands.length === 0) return false;
+  const outgoingCommands = fragmentOutgoingReliableCommands(session, commands);
+  const outbox = ensureSessionUdpOutbox(session, socket, rinfo);
+  if (!outbox) return false;
+  const peerId = Number(peerIdOverride ?? session.peerId) & 0xffff;
+  let allAccepted = true;
+
+  for (const command of outgoingCommands) {
+    if (command.length > UDP_OUTBOX_MAX_BYTES) {
+      if (outbox.commandCount > 0) flushSessionUdpOutbox(session);
+      allAccepted = sendPacketNow(socket, rinfo, session, [command], peerId) && allAccepted;
+      continue;
+    }
+    if (
+      outbox.commandCount >= UDP_OUTBOX_MAX_COMMANDS ||
+      (outbox.commandCount > 0 && outbox.commandBytes + command.length > UDP_OUTBOX_MAX_BYTES)
+    ) {
+      flushSessionUdpOutbox(session);
+    }
+    let group = outbox.groups[outbox.groups.length - 1];
+    if (!group || group.peerId !== peerId) {
+      group = { peerId, commands: [] };
+      outbox.groups.push(group);
+    }
+    group.commands.push(command);
+    outbox.commandCount += 1;
+    outbox.commandBytes += command.length;
+  }
+  if (outbox.commandCount > 0) scheduleSessionUdpOutboxFlush(session, outbox);
+  return allAccepted;
 }
 
 function nextReliableSeqForSession(session, channel = 0) {
@@ -1753,7 +2374,7 @@ function isMoveEvent(parsed) {
 }
 
 function shouldLogParsedPayload(parsed) {
-  return DEBUG_PACKETS || DEBUG_MOVE_PACKETS || !isMoveEvent(parsed);
+  return DEBUG_PACKETS || DEBUG_MOVE_PACKETS || (VERBOSE_GAMEPLAY_LOGS && !isMoveEvent(parsed));
 }
 
 function transformFromEventData(parsed) {
@@ -1934,7 +2555,7 @@ function makeRoomSettingsRaw(settings) {
       value: rawHashtable([
         { key: rawString("remote_animation_send"), value: rawBool(true) },
         { key: rawString("remote_animation_receive"), value: rawBool(true) },
-        { key: rawString("transform_per_second"), value: rawInt(20) },
+        { key: rawString("transform_per_second"), value: rawInt(100) },
         { key: rawString("tcp_transform_per_second"), value: rawInt(0) },
         { key: rawString("interpolation_mode"), value: rawByte(ROOM_INTERPOLATION_MODE) },
         { key: rawString("destroy_geometry"), value: rawBool(DESTROY_GEOMETRY) },
@@ -3686,32 +4307,71 @@ function isFallbackBattleProfile(profile) {
   return !profile || profile.isFallback === true;
 }
 
+function drainProfileLoadQueue() {
+  while (profileLoadInFlight < PROFILE_LOAD_CONCURRENCY && profileLoadQueue.length > 0) {
+    const job = profileLoadQueue.shift();
+    profileLoadInFlight += 1;
+    Promise.resolve()
+      .then(job.task)
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        profileLoadInFlight -= 1;
+        drainProfileLoadQueue();
+      });
+  }
+}
+
+function scheduleProfileLoad(task) {
+  if (profileLoadQueue.length >= PROFILE_LOAD_QUEUE_MAX) {
+    return Promise.reject(new Error(`profile queue full size=${profileLoadQueue.length}`));
+  }
+  return new Promise((resolve, reject) => {
+    profileLoadQueue.push({ task, resolve, reject });
+    drainProfileLoadQueue();
+  });
+}
+
+function loadPlayerProfileSingleFlight(incomingActor, options = {}) {
+  const { authId, authKey } = actorCredentials(incomingActor);
+  const ccid = Number(authId || 0);
+  const identityKey = `${ccid}:${authKey}`;
+  const existing = profileLoads.get(ccid);
+  if (existing) {
+    if (existing.identityKey === identityKey) return existing.promise;
+    return existing.promise.catch(() => null).then(() => loadPlayerProfileSingleFlight(incomingActor, options));
+  }
+  const promise = scheduleProfileLoad(() => loadPlayerProfile(incomingActor, options))
+    .finally(() => {
+      if (profileLoads.get(ccid)?.promise === promise) profileLoads.delete(ccid);
+    });
+  profileLoads.set(ccid, { identityKey, promise });
+  return promise;
+}
+
 function warmPlayerProfile(incomingActor, reason = "warm") {
   const cached = cachedPlayerProfile(incomingActor);
   if (cached) return Promise.resolve(cached);
 
   const { authId } = actorCredentials(incomingActor);
-  const cacheKey = profileCacheKeyForActor(incomingActor);
-  if (profileLoads.has(cacheKey)) return profileLoads.get(cacheKey);
-
   console.log(`[profile] warm start id=${authId} reason=${reason}`);
-  const promise = loadPlayerProfile(incomingActor)
+  return loadPlayerProfileSingleFlight(incomingActor)
     .catch((error) => {
       console.log(`[profile] warm failed id=${authId} reason=${reason} ${error.message}`);
       return fallbackPlayerProfile(incomingActor);
-    })
-    .finally(() => profileLoads.delete(cacheKey));
-  profileLoads.set(cacheKey, promise);
-  return promise;
+    });
 }
 
 async function profileForJoin(incomingActor, options = {}) {
   const cached = cachedPlayerProfile(incomingActor);
-  if (cached && !options.forceRefresh) return { profile: cached, source: "cache" };
+  if (cached) return { profile: cached, source: "cache" };
 
-  const loaded = options.forceRefresh
-    ? await loadPlayerProfile(incomingActor, { forceRefresh: true })
-    : await warmPlayerProfile(incomingActor, "room-join");
+  let loaded;
+  try {
+    loaded = await loadPlayerProfileSingleFlight(incomingActor, { forceRefresh: Boolean(options.forceRefresh) });
+  } catch (error) {
+    console.log(`[profile] join load failed id=${actorCredentials(incomingActor).authId} ${error.message}`);
+    loaded = fallbackPlayerProfile(incomingActor);
+  }
   if (!isFallbackBattleProfile(loaded)) return { profile: loaded, source: "loaded" };
   if (cached && !isFallbackBattleProfile(cached)) return { profile: cached, source: "cache" };
   return { profile: fallbackPlayerProfile(incomingActor), source: "fallback" };
@@ -3788,15 +4448,21 @@ async function postApiJson(path, body) {
 }
 
 async function loadShopCatalog(query, options = {}) {
-  if (!options.forceRefresh && (shopCatalogCache.weapons.length || shopCatalogCache.wears.length) && Date.now() - shopCatalogCache.loadedAt < CATALOG_CACHE_TTL_MS) {
+  if (!options.forceRefresh && shopCatalogCache.loadedAt > 0 && Date.now() - shopCatalogCache.loadedAt < CATALOG_CACHE_TTL_MS) {
     return shopCatalogCache;
   }
-
-  const payload = await fetchApiJson(`/ajax.php?page=shop&act=items&${query}`);
-  const weapons = Array.isArray(payload?.weap?.items) ? payload.weap.items : [];
-  const wears = Array.isArray(payload?.wear?.items) ? payload.wear.items : [];
-  shopCatalogCache = { loadedAt: Date.now(), weapons, wears };
-  return shopCatalogCache;
+  if (shopCatalogLoad) return shopCatalogLoad;
+  shopCatalogLoad = fetchApiJson(`/ajax.php?page=shop&act=items&${query}`)
+    .then((payload) => {
+      const weapons = Array.isArray(payload?.weap?.items) ? payload.weap.items : [];
+      const wears = Array.isArray(payload?.wear?.items) ? payload.wear.items : [];
+      shopCatalogCache = { loadedAt: Date.now(), weapons, wears };
+      return shopCatalogCache;
+    })
+    .finally(() => {
+      shopCatalogLoad = null;
+    });
+  return shopCatalogLoad;
 }
 
 async function loadPlayerProfile(incomingActor, options = {}) {
@@ -3816,7 +4482,7 @@ async function loadPlayerProfile(incomingActor, options = {}) {
         console.log(`[profile] abilities failed id=${authId} ${error.message}`);
         return { u: [] };
       }),
-      loadShopCatalog(query, { forceRefresh: options.forceRefresh }).catch((error) => {
+      loadShopCatalog(query).catch((error) => {
         console.log(`[profile] catalog failed id=${authId} ${error.message}`);
         return { weapons: [], wears: [] };
       }),
@@ -3857,6 +4523,9 @@ async function loadPlayerProfile(incomingActor, options = {}) {
       clan,
     };
     profileCache.set(cacheKey, { loadedAt: Date.now(), profile });
+    while (profileCache.size > PROFILE_CACHE_MAX) {
+      profileCache.delete(profileCache.keys().next().value);
+    }
     const stats = playerRuntimeStats(profile);
     console.log(`[profile] loaded id=${profile.authId} name=${profile.name} weap=${profileWeaponSelectionSummary(profile.weap)} loadout=${selectedWeaponLoadoutSummary(profile)} weapons=${selectedWeapons(profile)?.length || 0} weaponUpgrades=${selectedWeaponUpgradeSummary(profile)} wears=${selectedWears(profile).length} wearList=${selectedWearSummary(profile)} taunts=${selectedTaunts(profile).length} tauntSlots=${selectedTauntSummary(profile)} enhancers=${selectedEnhancers(profile).length} enhancerList=${selectedEnhancerSummary(profile)} abilities=${profile.abilities.length} sets=${stats.modifiers.completedSets.join(",") || "none"} hpPct=${stats.modifiers.healthPercent} hpFloor=${stats.modifiers.healthFloor} armorFlat=${stats.modifiers.armorFlat} armorPct=${stats.modifiers.armorPercent} dmgRedPct=${stats.modifiers.damageReductionPercent} speedPct=${stats.modifiers.speedPercent} speedFloor=${stats.modifiers.clientSpeedFloor} weaponSpeedPct=${stats.modifiers.weaponSpeedPercent} weaponRapidityPct=${stats.modifiers.weaponRapidityPercent} weaponHeadDmgPct=${stats.modifiers.weaponHeadDamagePercent} weaponAccuracyFlat=${stats.modifiers.weaponAccuracyFlat} ammoPct=${stats.modifiers.weaponAmmoPercent} jumpPct=${stats.modifiers.jumpPercent} shotgunJumpBonus=${stats.modifiers.shotgunJumpBonus} jumpCap=${stats.jumpCap} prot=${formatProtectionBonuses(stats.modifiers.protections)} rangeProt=${formatRangeProtectionBonuses(stats.modifiers.rangeProtections)} wearDmg=${formatDamageBonuses(stats.modifiers.damageBonuses)} health=${stats.maxHealth} energy=${stats.maxEnergy} speed10=${stats.speed10} jump=${stats.jump}`);
     return profile;
@@ -6344,7 +7013,7 @@ function cancelWeaponReload(state, reason = "cancel", now = Date.now()) {
   if (!state) return;
   clearWeaponReloadTimer(state);
   if (state.reloading) {
-    console.log(`[event] reload ${reason} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload ${reason} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
   }
   resetWeaponReloadState(state);
   setWeaponMode(state, WEAPON_MODE.READY, now);
@@ -6436,7 +7105,7 @@ function applyReloadTick(session, state, channel, reloadSeq) {
       const event = makeReloadUpdateEvent(session, state);
       sendReliableToSession(session, event, channel);
       broadcastReliableToRoom(session, event, channel, "reload", { requireLiveReady: true });
-      console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
+      if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
     }
     completeWeaponReloadState(state, now);
     return;
@@ -6453,7 +7122,7 @@ function applyReloadTick(session, state, channel, reloadSeq) {
     const event = makeReloadUpdateEvent(session, state);
     sendReliableToSession(session, event, channel);
     broadcastReliableToRoom(session, event, channel, "reload", { requireLiveReady: true });
-    console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
   }
 
   const remainingMs = Math.max(0, numberOr(state.reloadFullUntil, now + fullReloadMs) - now);
@@ -7684,7 +8353,7 @@ function buildShotEvent(session, parsed) {
     return null;
   }
   if (!session?.spawned || session.dead) {
-    console.log(`[event] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=not-live`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=not-live`);
     return null;
   }
   if (isZombiePlayerSession(session) && Number(weaponType) !== 1) {
@@ -7699,7 +8368,7 @@ function buildShotEvent(session, parsed) {
       slot: state?.slot,
       waitMs: gate.waitMs,
     });
-    console.log(`[event] shot blocked actor=${session.actorId} type=${weaponType} mode=${launchMode} reason=${gate.reason}${gate.waitMs ? ` wait=${gate.waitMs}ms` : ""}`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] shot blocked actor=${session.actorId} type=${weaponType} mode=${launchMode} reason=${gate.reason}${gate.waitMs ? ` wait=${gate.waitMs}ms` : ""}`);
     return null;
   }
 
@@ -7720,7 +8389,8 @@ function buildShotEvent(session, parsed) {
   response.weaponConfirm = shouldConfirmShotWeapon ? buildShotWeaponConfirm(session, state) : null;
   response.localAmmoSync = state ? makeReloadUpdateEvent(session, state) : null;
   recordAcceptedShotStats(session, response, state, weaponType, launchMode);
-  console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${describeProjectileLaunchPayloadKeys(data, weaponType, launchMode)}${response.summary}`);
+  runtimeMetrics.shots += 1;
+  if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${describeProjectileLaunchPayloadKeys(data, weaponType, launchMode)}${response.summary}`);
   return response;
 }
 
@@ -7851,7 +8521,7 @@ function buildWeaponChangeEvent(session, parsed) {
     return null;
   }
   if (!session?.spawned || session.dead) {
-    console.log(`[event] weapon-change ignored actor=${session?.actorId ?? "?"} reason=not-live`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] weapon-change ignored actor=${session?.actorId ?? "?"} reason=not-live`);
     return null;
   }
   if (isZombiePlayerSession(session)) {
@@ -7870,7 +8540,7 @@ function buildWeaponChangeEvent(session, parsed) {
     session.currentWeaponSlot = slot;
     invalidatePeerWeaponConfirm(session.room, session.actorId);
   }
-  console.log(`[event] weapon-change actor=${session.actorId}${describeWeaponEventData(data)}${state ? ` name=${state.systemName}` : ""}`);
+  if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] weapon-change actor=${session.actorId}${describeWeaponEventData(data)}${state ? ` name=${state.systemName}` : ""}`);
   return rawEvent(98, [
     { key: 254, value: rawInt(session.actorId) },
     { key: 245, value: data.raw },
@@ -7885,7 +8555,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
     return null;
   }
   if (!session?.spawned || session.dead) {
-    console.log(`[event] reload ignored actor=${session?.actorId ?? "?"} missingType=${requestedType} reason=not-live`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload ignored actor=${session?.actorId ?? "?"} missingType=${requestedType} reason=not-live`);
     return null;
   }
   if (isZombiePlayerSession(session)) {
@@ -7895,13 +8565,13 @@ function buildReloadEvent(session, parsed, channel = 0) {
   const state = weaponStateByType(session, requestedType);
   if (!state) {
     noteAntiCheatWeaponViolation(session, "reload", "missing-weapon", { weaponType: requestedType });
-    console.log(`[event] reload ignored actor=${session.actorId} missingType=${requestedType}`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload ignored actor=${session.actorId} missingType=${requestedType}`);
     return null;
   }
 
   if (isColdArmsWeaponType(state.type)) {
     noteAntiCheatWeaponViolation(session, "reload", "cold-arms", { weaponType: requestedType, slot: state.slot });
-    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=cold-arms`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=cold-arms`);
     return null;
   }
 
@@ -7910,7 +8580,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   const amount = Math.min(missing, reserve);
   if (amount <= 0) {
     noteAntiCheatWeaponViolation(session, "reload", "full-or-empty", { weaponType: requestedType, slot: state.slot });
-    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=full-or-empty loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=full-or-empty loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
     return null;
   }
 
@@ -7918,7 +8588,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
   const weaponMode = refreshWeaponMode(state, now);
   if (weaponMode === WEAPON_MODE.RELOADING) {
     noteAntiCheatWeaponViolation(session, "reload", "already-reloading", { weaponType: requestedType, slot: state.slot });
-    console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=already-reloading loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
+    if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload ignored actor=${session.actorId} slot=${state.slot} type=${state.type} reason=already-reloading loaded=${state.loadedAmmo} reserve=${state.ammoReserve}`);
     return null;
   }
   if (weaponMode === WEAPON_MODE.RELOADING_READY) {
@@ -7937,7 +8607,7 @@ function buildReloadEvent(session, parsed, channel = 0) {
     ? Math.min(reloadFirstTickDurationMs(state), numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs)))
     : numberOr(state.reloadDurationMs, reloadDurationMsFromRaw(state.reloadTimeMs));
   scheduleReloadTick(session, state, channel, state.reloadSeq, firstTickMs);
-  console.log(`[event] reload start actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} first=${firstTickMs}ms ready=${Math.max(0, numberOr(state.reloadReadyAt, 0) - now)}ms full=${state.reloadFullUntil - now}ms complex=${isComplexReloadWeaponState(state) ? 1 : 0}`);
+  if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload start actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} first=${firstTickMs}ms ready=${Math.max(0, numberOr(state.reloadReadyAt, 0) - now)}ms full=${state.reloadFullUntil - now}ms complex=${isComplexReloadWeaponState(state) ? 1 : 0}`);
   return null;
 }
 function clearSpawnStallRecovery(session) {
@@ -8027,6 +8697,19 @@ function pushRoomListToLobbySessions(reason = "room-list", channel = 0) {
   }
   if (sent > 0) console.log(`[event] room list live push reason=${reason} sessions=${sent} rooms=${roomListSummary()}`);
   return sent;
+}
+
+function scheduleRoomListPush(reason = "room-list", channel = 0) {
+  roomListPushReasons.add(String(reason || "room-list"));
+  roomListPushChannel = normalizeChannelId(channel, 0);
+  if (roomListPushTimer) return;
+  roomListPushTimer = setTimeout(() => {
+    roomListPushTimer = null;
+    const reasons = Array.from(roomListPushReasons);
+    roomListPushReasons.clear();
+    pushRoomListToLobbySessions(`coalesced:${reasons.join("+") || "room-list"}`, roomListPushChannel);
+  }, ROOM_LIST_COALESCE_MS);
+  roomListPushTimer.unref?.();
 }
 
 function roomSettingsCompatible(room, mapName, mode) {
@@ -8411,7 +9094,7 @@ function deleteEmptyRoom(room, reason = "empty") {
   clearZombieTimers(room);
   rooms.delete(room.name);
   console.log(`[state] empty room deleted reason=${reason} room=${room.name} map=${room.map || DEFAULT_MAP}`);
-  pushRoomListToLobbySessions(`delete-${reason}`);
+  scheduleRoomListPush(`delete-${reason}`);
   return true;
 }
 
@@ -8428,6 +9111,37 @@ function sameBattleIdentity(left, right) {
   const rightIdentity = sessionIdentityKey(right);
   if (leftIdentity && rightIdentity && leftIdentity === rightIdentity) return true;
   return Boolean(left.remoteKey && right.remoteKey && left.remoteKey === right.remoteKey);
+}
+
+function existingRoomForJoin(settings) {
+  const room = rooms.get(settings?.name || DEFAULT_ROOM);
+  if (!room) return null;
+  if (
+    (room.players?.size || 0) > 0 &&
+    settings?.hasFullSettings !== false &&
+    !roomSettingsCompatible(room, settings.map || DEFAULT_MAP, normalizeModeForMap(settings.map || DEFAULT_MAP, Number(settings.mode ?? 1)))
+  ) {
+    return null;
+  }
+  return room;
+}
+
+function roomOccupancyForJoin(room, playerId, joiningSession) {
+  if (!room?.players) return 0;
+  const normalizedPlayerId = Number(playerId || 0);
+  let count = 0;
+  for (const playerSession of room.players.values()) {
+    if (playerSession === joiningSession) continue;
+    if (normalizedPlayerId > 0 && Number(playerSession?.playerId || 0) === normalizedPlayerId) continue;
+    count += 1;
+  }
+  return count;
+}
+
+function roomHasCapacityForJoin(room, playerId, joiningSession) {
+  if (!room) return true;
+  const maxUsers = Math.max(1, Number(room.maxUsers || 8));
+  return roomOccupancyForJoin(room, playerId, joiningSession) < maxUsers;
 }
 
 function sameAuthenticatedCcid(left, right) {
@@ -8456,7 +9170,7 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
   console.log(`[state] room player removed reason=${reason} room=${room.name} map=${room.map || DEFAULT_MAP} actor=${actorId} player=${playerSession.playerId || "unknown"} peers=${peers}`);
   broadcastMasterUserState(playerSession.playerId);
   const deleted = deleteEmptyRoom(room, reason);
-  if (!deleted) pushRoomListToLobbySessions(`leave-${reason}`, options.channel || 0);
+  if (!deleted) scheduleRoomListPush(`leave-${reason}`, options.channel || 0);
   return true;
 }
 
@@ -8480,6 +9194,7 @@ function detachSessionFromRoom(session, reason = "leave") {
 }
 
 function resetTransportForReconnect(session, reason) {
+  clearSessionUdpOutbox(session);
   detachSessionFromRoom(session, reason);
   resetReliableDedupe(session, reason, { bumpGeneration: true });
   clearOutboundReliableState(session);
@@ -8558,7 +9273,7 @@ function removeDuplicatePlayerSessionsFromAllRooms(session, reason = "duplicate-
     resetReliableDedupe(candidate, reason, { bumpGeneration: true });
     candidate.transportGeneration = candidate.reliableGeneration;
     for (const [sessionId, mappedSession] of Array.from(sessions.entries())) {
-      if (mappedSession === candidate) sessions.delete(sessionId);
+      if (mappedSession === candidate) deleteFullSession(sessionId, candidate);
     }
     candidate.sessionId = null;
     candidate.socket = null;
@@ -8583,7 +9298,7 @@ function maybePruneIdleRoomSessions(now = Date.now()) {
       if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
       if (removeRoomPlayer(room, actorId, playerSession, "idle-timeout", { broadcastReason: "idle-leave" })) {
         removed += 1;
-        if (playerSession.sessionId) sessions.delete(playerSession.sessionId);
+        if (playerSession.sessionId) deleteFullSession(playerSession.sessionId, playerSession);
       }
     }
   }
@@ -8601,7 +9316,7 @@ function maybePruneIdleMasterSessions(now = Date.now()) {
       const lastSeenAt = Number(session?.lastSeenAt || 0);
       if (lastSeenAt > 0 && now - lastSeenAt <= ROOM_SESSION_IDLE_MS) continue;
       set.delete(session);
-      if (session?.sessionId) sessions.delete(session.sessionId);
+      if (session?.sessionId) deleteFullSession(session.sessionId, session);
       removed += 1;
     }
     if (set.size <= 0) {
@@ -9190,31 +9905,120 @@ function emitAchievementEvents(sourceSession, achievements) {
   }
 }
 
-async function postBattleEvent(session, type, extra = {}) {
-  if (!API_BASE_URL || typeof fetch !== "function") return;
+function battleEventPriority(type) {
+  return ["join", "death", "summary", "matchend", "match-end", "leave"].includes(String(type || "").toLowerCase())
+    ? "high"
+    : "normal";
+}
+
+function battleEventQueueSize() {
+  return battleEventHighQueue.length + battleEventNormalQueue.length;
+}
+
+function battleApiQueueSnapshot() {
+  return {
+    ...battleApiStats,
+    inFlight: battleEventInFlight,
+    queued: battleEventQueueSize(),
+    highQueued: battleEventHighQueue.length,
+    normalQueued: battleEventNormalQueue.length,
+    profileInFlight: profileLoadInFlight,
+    profileQueued: profileLoadQueue.length,
+  };
+}
+
+async function executeBattleEventJob(job) {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/battle/event`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
+    },
+    body: JSON.stringify(job.body),
+  }, BATTLE_EVENT_TIMEOUT_MS);
+  if (!response?.ok) throw new Error(`status=${response?.status ?? "no-response"}`);
+  let result = null;
   try {
-    const response = await fetch(`${API_BASE_URL}/battle/event`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}),
-      },
-      body: JSON.stringify(jsonForDb(session, { type, ...extra })),
-    });
-    if (!response.ok) {
-      console.log(`[api] ${type} failed status=${response.status}`);
-    } else {
-      let result = null;
-      try {
-        result = await response.json();
-      } catch {
-        result = null;
-      }
-      emitAchievementEvents(session, result?.achievements);
-      console.log(`[api] ${type} ok`);
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  emitAchievementEvents(job.session, result?.achievements);
+}
+
+function drainBattleEventQueue() {
+  while (battleEventInFlight < BATTLE_EVENT_CONCURRENCY && battleEventQueueSize() > 0) {
+    const job = battleEventHighQueue.shift() || battleEventNormalQueue.shift();
+    battleEventInFlight += 1;
+    executeBattleEventJob(job)
+      .then(() => {
+        battleApiStats.completed += 1;
+        job.resolve(true);
+      })
+      .catch((error) => {
+        battleApiStats.failed += 1;
+        if (String(error?.message || "").includes("timeout")) battleApiStats.timedOut += 1;
+        job.resolve(false);
+      })
+      .finally(() => {
+        battleEventInFlight -= 1;
+        drainBattleEventQueue();
+      });
+  }
+}
+
+function postBattleEvent(session, type, extra = {}) {
+  if (!API_BASE_URL || typeof fetch !== "function") return Promise.resolve(false);
+  const priority = battleEventPriority(type);
+  if (battleEventQueueSize() >= BATTLE_EVENT_QUEUE_MAX) {
+    if (priority !== "high") {
+      battleApiStats.dropped += 1;
+      return Promise.resolve(false);
     }
-  } catch (error) {
-    console.log(`[api] ${type} failed ${error.message}`);
+    const displaced = battleEventNormalQueue.shift() || battleEventHighQueue.shift();
+    if (displaced) {
+      battleApiStats.dropped += 1;
+      displaced.resolve(false);
+    }
+  }
+  return new Promise((resolve) => {
+    const job = {
+      session,
+      type,
+      priority,
+      body: jsonForDb(session, { type, ...extra }),
+      resolve,
+    };
+    if (priority === "high") battleEventHighQueue.push(job);
+    else battleEventNormalQueue.push(job);
+    battleApiStats.queued += 1;
+    drainBattleEventQueue();
+  });
+}
+
+function recordMoveTelemetry(session) {
+  if (!session) return;
+  const current = battleMoveTelemetry.get(session) || { moves: 0, lastRoomMoveCount: 0 };
+  current.moves += 1;
+  current.lastRoomMoveCount = Number(session.room?.moves || current.lastRoomMoveCount || 0);
+  battleMoveTelemetry.set(session, current);
+  battleApiStats.moveSamples += 1;
+}
+
+function flushMoveTelemetry() {
+  const snapshot = battleMoveTelemetry;
+  battleMoveTelemetry = new Map();
+  if (snapshot.size <= 0) return;
+  battleApiStats.moveFlushes += 1;
+  for (const [session, telemetry] of snapshot) {
+    if (!session || Number(session.playerId || 0) <= 1) continue;
+    postBattleEvent(session, "move", {
+      eventData: {
+        count: telemetry.lastRoomMoveCount,
+        moves: telemetry.moves,
+        windowMs: BATTLE_MOVE_FLUSH_MS,
+      },
+    });
   }
 }
 
@@ -9830,6 +10634,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[photon] unsupported messageType=${parsed?.messageType ?? "null"}`);
     return [];
   }
+  if (parsed.opCode !== 255 && !allowAuthenticatedOperation(session)) return [];
 
   const eventCode = photonEventCode(parsed);
   if (shouldLogParsedPayload(parsed)) {
@@ -9980,6 +10785,13 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
     }
+    const capacityRoom = existingRoomForJoin(settings);
+    if (!roomHasCapacityForJoin(capacityRoom, profile.authId, session)) {
+      const users = roomOccupancyForJoin(capacityRoom, profile.authId, session);
+      const maxUsers = Math.max(1, Number(capacityRoom.maxUsers || 8));
+      console.log(`[state] room join rejected reason=room-full name=${capacityRoom.name} users=${users}/${maxUsers} player=${profile.authId}`);
+      return [rawOperationResponse(255, [], -11, "room-full")];
+    }
 
     resetReliableDedupe(session, "real-room-join", { clearInFlight: false });
     session.listLobby = false;
@@ -10015,7 +10827,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.actorJoinAnnouncedAt = new Map();
     markKnownRoomActors(session);
     session.room.players.set(session.actorId, session);
-    pushRoomListToLobbySessions("room-join", channel);
+    scheduleRoomListPush("room-join", channel);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
@@ -10178,6 +10990,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     clearJoinRoomTimers(session);
     clearSpawnMoveWarningTimer(session);
     session.room.moves += 1;
+    runtimeMetrics.moves += 1;
     const point = transformFromEventData(parsed);
     if (point) {
       session.lastTransform = point;
@@ -10193,9 +11006,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       const spawnPeers = broadcastSpawnToRoom(session, pending.payload, pending.channel ?? channel);
       console.log(`[sync] deferred-spawn actor=${session.actorId} peers=${spawnPeers} reason=first-move-after-respawn`);
     }
-    if (session.room.moves === 1 || session.room.moves % 250 === 0) {
-      postBattleEvent(session, "move", { eventData: { count: session.room.moves } });
-    }
+    recordMoveTelemetry(session);
     const move = buildActorDataEvent(session, 99, parsed);
     const movePeers = broadcastMoveToRoom(session, move, channel);
     if ((DEBUG_MOVE_PACKETS || session.room.moves <= 5 || session.room.moves % MOVE_LOG_EVERY === 0) && movePeers.total > 0) {
@@ -10240,7 +11051,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         const confirmPeers = broadcastShotWeaponConfirmToRoom(session, response.weaponConfirm, channel);
         if (confirmPeers > 0) {
           const state = response.weaponConfirm.state;
-          console.log(`[sync] shot-weapon-confirm actor=${session.actorId} peers=${confirmPeers} slot=${state.slot} type=${state.type} name=${state.systemName}`);
+          if (VERBOSE_GAMEPLAY_LOGS) console.log(`[sync] shot-weapon-confirm actor=${session.actorId} peers=${confirmPeers} slot=${state.slot} type=${state.type} name=${state.systemName}`);
         }
       }
       broadcastReliableToRoom(session, response.shotEvent, channel, "shot", { requireMoveSeen: true });
@@ -10282,7 +11093,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (response) {
       const weaponPeers = broadcastLiveToRoom(session, response, channel);
       if (weaponPeers.total > 0) {
-        console.log(`[sync] weapon-change actor=${session.actorId} peers=${weaponPeers.total} reliable=${weaponPeers.reliable} spectator=${weaponPeers.spectator}${weaponPeers.spectator ? ` spectatorChannel=${weaponPeers.spectatorChannel}` : ""}`);
+        if (VERBOSE_GAMEPLAY_LOGS) console.log(`[sync] weapon-change actor=${session.actorId} peers=${weaponPeers.total} reliable=${weaponPeers.reliable} spectator=${weaponPeers.spectator}${weaponPeers.spectator ? ` spectatorChannel=${weaponPeers.spectatorChannel}` : ""}`);
       }
     }
     return response ? [response, ...(ammoSync ? [ammoSync] : [])] : [];
@@ -10295,138 +11106,52 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     return [];
   }
-  console.log(`[event] ack only code=${eventCode}`);
+  if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] ack only code=${eventCode}`);
   return [];
 }
 
 async function handleUdp(port, socket, msg, rinfo) {
-  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) return;
-  if (!allowUdpPacket(rinfo, msg.length)) return;
+  if (!Buffer.isBuffer(msg) || msg.length < 12 || msg.length > MAX_UDP_DATAGRAM_BYTES) {
+    runtimeMetrics.udpInboundDropped += 1;
+    if (rinfo?.address) recordInvalidUdpPacket(rinfo.address);
+    return;
+  }
+  if (!allowUdpPacket(rinfo, msg.length)) {
+    runtimeMetrics.udpInboundDropped += 1;
+    return;
+  }
+  runtimeMetrics.udpInboundPackets += 1;
+  runtimeMetrics.udpInboundBytes += msg.length;
 
   let offset = 12;
   const sessionId = key(port, rinfo);
   let session = sessions.get(sessionId);
-  if (!session) {
+  if (!session) session = pendingSessions.get(sessionId);
+  if (!session && !isExactEnetConnectPacket(msg) && readU16(msg, 0) !== 0xffff && readU32(msg, 8) !== 0) {
     const reboundSession = findNatRebindSession(port, msg, rinfo);
     if (reboundSession) {
       session = rebindSessionEndpoint(reboundSession, sessionId, socket, rinfo);
     }
   }
   if (!session) {
-    if (sessions.size >= MAX_SESSIONS_TOTAL) return;
-    if (sessionCountForIp(rinfo.address) >= MAX_SESSIONS_PER_IP) return;
-    session = {
-      peerId: 1,
-      actorId: 1,
-      challenge: readU32(msg, 8),
-      // VerifyConnect is an ENet control command and is not dispatched through
-      // Photon payload order. The first real Photon payload must therefore use
-      // reliable sequence 1, otherwise the Unity client ACKs it but waits for
-      // missing sequence 1 forever.
-      serverSeq: 0,
-      unreliableSeq: 0,
-      serverSeqByChannel: new Map(),
-      unreliableSeqByChannel: new Map(),
-      outboundReliable: new Map(),
-      outboundReliableRecoveryByChannel: new Map(),
-      outboundReliableOverflowAt: 0,
-      outboundRoundTripTime: OUTBOUND_RELIABLE_INITIAL_RTO_MS,
-      outboundRoundTripVariance: 0,
-      verifySeq: null,
-      seenVerify: false,
-      listLobby: false,
-      room: ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 }),
-      roomRaw: null,
-      actorRaw: null,
-      peerActorRaw: null,
-      peerActorRawBytes: 0,
-      peerActorLoadoutSlots: 0,
-      peerActorProfile: "",
-      joinActorRaw: null,
-      joinActorRawBytes: 0,
-      joinActorLoadoutSlots: 0,
-      joinActorProfile: "",
-      actorJoinParam: null,
-      team: -1,
-      zombieType: ZOMBIE_TYPE.HUMAN,
-      zombieInfectionHits: 0,
-      zombieLastInfectorActorId: 0,
-      spawned: false,
-      dead: false,
-      moveSeen: false,
-      moveCount: 0,
-      waitingSelfSpawnMove: false,
-      currentWeaponSlot: 1,
-      weaponStates: makeWeaponRuntimeState(null),
-      peerWeaponConfirmKeys: new Map(),
-      visibleItemIds: new Set(),
-      activeItemShots: new Map(),
-      impactTimers: new Map(),
-      spawnSeq: 0,
-      spawnRetry: null,
-      spawnMoveWarningTimer: null,
-      spawnSelfRetryTimers: new Set(),
-      joinSelfEventTimer: null,
-      joinStartEventTimer: null,
-      joinSettingsTimers: [],
-      joinLateStartTimers: [],
-      gameStateRequested: false,
-      lastGameStateResponseAt: 0,
-      reliableResponses: new Map(),
-      reliableInFlight: new Map(),
-      reliableFragments: new Map(),
-      reliableGeneration: 0,
-      transportGeneration: 0,
-      inboundReliableChannels: new Map(),
-      reliableReplayLogState: new Map(),
-      knownActorIds: new Set(),
-      actorJoinAnnouncedAt: new Map(),
-      joinActorListIds: new Set(),
-      deferredJoinActorIds: new Set(),
-      peerSpawnTimers: new Set(),
-      pendingSpawnBroadcast: null,
-      pendingPickupSync: null,
-      pickupSpawnRepairTimers: new Set(),
-      lastChannel: 0,
-      port,
-      remoteKey: `${rinfo.address}:${rinfo.port}`,
-      playerId: 1,
-      playerAuthKey: "",
-      playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
-      lastSeenAt: Date.now(),
-      health: playerRuntimeStats(null).maxHealth,
-      energy: playerRuntimeStats(null).maxEnergy,
-      kills: 0,
-      deaths: 0,
-      points: 0,
-      domination: 0,
-      revenge: 0,
-      maxDomination: 0,
-      maxRevenge: 0,
-      revengeStreak: 0,
-      killStreakByVictim: new Map(),
-      dominatedBy: new Set(),
-      expEarned: 0,
-      exp2clan: 0,
-      matchStartedAt: 0,
-      matchStatsPosted: false,
-      matchShots: 0,
-      matchHits: 0,
-      matchKills: 0,
-      matchDeaths: 0,
-      matchHeadKills: 0,
-      matchNutsKills: 0,
-      matchSuicides: 0,
-      matchDomination: 0,
-      matchRevenge: 0,
-      matchExp: 0,
-    };
-    session.roomRaw = makeRoomSettingsRaw(session.room);
-    sessions.set(sessionId, session);
+    if (isIpQuarantined(rinfo.address)) return;
+    if (!isExactEnetConnectPacket(msg)) {
+      recordInvalidUdpPacket(rinfo.address);
+      return;
+    }
+    session = storePendingSession(makePendingSession(port, socket, rinfo, sessionId, readU32(msg, 8), Date.now()));
+    if (!session) return;
   }
   const incomingChallenge = readU32(msg, 8);
   if (session.challenge && incomingChallenge && session.challenge !== incomingChallenge) {
-    resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
+    if (session.pendingHandshake) {
+      if (!isExactEnetConnectPacket(msg)) return;
+      deletePendingSession(session);
+      session = storePendingSession(makePendingSession(port, socket, rinfo, sessionId, incomingChallenge, Date.now()));
+      if (!session) return;
+    } else {
+      resetTransportForReconnect(session, `challenge-change ${session.challenge}->${incomingChallenge}`);
+    }
   }
   session.challenge = incomingChallenge;
   session.remoteKey = `${rinfo.address}:${rinfo.port}`;
@@ -10475,6 +11200,10 @@ async function handleUdp(port, socket, msg, rinfo) {
       }
     } else if (commandType === 0x02) {
       session.seenVerify = true;
+      const inboundChannel = ensureInboundReliableChannel(session, channel);
+      if (reliableSequenceCompare(inboundChannel.expectedSeq, reliableSeq) <= 0) {
+        inboundChannel.expectedSeq = nextReliableSequence(reliableSeq);
+      }
       commands.push(makeAck(channel, reliableSeq, sentTime));
       if (session.verifySeq == null) {
         session.verifySeq = session.serverSeq++;
@@ -10488,11 +11217,15 @@ async function handleUdp(port, socket, msg, rinfo) {
       if (!session.transportDisconnected) {
         session.transportDisconnected = true;
         transportDisconnected = true;
-        const disconnectedRoom = session.room?.name || "none";
-        detachMasterSession(session, "enet-disconnect");
-        detachSessionFromRoom(session, "enet-disconnect");
-        if (session.sessionId) sessions.delete(session.sessionId);
-        console.log(`[state] enet disconnect port=${port} actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${disconnectedRoom}`);
+        if (session.pendingHandshake) {
+          deletePendingSession(session);
+        } else {
+          const disconnectedRoom = session.room?.name || "none";
+          detachMasterSession(session, "enet-disconnect");
+          detachSessionFromRoom(session, "enet-disconnect");
+          if (session.sessionId) deleteFullSession(session.sessionId, session);
+          console.log(`[state] enet disconnect port=${port} actor=${session.actorId || 0} player=${session.playerId || "unknown"} room=${disconnectedRoom}`);
+        }
       }
     } else if (commandType === 0x05 || commandType === 0x0c) {
       commands.push(makeAck(channel, reliableSeq, sentTime));
@@ -10514,6 +11247,11 @@ async function handleUdp(port, socket, msg, rinfo) {
         fragment = parseReliableFragmentCommand(msg, offset, commandEnd, channel, reliableSeq);
         if (fragment.error) {
           console.log(`[fragment] ignored actor=${session.actorId} seq=${reliableSeq} channel=${channel} reason=${fragment.error}`);
+          offset = commandEnd;
+          continue;
+        }
+        if (session.pendingHandshake && (fragment.fragmentCount > PENDING_FRAGMENT_COUNT_MAX || fragment.totalLength > PENDING_FRAGMENT_TOTAL_BYTES_MAX)) {
+          recordInvalidUdpPacket(rinfo.address);
           offset = commandEnd;
           continue;
         }
@@ -10633,21 +11371,31 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 
   if (commands.length > 0) {
-    sendPacket(socket, rinfo, session, commands, peerIdOverride);
+    if (transportDisconnected) sendPacketNow(socket, rinfo, session, commands, peerIdOverride);
+    else sendPacket(socket, rinfo, session, commands, peerIdOverride);
   }
 }
 
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
-console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms atomicProfileJoin=required`);
+console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms outbox=${UDP_OUTBOX_FLUSH_MS}ms/${UDP_OUTBOX_MAX_COMMANDS}cmd/${UDP_OUTBOX_MAX_BYTES}bytes packetMax=${MAX_UDP_PACKET_BYTES} atomicProfileJoin=required`);
+console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT_QUEUE_MAX}/timeout${BATTLE_EVENT_TIMEOUT_MS}ms moveFlush=${BATTLE_MOVE_FLUSH_MS}ms profileQueue=${PROFILE_LOAD_CONCURRENCY}/${PROFILE_LOAD_QUEUE_MAX} profileCache=${PROFILE_CACHE_MAX}/${PROFILE_CACHE_TTL_MS}ms catalogCache=${CATALOG_CACHE_TTL_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
-console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
+console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
 if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
+const sessionSecuritySweepInterval = setInterval(sweepSecurityState, SESSION_SECURITY_SWEEP_MS);
+if (typeof sessionSecuritySweepInterval.unref === "function") sessionSecuritySweepInterval.unref();
+const udpRateSweepInterval = setInterval(sweepUdpRateBuckets, UDP_RATE_SWEEP_MS);
+if (typeof udpRateSweepInterval.unref === "function") udpRateSweepInterval.unref();
+const battleMoveFlushInterval = setInterval(flushMoveTelemetry, BATTLE_MOVE_FLUSH_MS);
+if (typeof battleMoveFlushInterval.unref === "function") battleMoveFlushInterval.unref();
+const runtimeMetricsInterval = setInterval(reportRuntimeMetrics, RUNTIME_METRICS_INTERVAL_MS);
+if (typeof runtimeMetricsInterval.unref === "function") runtimeMetricsInterval.unref();
 const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREASURY_POLL_MS);
 if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
 const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
