@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-22-frankfurt-host-v280";
+const BUILD_ID = "battle-server-2026-07-22-enet-connect-layout-v281";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -1053,7 +1053,7 @@ function isExactEnetConnectPacket(msg) {
   if (msg[12] !== 0x02 || ![0, 0xff].includes(msg[13])) return false;
   if (readU32(msg, 16) !== 44 || 12 + readU32(msg, 16) !== msg.length) return false;
   const mtu = readU16(msg, 26);
-  const channelCount = readU32(msg, 28);
+  const channelCount = readU32(msg, 32);
   return readU32(msg, 20) > 0 && mtu >= 576 && mtu <= 4096 && channelCount >= 1 && channelCount <= 255;
 }
 
