@@ -8,12 +8,13 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-20-workshop-prices-ammo-v49";
+const API_BUILD_ID = "railway-api-2026-07-22-audit-schema-repair-v51";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
 const API_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ASSET_BUNDLE_DIR = path.join(API_DIR, "assetbundles");
+const LAUNCHER_RELEASE_DIR = path.join(API_DIR, "launcher-releases");
 const ASSET_BUNDLE_NAMES = new Set([
   "arena_3lvl.unity3d",
   "zombi_2.unity3d",
@@ -35,7 +36,12 @@ const START_EXP = Number(process.env.START_EXP || 0);
 const START_EXP_MAX = Number(process.env.START_EXP_MAX || 1000);
 const LEVEL_EXP_STEP = Math.max(1, Number(process.env.LEVEL_EXP_STEP || START_EXP_MAX || 1000));
 const SHOP_PRICE = 100;
-const BATTLE_HOST = process.env.BATTLE_HOST || "";
+const RETIRED_BATTLE_HOST = "54.145.212.225";
+const DEFAULT_BATTLE_HOST = "3.76.0.237";
+const CONFIGURED_BATTLE_HOST = String(process.env.BATTLE_HOST || "").trim();
+const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRED_BATTLE_HOST
+  ? DEFAULT_BATTLE_HOST
+  : CONFIGURED_BATTLE_HOST;
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
@@ -1552,6 +1558,15 @@ async function ensurePlayerNamePendingSchema() {
   await pgPool.query("ALTER TABLE players ADD COLUMN IF NOT EXISTS name_pending BOOLEAN NOT NULL DEFAULT false");
 }
 
+async function ensureAuditSecuritySchema() {
+  // Keep these columns as startup invariants as well as migration 014. Railway
+  // deployments can retain a stale schema_migrations row or omit migration
+  // assets while still deploying server.js; either case must not break login
+  // audit on an otherwise healthy game API.
+  await pgPool.query("ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS geo JSONB NOT NULL DEFAULT '{}'::jsonb");
+  await pgPool.query("ALTER TABLE player_activity ADD COLUMN IF NOT EXISTS last_geo JSONB NOT NULL DEFAULT '{}'::jsonb");
+}
+
 async function ensureLauncherDeviceSchema() {
   await pgPool.query(`
     CREATE TABLE IF NOT EXISTS launcher_devices (
@@ -1785,6 +1800,7 @@ async function initStore() {
   });
 
   await runMigrations();
+  await ensureAuditSecuritySchema();
   await ensurePlayerNamePendingSchema();
   await ensureLauncherDeviceSchema();
   await syncPostgresCatalog();
@@ -7280,6 +7296,82 @@ function tryServeAssetBundle(req, res, url) {
   return true;
 }
 
+function tryServeLauncherRelease(req, res, url) {
+  const manifestRequest = url.pathname === "/launcher/update.json";
+  const signatureRequest = url.pathname === "/launcher/update.json.sig";
+  const releaseMatch = /^\/launcher\/releases\/([0-9A-Za-z._-]{1,64})\/ContraCityLauncher\.exe$/.exec(url.pathname);
+  if (!manifestRequest && !signatureRequest && !releaseMatch) return false;
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+    return true;
+  }
+
+  let filePath;
+  let contentType;
+  let cacheControl;
+  if (manifestRequest) {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, "update.json");
+    contentType = "application/json; charset=utf-8";
+    cacheControl = "no-store, no-cache, must-revalidate";
+  } else if (signatureRequest) {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, "update.json.sig");
+    contentType = "text/plain; charset=us-ascii";
+    cacheControl = "no-store, no-cache, must-revalidate";
+  } else {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, releaseMatch[1], "ContraCityLauncher.exe");
+    contentType = "application/octet-stream";
+    cacheControl = "public, max-age=31536000, immutable";
+  }
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    sendJson(res, { ok: false, error: "launcher_release_not_found" }, 404);
+    return true;
+  }
+
+  const stat = fs.statSync(filePath);
+  const headers = {
+    ...securityHeaders(),
+    "content-type": contentType,
+    "cache-control": cacheControl,
+    "accept-ranges": "bytes",
+    "last-modified": stat.mtime.toUTCString()
+  };
+  if (releaseMatch) headers["content-disposition"] = "attachment; filename=\"ContraCityLauncher.exe\"";
+
+  let start = 0;
+  let end = stat.size - 1;
+  let status = 200;
+  const range = String(req.headers.range || "").trim();
+  if (range) {
+    const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+    if (!match) {
+      res.writeHead(416, { ...headers, "content-range": `bytes */${stat.size}`, "content-length": "0" });
+      res.end();
+      return true;
+    }
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : end;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= stat.size || end < start) {
+      res.writeHead(416, { ...headers, "content-range": `bytes */${stat.size}`, "content-length": "0" });
+      res.end();
+      return true;
+    }
+    end = Math.min(end, stat.size - 1);
+    status = 206;
+    headers["content-range"] = `bytes ${start}-${end}/${stat.size}`;
+  }
+
+  headers["content-length"] = String(end - start + 1);
+  res.writeHead(status, headers);
+  if (req.method === "HEAD") {
+    res.end();
+    return true;
+  }
+  fs.createReadStream(filePath, { start, end }).pipe(res);
+  return true;
+}
+
 function readJsonBody(req, limitBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -7903,6 +7995,10 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (tryServeLauncherRelease(req, res, url)) {
+    return;
+  }
+
   if (tryServeClanArm(req, res, url)) {
     return;
   }
@@ -8111,6 +8207,7 @@ async function handleHttpRequest(req, res) {
       ok: true,
       build: API_BUILD_ID,
       storage: pgPool ? "postgres" : "json-file",
+      battleHost: BATTLE_HOST,
       ...(process.env.SECURITY_TEST_METRICS === "1" ? {
         securityMetrics: {
           rateLimitBuckets: rateLimitBuckets.size,
