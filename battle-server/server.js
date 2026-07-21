@@ -15,9 +15,14 @@ const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
   .filter(Boolean);
 const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-production-fedf.up.railway.app").replace(/\/+$/, "");
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
-const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
+const RETIRED_PUBLIC_HOST = "54.145.212.225";
+const DEFAULT_PUBLIC_HOST = "3.76.0.237";
+const CONFIGURED_PUBLIC_HOST = String(process.env.PUBLIC_HOST || "").trim();
+const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRED_PUBLIC_HOST
+  ? DEFAULT_PUBLIC_HOST
+  : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-21-railway-api-host-v279";
+const BUILD_ID = "battle-server-2026-07-22-frankfurt-host-v280";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
