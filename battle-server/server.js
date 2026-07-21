@@ -13,11 +13,11 @@ const PORTS = (process.env.BATTLE_PORTS || "5055,5056,5057,5058,5255")
   .split(",")
   .map((value) => Number(value.trim()))
   .filter(Boolean);
-const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const API_BASE_URL = (process.env.API_BASE_URL || "https://contra-city-api-production-fedf.up.railway.app").replace(/\/+$/, "");
 const API_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const PUBLIC_HOST = process.env.PUBLIC_HOST || "54.145.212.225";
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-21-capacity-retry-fairness-v278";
+const BUILD_ID = "battle-server-2026-07-21-railway-api-host-v279";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
