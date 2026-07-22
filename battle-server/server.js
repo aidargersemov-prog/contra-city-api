@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-22-enet-connect-layout-v281";
+const BUILD_ID = "battle-server-2026-07-22-profile-freshness-v282";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -90,6 +90,11 @@ const PROFILE_CACHE_TTL_MS = Number(process.env.PROFILE_CACHE_TTL_MS || 30000);
 const PROFILE_CACHE_MAX = boundedEnvInt("PROFILE_CACHE_MAX", 2048);
 const PROFILE_LOAD_CONCURRENCY = boundedEnvInt("PROFILE_LOAD_CONCURRENCY", 16, 1, 64);
 const PROFILE_LOAD_QUEUE_MAX = boundedEnvInt("PROFILE_LOAD_QUEUE_MAX", 1024);
+// The original client reports a profile mutation to the game-logic connection
+// immediately before it starts the separate HTTP save. Give that save a bounded
+// ordering window before a real-room join reads the canonical Railway profile.
+const PROFILE_CHANGE_SETTLE_MS = boundedEnvInt("PROFILE_CHANGE_SETTLE_MS", 750, 0, 5000);
+const PROFILE_CHANGE_TRACK_MS = boundedEnvInt("PROFILE_CHANGE_TRACK_MS", 10000, PROFILE_CHANGE_SETTLE_MS, 60000);
 const CATALOG_CACHE_TTL_MS = Number(process.env.CATALOG_CACHE_TTL_MS || 300000);
 const BATTLE_EVENT_CONCURRENCY = boundedEnvInt("BATTLE_EVENT_CONCURRENCY", 12, 8, 16);
 const BATTLE_EVENT_QUEUE_MAX = boundedEnvInt("BATTLE_EVENT_QUEUE_MAX", 2048, 16);
@@ -222,6 +227,7 @@ const masterSessionsByPlayerId = new Map();
 const clanTreasuryLiveEvents = new Map();
 const profileCache = new Map();
 const profileLoads = new Map();
+const profileChanges = new Map();
 const profileLoadQueue = [];
 let profileLoadInFlight = 0;
 let shopCatalogLoad = null;
@@ -4288,6 +4294,55 @@ function cachedPlayerProfile(incomingActor) {
   return null;
 }
 
+function invalidatePlayerProfileCache(playerId) {
+  const id = Number(playerId || 0);
+  if (!Number.isFinite(id) || id <= 0) return 0;
+  const prefix = `${id}:`;
+  let removed = 0;
+  for (const cacheKey of profileCache.keys()) {
+    if (!String(cacheKey).startsWith(prefix)) continue;
+    profileCache.delete(cacheKey);
+    removed += 1;
+  }
+  return removed;
+}
+
+function markPlayerProfileChanged(playerId, changeType) {
+  const id = Number(playerId || 0);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const previous = profileChanges.get(id);
+  const change = {
+    version: Number(previous?.version || 0) + 1,
+    changedAt: Date.now(),
+    changeType: Number(changeType || 0),
+  };
+  profileChanges.delete(id);
+  profileChanges.set(id, change);
+  while (profileChanges.size > PROFILE_CACHE_MAX) {
+    profileChanges.delete(profileChanges.keys().next().value);
+  }
+  const removed = invalidatePlayerProfileCache(id);
+  console.log(`[profile] invalidated id=${id} change=${change.changeType || "unknown"} version=${change.version} cache=${removed}`);
+  return change;
+}
+
+async function settleRecentPlayerProfileChange(playerId) {
+  const id = Number(playerId || 0);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const change = profileChanges.get(id);
+  if (!change) return null;
+  const age = Date.now() - change.changedAt;
+  if (age >= PROFILE_CHANGE_TRACK_MS) {
+    if (profileChanges.get(id) === change) profileChanges.delete(id);
+    return null;
+  }
+  const waitMs = Math.max(0, PROFILE_CHANGE_SETTLE_MS - age);
+  if (waitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+  return { ...change, waitedMs: waitMs };
+}
+
 function fallbackPlayerProfile(incomingActor) {
   const { authId, authKey } = actorCredentials(incomingActor);
   return {
@@ -4340,16 +4395,24 @@ function loadPlayerProfileSingleFlight(incomingActor, options = {}) {
   const { authId, authKey } = actorCredentials(incomingActor);
   const ccid = Number(authId || 0);
   const identityKey = `${ccid}:${authKey}`;
+  const forceRefresh = Boolean(options.forceRefresh);
   const existing = profileLoads.get(ccid);
   if (existing) {
-    if (existing.identityKey === identityKey) return existing.promise;
+    if (existing.identityKey === identityKey) {
+      if (!forceRefresh || existing.forceRefresh) return existing.promise;
+      // A canonical join refresh must never be downgraded to an older lobby
+      // warm-up that was allowed to use the cache.
+      return existing.promise
+        .catch(() => null)
+        .then(() => loadPlayerProfileSingleFlight(incomingActor, { ...options, forceRefresh: true }));
+    }
     return existing.promise.catch(() => null).then(() => loadPlayerProfileSingleFlight(incomingActor, options));
   }
   const promise = scheduleProfileLoad(() => loadPlayerProfile(incomingActor, options))
     .finally(() => {
       if (profileLoads.get(ccid)?.promise === promise) profileLoads.delete(ccid);
     });
-  profileLoads.set(ccid, { identityKey, promise });
+  profileLoads.set(ccid, { identityKey, forceRefresh, promise });
   return promise;
 }
 
@@ -4367,18 +4430,36 @@ function warmPlayerProfile(incomingActor, reason = "warm") {
 }
 
 async function profileForJoin(incomingActor, options = {}) {
+  const forceRefresh = Boolean(options.forceRefresh);
   const cached = cachedPlayerProfile(incomingActor);
-  if (cached) return { profile: cached, source: "cache" };
+  if (!forceRefresh && cached) return { profile: cached, source: "cache" };
 
   let loaded;
   try {
-    loaded = await loadPlayerProfileSingleFlight(incomingActor, { forceRefresh: Boolean(options.forceRefresh) });
+    const { authId } = actorCredentials(incomingActor);
+    let settledChange = forceRefresh ? await settleRecentPlayerProfileChange(authId) : null;
+    loaded = await loadPlayerProfileSingleFlight(incomingActor, { forceRefresh });
+
+    // If another client mutation arrived while the canonical profile was being
+    // loaded, wait for that save and refresh once more instead of joining with
+    // the just-obsoleted snapshot.
+    if (forceRefresh) {
+      const latestChange = profileChanges.get(Number(authId || 0));
+      if (latestChange && (!settledChange || latestChange.version !== settledChange.version)) {
+        invalidatePlayerProfileCache(authId);
+        settledChange = await settleRecentPlayerProfileChange(authId);
+        loaded = await loadPlayerProfileSingleFlight(incomingActor, { forceRefresh: true });
+      }
+      if (settledChange?.waitedMs > 0) {
+        console.log(`[profile] join settled id=${authId} change=${settledChange.changeType || "unknown"} version=${settledChange.version} wait=${settledChange.waitedMs}ms`);
+      }
+    }
   } catch (error) {
     console.log(`[profile] join load failed id=${actorCredentials(incomingActor).authId} ${error.message}`);
     loaded = fallbackPlayerProfile(incomingActor);
   }
-  if (!isFallbackBattleProfile(loaded)) return { profile: loaded, source: "loaded" };
-  if (cached && !isFallbackBattleProfile(cached)) return { profile: cached, source: "cache" };
+  if (!isFallbackBattleProfile(loaded)) return { profile: loaded, source: forceRefresh ? "fresh" : "loaded" };
+  if (cached && !isFallbackBattleProfile(cached)) return { profile: cached, source: "cache-fallback" };
   return { profile: fallbackPlayerProfile(incomingActor), source: "fallback" };
 }
 
@@ -10875,6 +10956,16 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     return handleMasterEvent(session, parsed);
   }
 
+  if (eventCode === 207) {
+    // GameLogicEventCode.Change. The original client sends key 51=changeType
+    // for inventory(1), weapons(2), clothes(3), abilities(4), taunts(5),
+    // clan/enhancers/name/stats(6..12). They all feed the same battle profile.
+    const data = eventDataHash(parsed);
+    const changeType = Number(htGet(data, 51)?.value || 0);
+    markPlayerProfileChanged(session.playerId, changeType);
+    return [];
+  }
+
   if (eventCode === 155) {
     return handleBattleChatRequest(session, parsed, channel);
   }
@@ -11384,7 +11475,7 @@ async function handleUdp(port, socket, msg, rinfo) {
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
 console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms outbox=${UDP_OUTBOX_FLUSH_MS}ms/${UDP_OUTBOX_MAX_COMMANDS}cmd/${UDP_OUTBOX_MAX_BYTES}bytes packetMax=${MAX_UDP_PACKET_BYTES} atomicProfileJoin=required`);
-console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT_QUEUE_MAX}/timeout${BATTLE_EVENT_TIMEOUT_MS}ms moveFlush=${BATTLE_MOVE_FLUSH_MS}ms profileQueue=${PROFILE_LOAD_CONCURRENCY}/${PROFILE_LOAD_QUEUE_MAX} profileCache=${PROFILE_CACHE_MAX}/${PROFILE_CACHE_TTL_MS}ms catalogCache=${CATALOG_CACHE_TTL_MS}ms`);
+console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT_QUEUE_MAX}/timeout${BATTLE_EVENT_TIMEOUT_MS}ms moveFlush=${BATTLE_MOVE_FLUSH_MS}ms profileQueue=${PROFILE_LOAD_CONCURRENCY}/${PROFILE_LOAD_QUEUE_MAX} profileCache=${PROFILE_CACHE_MAX}/${PROFILE_CACHE_TTL_MS}ms profileChangeSettle=${PROFILE_CHANGE_SETTLE_MS}ms/track${PROFILE_CHANGE_TRACK_MS}ms catalogCache=${CATALOG_CACHE_TTL_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
