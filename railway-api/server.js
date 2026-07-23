@@ -8,7 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-22-audit-schema-repair-v51";
+const API_BUILD_ID = "railway-api-2026-07-23-promocodes-v55";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -45,6 +45,7 @@ const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRE
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
+const PROMO_ADMIN_TOKEN = process.env.PROMO_ADMIN_TOKEN || "";
 const CLOUDFRONT_ORIGIN_SECRET = process.env.CLOUDFRONT_ORIGIN_SECRET || "";
 const CLOUDFRONT_ORIGIN_HEADER = String(process.env.CLOUDFRONT_ORIGIN_HEADER || "x-contra-origin").toLowerCase();
 const ORIGIN_GUARD_MODE = ["off", "audit", "enforce"].includes(String(process.env.ORIGIN_GUARD_MODE || "").toLowerCase())
@@ -89,6 +90,7 @@ const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESS
 const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
+const revokedGameLinkKeys = new Map();
 const gameLoginSeen = new Map();
 const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 30 * 60 * 1000));
 const playerBanCache = new Map();
@@ -228,6 +230,8 @@ function requestGeo(req) {
 function isOriginGuardExempt(pathname) {
   return pathname === "/health" ||
     pathname.startsWith("/battle/") ||
+    pathname.startsWith("/admin/promocodes") ||
+    pathname === "/launcher/promo/redeem" ||
     pathname === "/admin/device-reset" ||
     pathname === "/db";
 }
@@ -254,6 +258,8 @@ function allowPlayerFacingOrigin(req, pathname) {
 function requestRatePolicy(pathname) {
   if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
   if (pathname === "/admin/logs/auth/login") return { windowMs: 15 * 60 * 1000, limit: 20 };
+  if (pathname.startsWith("/admin/promocodes")) return { windowMs: 60000, limit: 120 };
+  if (pathname === "/launcher/promo/redeem") return { windowMs: 60000, limit: 20 };
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
@@ -338,6 +344,11 @@ function hasValidAdminToken(req) {
   return Boolean(ADMIN_API_TOKEN) && safeTokenEquals(req.headers["x-admin-token"], ADMIN_API_TOKEN);
 }
 
+function hasValidPromoAdminToken(req) {
+  return Boolean(PROMO_ADMIN_TOKEN) &&
+    safeTokenEquals(req.headers["x-promo-admin-token"], PROMO_ADMIN_TOKEN);
+}
+
 const CLAN_CREATE_LEVEL = 30;
 const CLAN_JOIN_LEVEL = 15;
 const CLAN_DEFAULT_MAX_MEMBERS = 5;
@@ -387,7 +398,10 @@ const CLAN_ARM_ID_SET = new Set(CLAN_ARM_IDS);
 const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
 const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
 const CLAN_ARM_ITEM_TYPE = 5;
-const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 3, 4, 5, 30, 31, 32, 33, 34, 35, 36]);
+// Enhancers 3 ("Лёгкое приземление") and 36 ("Меркурий") are deliberately
+// hidden from the ordinary shop. Existing inventory rows are preserved, but
+// new listing/buying is disabled and the battle server ignores both IDs.
+const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 4, 5, 30, 31, 32, 33, 34, 35]);
 const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13, 150, 151, 152, 153, 154, 155, 156, 159, 160, 205, 208, 209]);
 const SHOP_ENHANCER_IDS = Object.freeze([...PLAYER_ENHANCER_IDS, ...CLAN_ENHANCER_IDS]);
 const CLAN_ENHANCER_ID_SET = new Set(CLAN_ENHANCER_IDS);
@@ -1573,6 +1587,7 @@ async function ensureLauncherDeviceSchema() {
       player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
       device_key_id TEXT NOT NULL,
       device_public_key TEXT NOT NULL,
+      link_key_hash TEXT NOT NULL DEFAULT '',
       hwid_hash TEXT NOT NULL DEFAULT '',
       risk JSONB NOT NULL DEFAULT '{}'::jsonb,
       bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1580,10 +1595,31 @@ async function ensureLauncherDeviceSchema() {
       reset_at TIMESTAMPTZ
     )
   `);
+  await pgPool.query("ALTER TABLE launcher_devices ADD COLUMN IF NOT EXISTS link_key_hash TEXT NOT NULL DEFAULT ''");
   await pgPool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS launcher_devices_device_key_id_idx
       ON launcher_devices (device_key_id)
   `);
+
+  const legacyBindings = await pgPool.query(`
+    SELECT d.player_id, p.cckey
+    FROM launcher_devices d
+    JOIN players p ON p.id = d.player_id
+    WHERE d.link_key_hash = ''
+  `);
+  if (legacyBindings.rowCount) {
+    const playerIds = legacyBindings.rows.map((row) => Number(row.player_id));
+    const linkKeyHashes = legacyBindings.rows.map((row) => launcherLinkKeyHash(row.cckey));
+    await pgPool.query(
+      `UPDATE launcher_devices d
+       SET link_key_hash = source.link_key_hash
+       FROM unnest($1::integer[], $2::text[]) AS source(player_id, link_key_hash)
+       WHERE d.player_id = source.player_id
+         AND d.link_key_hash = ''`,
+      [playerIds, linkKeyHashes]
+    );
+    console.log(`[launcher-device] backfilled link generation bindings=${legacyBindings.rowCount}`);
+  }
 }
 
 async function syncPostgresCatalog(existingClient = null) {
@@ -1844,7 +1880,6 @@ async function savePostgresStore(nextStore) {
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
-          cckey = EXCLUDED.cckey,
           name = EXCLUDED.name,
           full_name = EXCLUDED.full_name,
           level = EXCLUDED.level,
@@ -2345,7 +2380,7 @@ function normalizeAccount(account) {
   const rawInventory = Array.isArray(account?.inventory) ? account.inventory : [];
   const loadoutInventory = normalizeLoadoutInventory({ ...fresh.weap, ...(account?.weap || {}) }, rawInventory);
   const viewInventory = normalizeViewInventory({ ...fresh.view, ...(account?.view || {}) }, loadoutInventory.inventory);
-  return {
+  const normalized = {
     ...fresh,
     ...account,
     view: viewInventory.view,
@@ -2360,6 +2395,13 @@ function normalizeAccount(account) {
     modeStats: Array.isArray(account?.modeStats) ? account.modeStats : [],
     mapStats: Array.isArray(account?.mapStats) ? account.mapStats : []
   };
+  if (normalized.launcherDevice) {
+    normalized.launcherDevice = {
+      ...normalized.launcherDevice,
+      linkKeyHash: normalized.launcherDevice.linkKeyHash || launcherLinkKeyHash(normalized.key)
+    };
+  }
+  return normalized;
 }
 
 function ensureDesktopAccount() {
@@ -2392,13 +2434,14 @@ function pruneLauncherSessions(now = Date.now()) {
   }
 }
 
-function createLauncherSession(account) {
+function createLauncherSession(account, deviceKeyId = "") {
   pruneLauncherSessions();
   const token = randomLauncherToken();
   const expiresAt = Date.now() + LAUNCHER_SESSION_TTL_MS;
   launcherSessions.set(token, {
     id: String(account.id),
     key: String(account.key),
+    deviceKeyId: normalizeLauncherDeviceKeyId(deviceKeyId),
     expiresAt
   });
   return {
@@ -2407,11 +2450,17 @@ function createLauncherSession(account) {
   };
 }
 
-function launcherSessionCredentials(rawToken) {
+function launcherSessionRecord(rawToken) {
   const token = String(rawToken || "").trim();
   if (!token) return null;
   pruneLauncherSessions();
   const session = launcherSessions.get(token);
+  if (!session) return null;
+  return { token, ...session };
+}
+
+function launcherSessionCredentials(rawToken) {
+  const session = launcherSessionRecord(rawToken);
   if (!session) return null;
   return { id: String(session.id), key: String(session.key) };
 }
@@ -2482,6 +2531,10 @@ function accountFrom(url) {
 }
 
 function persist(account) {
+  const current = store.accounts[String(account.id)];
+  if (current?.key && account.key !== current.key && isRevokedGameLinkKey(account.id, account.key)) {
+    account.key = current.key;
+  }
   account.updatedAt = new Date().toISOString();
   store.accounts[String(account.id)] = normalizeAccount(account);
   saveStore(store);
@@ -2498,6 +2551,9 @@ async function accountFromRequestUnchecked(url) {
   };
   const credentials = accountCredentialsFrom(url);
   if (!credentials) {
+    return null;
+  }
+  if (isRevokedGameLinkKey(credentials.id, credentials.key)) {
     return null;
   }
 
@@ -2789,6 +2845,20 @@ function normalizeLauncherPublicKey(value) {
   return publicKey;
 }
 
+function launcherLinkKeyHash(value) {
+  return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
+}
+
+function launcherDeviceKeyMatchesPublicKey(deviceKeyId, publicKey) {
+  const expected = String(deviceKeyId || "").toLowerCase();
+  if (!expected.startsWith("win.")) return false;
+  const pemVariants = [publicKey, `${publicKey}\n`, `${publicKey}\r\n`];
+  return pemVariants.some((pem) => {
+    const hash = crypto.createHash("sha256").update(pem, "utf8").digest("hex").slice(0, 32);
+    return safeTokenEquals(expected, `win.${hash}`);
+  });
+}
+
 function normalizeHwidRiskHash(value) {
   const hash = String(value || "").trim().toLowerCase();
   return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
@@ -2821,6 +2891,7 @@ async function loadLauncherDevice(accountId) {
       playerId: Number(row.player_id),
       deviceKeyId: row.device_key_id,
       publicKey: row.device_public_key,
+      linkKeyHash: row.link_key_hash || "",
       hwidHash: row.hwid_hash || "",
       risk: jsonValue(row.risk, {}),
       boundAt: postgresTimestamp(row.bound_at),
@@ -2833,32 +2904,325 @@ async function loadLauncherDevice(accountId) {
   return account?.launcherDevice || null;
 }
 
+function normalizePromoCode(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function isValidPromoCode(value) {
+  return /^[A-Z0-9][A-Z0-9_-]{2,31}$/.test(String(value || ""));
+}
+
+function promoCodePayload(row) {
+  if (!row) return null;
+  const maxRedemptions = row.max_redemptions == null ? null : Number(row.max_redemptions);
+  const redemptionCount = Number(row.redemption_count || 0);
+  return {
+    id: Number(row.id),
+    code: String(row.code || row.code_normalized || ""),
+    rewardType: String(row.reward_type || "contrabucks"),
+    rewardAmount: Number(row.reward_amount || 0),
+    maxRedemptions,
+    redemptionCount,
+    remainingRedemptions: maxRedemptions == null ? null : Math.max(0, maxRedemptions - redemptionCount),
+    active: Boolean(row.active),
+    expiresAt: postgresTimestamp(row.expires_at) || null,
+    createdByTelegramId: row.created_by_telegram_id == null ? null : Number(row.created_by_telegram_id),
+    createdByLabel: String(row.created_by_label || ""),
+    createdAt: postgresTimestamp(row.created_at),
+    updatedAt: postgresTimestamp(row.updated_at)
+  };
+}
+
+function normalizedPositiveInteger(value, maxValue, nullable = false) {
+  if (nullable && (value == null || value === "" || Number(value) === 0)) return null;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0 || number > maxValue) return undefined;
+  return number;
+}
+
+async function createPromoCode(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const code = normalizePromoCode(body?.code);
+  if (!isValidPromoCode(code)) {
+    return { ok: false, status: 400, error: "invalid_code" };
+  }
+
+  const rewardAmount = normalizedPositiveInteger(body?.rewardAmount ?? body?.contrabucks, 10_000_000);
+  if (rewardAmount === undefined) {
+    return { ok: false, status: 400, error: "invalid_reward_amount" };
+  }
+
+  const maxRedemptions = normalizedPositiveInteger(body?.maxRedemptions, 1_000_000, true);
+  if (maxRedemptions === undefined) {
+    return { ok: false, status: 400, error: "invalid_max_redemptions" };
+  }
+
+  const expiresInDays = normalizedPositiveInteger(body?.expiresInDays, 3650, true);
+  if (expiresInDays === undefined) {
+    return { ok: false, status: 400, error: "invalid_expiry" };
+  }
+  const expiresAt = expiresInDays == null
+    ? null
+    : new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+  const creatorTelegramId = Number(body?.createdByTelegramId || 0);
+  const creatorLabel = String(body?.createdByLabel || "").trim().slice(0, 160);
+
+  const inserted = await pgPool.query(
+    `INSERT INTO promo_codes (
+       code, code_normalized, reward_type, reward_amount, max_redemptions,
+       active, expires_at, created_by_telegram_id, created_by_label
+     )
+     VALUES ($1, $1, 'contrabucks', $2, $3, TRUE, $4, $5, $6)
+     ON CONFLICT (code_normalized) DO NOTHING
+     RETURNING *`,
+    [
+      code,
+      rewardAmount,
+      maxRedemptions,
+      expiresAt,
+      Number.isSafeInteger(creatorTelegramId) && creatorTelegramId > 0 ? creatorTelegramId : null,
+      creatorLabel
+    ]
+  );
+  if (!inserted.rowCount) {
+    const existing = await pgPool.query(
+      "SELECT * FROM promo_codes WHERE code_normalized = $1",
+      [code]
+    );
+    return { ok: false, status: 409, error: "code_exists", promo: promoCodePayload(existing.rows[0]) };
+  }
+
+  return { ok: true, created: true, promo: promoCodePayload(inserted.rows[0]) };
+}
+
+async function listPromoCodes(limitValue = 20) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const limit = Math.max(1, Math.min(100, Number(limitValue) || 20));
+  const result = await pgPool.query(
+    `SELECT *
+     FROM promo_codes
+     ORDER BY created_at DESC, id DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return { ok: true, promos: result.rows.map(promoCodePayload) };
+}
+
+async function setPromoCodeActive(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const id = Number(body?.id || 0);
+  const code = normalizePromoCode(body?.code);
+  const active = body?.active === true;
+  if ((!Number.isSafeInteger(id) || id <= 0) && !isValidPromoCode(code)) {
+    return { ok: false, status: 400, error: "invalid_promo_reference" };
+  }
+
+  const result = Number.isSafeInteger(id) && id > 0
+    ? await pgPool.query(
+      `UPDATE promo_codes
+       SET active = $2, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, active]
+    )
+    : await pgPool.query(
+      `UPDATE promo_codes
+       SET active = $2, updated_at = now()
+       WHERE code_normalized = $1
+       RETURNING *`,
+      [code, active]
+    );
+  if (!result.rowCount) return { ok: false, status: 404, error: "promo_not_found" };
+  return { ok: true, promo: promoCodePayload(result.rows[0]) };
+}
+
+async function accountFromPromoLauncherBody(body) {
+  const session = launcherSessionRecord(body?.sessionToken);
+  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+  if (!session || !session.deviceKeyId || !deviceKeyId || session.deviceKeyId !== deviceKeyId) {
+    return { ok: false, status: 403, error: "launcher_session_invalid" };
+  }
+
+  const sessionUrl = new URL("https://launcher.local/promo");
+  sessionUrl.searchParams.set("ccsession", session.token);
+  const account = await accountFromRequest(sessionUrl);
+  if (!account) return { ok: false, status: 403, error: "launcher_session_invalid" };
+
+  const device = await loadLauncherDevice(account.id);
+  const currentLinkKeyHash = launcherLinkKeyHash(account.key);
+  if (!device ||
+      device.deviceKeyId !== deviceKeyId ||
+      !safeTokenEquals(device.linkKeyHash, currentLinkKeyHash)) {
+    return { ok: false, status: 403, error: "device_signature_required" };
+  }
+
+  return { ok: true, account, session, device };
+}
+
+async function redeemPromoCode(account, rawCode, context = {}) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const code = normalizePromoCode(rawCode);
+  if (!isValidPromoCode(code)) return { ok: false, status: 400, error: "invalid_code" };
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const promoResult = await client.query(
+      "SELECT * FROM promo_codes WHERE code_normalized = $1 FOR UPDATE",
+      [code]
+    );
+    const promo = promoResult.rows[0];
+    if (!promo) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 400, error: "promo_not_found" };
+    }
+
+    const previous = await client.query(
+      `SELECT reward_amount, balance_after, redeemed_at
+       FROM promo_redemptions
+       WHERE promo_code_id = $1 AND player_id = $2`,
+      [Number(promo.id), Number(account.id)]
+    );
+    if (previous.rowCount) {
+      const balanceResult = await client.query("SELECT money FROM players WHERE id = $1", [Number(account.id)]);
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        alreadyRedeemed: true,
+        status: "already_redeemed",
+        promo: promoCodePayload(promo),
+        rewardAmount: Number(previous.rows[0].reward_amount || promo.reward_amount || 0),
+        balance: Number(balanceResult.rows[0]?.money ?? previous.rows[0].balance_after ?? account.money ?? 0),
+        redeemedAt: postgresTimestamp(previous.rows[0].redeemed_at)
+      };
+    }
+
+    if (!promo.active) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "promo_inactive" };
+    }
+    if (promo.expires_at && new Date(promo.expires_at).getTime() <= Date.now()) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "promo_expired" };
+    }
+    if (promo.max_redemptions != null && Number(promo.redemption_count || 0) >= Number(promo.max_redemptions)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "promo_limit_reached" };
+    }
+
+    const playerResult = await client.query(
+      "SELECT money FROM players WHERE id = $1 FOR UPDATE",
+      [Number(account.id)]
+    );
+    if (!playerResult.rowCount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "player_not_found" };
+    }
+
+    const balanceBefore = Number(playerResult.rows[0].money || 0);
+    const rewardAmount = Number(promo.reward_amount || 0);
+    const balanceAfter = balanceBefore + rewardAmount;
+    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > 2_147_483_647) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "balance_limit_reached" };
+    }
+
+    await client.query(
+      "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+      [Number(account.id), balanceAfter]
+    );
+    const redemption = await client.query(
+      `INSERT INTO promo_redemptions (
+         promo_code_id, player_id, reward_type, reward_amount,
+         balance_before, balance_after, device_key_id, link_key_hash
+       )
+       VALUES ($1, $2, 'contrabucks', $3, $4, $5, $6, $7)
+       RETURNING redeemed_at`,
+      [
+        Number(promo.id),
+        Number(account.id),
+        rewardAmount,
+        balanceBefore,
+        balanceAfter,
+        String(context.deviceKeyId || "").slice(0, 160),
+        launcherLinkKeyHash(account.key)
+      ]
+    );
+    const updatedPromo = await client.query(
+      `UPDATE promo_codes
+       SET redemption_count = redemption_count + 1, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [Number(promo.id)]
+    );
+    await writeAuditEvent(client, {
+      playerId: Number(account.id),
+      playerName: String(account.name || ""),
+      eventType: "promo_redeemed",
+      category: "economy",
+      severity: "info",
+      description: `Промокод ${code}: начислено ${rewardAmount} контрабаксов`,
+      oldValue: { balance: balanceBefore },
+      newValue: { balance: balanceAfter, delta: rewardAmount, promoCode: code },
+      source: "launcher_promo",
+      ipAddress: String(context.ipAddress || ""),
+      device: String(context.deviceKeyId || ""),
+      metadata: { promoCodeId: Number(promo.id), rewardType: "contrabucks" }
+    });
+    await client.query("COMMIT");
+
+    return {
+      ok: true,
+      alreadyRedeemed: false,
+      status: "redeemed",
+      promo: promoCodePayload(updatedPromo.rows[0]),
+      rewardAmount,
+      balance: balanceAfter,
+      redeemedAt: postgresTimestamp(redemption.rows[0]?.redeemed_at)
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function bindLauncherDevice(account, body, req) {
   const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
   const publicKey = normalizeLauncherPublicKey(body?.devicePublicKey);
   const hwidHash = normalizeHwidRiskHash(body?.hwidRiskHash);
-  if (!deviceKeyId || !publicKey || !hwidHash) {
+  if (!deviceKeyId || !publicKey || !hwidHash || !launcherDeviceKeyMatchesPublicKey(deviceKeyId, publicKey)) {
     return { ok: false, error: "device_bind_required" };
   }
 
   const now = new Date().toISOString();
+  const linkKeyHash = launcherLinkKeyHash(account.key);
   const risk = { hwidChanged: false, ip: requestClientIp(req), userAgent: String(req.headers["user-agent"] || "").slice(0, 160) };
   if (pgPool) {
     const existingDevice = await pgPool.query(
-      "SELECT player_id FROM launcher_devices WHERE device_key_id = $1 AND player_id <> $2",
-      [deviceKeyId, Number(account.id)]
+      `SELECT player_id
+       FROM launcher_devices
+       WHERE player_id <> $2
+         AND (device_key_id = $1 OR (hwid_hash <> '' AND hwid_hash = $3))
+       LIMIT 1`,
+      [deviceKeyId, Number(account.id), hwidHash]
     );
     if (existingDevice.rowCount) {
       return { ok: false, error: "device_already_bound" };
     }
 
     try {
-      await pgPool.query(
-        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, hwid_hash, risk, bound_at, last_seen_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
-         ON CONFLICT (player_id) DO NOTHING`,
-        [Number(account.id), deviceKeyId, publicKey, hwidHash, JSON.stringify(risk)]
+      const inserted = await pgPool.query(
+        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, link_key_hash, hwid_hash, risk, bound_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, now(), now())
+         ON CONFLICT (player_id) DO NOTHING
+         RETURNING player_id`,
+        [Number(account.id), deviceKeyId, publicKey, linkKeyHash, hwidHash, JSON.stringify(risk)]
       );
+      if (!inserted.rowCount) {
+        return { ok: false, error: "device_signature_required" };
+      }
     } catch (error) {
       if (error?.code === "23505") {
         return { ok: false, error: "device_already_bound" };
@@ -2867,12 +3231,14 @@ async function bindLauncherDevice(account, body, req) {
     }
   } else {
     for (const existing of Object.values(store.accounts || {})) {
-      if (Number(existing?.id) !== Number(account.id) && existing?.launcherDevice?.deviceKeyId === deviceKeyId) {
+      const existingDevice = existing?.launcherDevice;
+      if (Number(existing?.id) !== Number(account.id) &&
+          (existingDevice?.deviceKeyId === deviceKeyId || (existingDevice?.hwidHash && existingDevice.hwidHash === hwidHash))) {
         return { ok: false, error: "device_already_bound" };
       }
     }
     const normalized = normalizeAccount(account);
-    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, hwidHash, risk, boundAt: now, lastSeenAt: now };
+    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, linkKeyHash, hwidHash, risk, boundAt: now, lastSeenAt: now };
     store.accounts[String(account.id)] = normalized;
     await saveStore(store);
   }
@@ -2883,6 +3249,7 @@ async function bindLauncherDevice(account, body, req) {
 
 async function touchLauncherDevice(account, device, hwidHash, req) {
   const normalizedHash = normalizeHwidRiskHash(hwidHash);
+  const linkKeyHash = launcherLinkKeyHash(account.key);
   const risk = {
     hwidChanged: Boolean(device?.hwidHash && normalizedHash && device.hwidHash !== normalizedHash),
     ip: requestClientIp(req),
@@ -2892,13 +3259,22 @@ async function touchLauncherDevice(account, device, hwidHash, req) {
   if (pgPool) {
     await pgPool.query(
       `UPDATE launcher_devices
-       SET hwid_hash = COALESCE(NULLIF($2, ''), hwid_hash), risk = $3::jsonb, last_seen_at = now()
+       SET link_key_hash = $2,
+           hwid_hash = COALESCE(NULLIF($3, ''), hwid_hash),
+           risk = $4::jsonb,
+           last_seen_at = now()
        WHERE player_id = $1`,
-      [Number(account.id), normalizedHash, JSON.stringify(risk)]
+      [Number(account.id), linkKeyHash, normalizedHash, JSON.stringify(risk)]
     );
   } else if (store.accounts[String(account.id)]?.launcherDevice) {
     const normalized = normalizeAccount(store.accounts[String(account.id)]);
-    normalized.launcherDevice = { ...normalized.launcherDevice, hwidHash: normalizedHash || normalized.launcherDevice.hwidHash, risk, lastSeenAt: new Date().toISOString() };
+    normalized.launcherDevice = {
+      ...normalized.launcherDevice,
+      linkKeyHash,
+      hwidHash: normalizedHash || normalized.launcherDevice.hwidHash,
+      risk,
+      lastSeenAt: new Date().toISOString()
+    };
     store.accounts[String(account.id)] = normalized;
     await saveStore(store);
   }
@@ -2957,7 +3333,13 @@ function verifyLauncherDeviceSignature(device, nonce, signature) {
 }
 
 async function verifyLauncherDeviceAccess(account, body, req) {
-  const current = await loadLauncherDevice(account.id);
+  let current = await loadLauncherDevice(account.id);
+  const currentLinkKeyHash = launcherLinkKeyHash(account.key);
+  if (current?.linkKeyHash && !safeTokenEquals(current.linkKeyHash, currentLinkKeyHash)) {
+    console.warn(`[launcher-device] stale link generation reset player=${account.id} keyId=${current.deviceKeyId}`);
+    await deleteLauncherDeviceBinding(account.id);
+    current = null;
+  }
   if (!current) {
     const bound = await bindLauncherDevice(account, body, req);
     if (!bound.ok) return { ok: false, status: 403, error: bound.error };
@@ -2986,9 +3368,10 @@ async function verifyLauncherDeviceAccess(account, body, req) {
   return { ok: true, bound: true };
 }
 
-async function resetLauncherDeviceBinding(accountId) {
+async function deleteLauncherDeviceBinding(accountId, client = null) {
   if (pgPool) {
-    const result = await pgPool.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
+    const executor = client || pgPool;
+    const result = await executor.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
     return result.rowCount > 0;
   }
   const account = store.accounts[String(accountId)];
@@ -2997,6 +3380,83 @@ async function resetLauncherDeviceBinding(accountId) {
   store.accounts[String(accountId)] = account;
   await saveStore(store);
   return true;
+}
+
+function revokeLauncherCredentialsForPlayer(accountId) {
+  const playerId = Number(accountId);
+  for (const [token, session] of launcherSessions) {
+    if (Number(session?.id) === playerId) launcherSessions.delete(token);
+  }
+  for (const [nonce, challenge] of launcherDeviceChallenges) {
+    if (Number(challenge?.playerId) === playerId) launcherDeviceChallenges.delete(nonce);
+  }
+}
+
+function rememberRevokedGameLinkKey(accountId, key) {
+  const playerId = Number(accountId);
+  if (!Number.isInteger(playerId) || playerId <= 0 || !key) return;
+  const hashes = revokedGameLinkKeys.get(playerId) || [];
+  hashes.push(launcherLinkKeyHash(key));
+  revokedGameLinkKeys.set(playerId, hashes.slice(-8));
+}
+
+function isRevokedGameLinkKey(accountId, key) {
+  const hashes = revokedGameLinkKeys.get(Number(accountId));
+  if (!hashes?.length || !key) return false;
+  const hash = launcherLinkKeyHash(key);
+  return hashes.some((revokedHash) => safeTokenEquals(revokedHash, hash));
+}
+
+async function rotateLauncherGameLink(accountId) {
+  const playerId = Number(accountId);
+  if (!Number.isInteger(playerId) || playerId <= 0) return null;
+  const nextKey = newAccountKey(playerId);
+  let bindingRemoved = false;
+  let account = null;
+  let previousKey = "";
+
+  if (pgPool) {
+    await pgSaveChain.catch(() => {});
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query("SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE", [playerId]);
+      if (!existing.rowCount) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      previousKey = String(existing.rows[0].cckey || "");
+      bindingRemoved = await deleteLauncherDeviceBinding(playerId, client);
+      await client.query(
+        "UPDATE players SET cckey = $2, updated_at = now() WHERE id = $1",
+        [playerId, nextKey]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    account = await loadPostgresAccount(playerId);
+    if (account) store.accounts[String(playerId)] = account;
+  } else {
+    const existing = store.accounts[String(playerId)];
+    if (!existing) return null;
+    const normalized = normalizeAccount(existing);
+    previousKey = String(normalized.key || "");
+    bindingRemoved = Boolean(normalized.launcherDevice);
+    delete normalized.launcherDevice;
+    normalized.key = nextKey;
+    normalized.updatedAt = new Date().toISOString();
+    store.accounts[String(playerId)] = normalized;
+    await saveStore(store);
+    account = normalized;
+  }
+
+  rememberRevokedGameLinkKey(playerId, previousKey);
+  revokeLauncherCredentialsForPlayer(playerId);
+  return { account, bindingRemoved };
 }
 
 async function loginAccountFromUrl(url) {
@@ -3199,7 +3659,11 @@ function inventoryPayload(account) {
     result: true,
     st: Math.floor(Date.now() / 1000),
     data: {
-      items: JSON.stringify(account.inventory || []),
+      items: JSON.stringify(
+        (account.inventory || []).filter(
+          (item) => !(Number(item?.itype || 0) === 2 && Number(item?.e_id ?? item?.id ?? 0) === 36)
+        )
+      ),
       dw: clone(defaultWeapons)
     }
   };
@@ -3897,6 +4361,11 @@ const SHOP_DURATION = Object.freeze({
   PERMANENT: 4
 });
 const SHOP_DAY_SECONDS = 86460;
+// Enhancer.eD is read through SimpleJSON.JSONNode.AsInt on the original
+// client. Permanent clan ownership is stored as eD=0, but clan inventory must
+// expose a non-zero Int32 timestamp because ClanInventory.Refresh dereferences
+// Enhancer.Duration without a null check.
+const CLIENT_MAX_UNIX_SECONDS = 2147483647;
 
 function currentUnixSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -4603,7 +5072,11 @@ function activeClanInventoryItems(clan, now = currentUnixSeconds()) {
     .filter((item) => Number(item?.itype ?? item?.it ?? 0) === 2)
     .filter((item) => Number(item?.iC || 0) === 1)
     .filter((item) => isActiveTimedItem(item, now))
-    .map((item) => clone(item));
+    .map((item) => {
+      const payload = clone(item);
+      if (Number(payload.eD || 0) <= 0) payload.eD = CLIENT_MAX_UNIX_SECONDS;
+      return payload;
+    });
 }
 
 function clanPayload(clan, options = {}) {
@@ -5377,15 +5850,20 @@ async function joinClan(account, url) {
   account = ensureClanAccount(account);
   const clanId = Number(url.searchParams.get("cid") || 0);
   if (pgPool) return await joinClanPostgres(account, clanId);
-  const clan = clanById(clanId);
+  let clan = clanById(clanId);
   if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(account.level || 1) < CLAN_JOIN_LEVEL) return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
   if (playerClanRecord(account.id)) return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
   if (Number(clan.access || 0) === 0 || Number(clan.accessLevel || 0) > Number(account.level || 0)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Object.keys(clan.members || {}).length >= Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS)) return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
-  if (playerInviteClanIds(account.id).length >= Number(account.clanMaxRequest || 10) && !clan.invites[String(account.id)]) {
+  const inviteClanIds = playerInviteClanIds(account.id);
+  if (inviteClanIds.length >= Number(account.clanMaxRequest || 10) && !inviteClanIds.includes(clanId)) {
     return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   }
+  // playerClanRecord()/playerInviteClanIds() normalize the JSON store and can
+  // replace clan records. Reacquire the live object before mutating it.
+  clan = clanById(clanId);
+  if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   clan.invites[String(account.id)] = {
     playerId: Number(account.id),
     createdAt: new Date().toISOString()
@@ -5557,25 +6035,31 @@ async function acceptClanInvite(account, url) {
   const clanId = Number(url.searchParams.get("cid") || 0);
   const userId = Number(url.searchParams.get("uid") || 0);
   if (pgPool) return await acceptClanInvitePostgres(account, clanId, userId);
-  const clan = clanById(clanId);
+  let clan = clanById(clanId);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const invite = clan.invites[String(userId)];
   const userAccount = accountById(userId);
-  if (!invite || !userAccount) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+  if (!userAccount) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   const existingClan = playerClanRecord(userId);
   if (existingClan) {
-    if (clan.invites?.[String(userId)]) {
+    clan = clanById(clanId);
+    if (clan?.invites?.[String(userId)]) {
       delete clan.invites[String(userId)];
       clan.updatedAt = new Date().toISOString();
       await saveClanState();
     }
     return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
   }
+  // activeClanRecords() performs the same normalization. Use only objects from
+  // this fresh collection for the remaining checks and mutations.
+  const clans = activeClanRecords();
+  clan = clans.find((candidate) => Number(candidate.id) === clanId) || null;
+  const invite = clan?.invites?.[String(userId)];
+  if (!clan || !isClanOwner(account, clan) || !invite) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Object.keys(clan.members || {}).length >= Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS)) {
     return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
   }
   let removedInvites = 0;
-  for (const otherClan of activeClanRecords()) {
+  for (const otherClan of clans) {
     if (!otherClan.invites?.[String(userId)]) continue;
     delete otherClan.invites[String(userId)];
     otherClan.updatedAt = new Date().toISOString();
@@ -5996,7 +6480,7 @@ function changeClanKoef(account, url) {
   return ok({ cid: Number(clan.id), id: Number(account.id), val: Number(clan.members[String(account.id)].expKoef) });
 }
 
-function buyClanEnhancer(account, url) {
+async function buyClanEnhancer(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const enhancerId = Number(url.searchParams.get("id") || 0);
@@ -6006,21 +6490,24 @@ function buyClanEnhancer(account, url) {
   const price = shopDurationPrice(item, duration);
   if (Number(clan.money || 0) < price) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
   clan.money = Number(clan.money || 0) - price;
-  const seconds = shopDurationSeconds(duration);
-  const expiresAt = seconds > 0 ? currentUnixSeconds() + seconds : 0;
+  const key = `2:${enhancerId}`;
+  const existingItem = (clan.inventory || []).find(
+    (owned) => String(owned.itemKey || inventoryItemKey(owned)) === key
+  );
+  const purchasedItem = withPurchasedDuration(item, duration, existingItem);
   const inventoryItem = {
-    ...clone(item),
+    ...purchasedItem,
     it: 2,
     itype: 2,
     iC: 1,
-    eD: expiresAt
+    itemKey: key,
+    createdAt: existingItem?.createdAt || new Date().toISOString()
   };
-  const key = `2:${enhancerId}`;
   clan.inventory = (clan.inventory || []).filter((owned) => String(owned.itemKey || inventoryItemKey(owned)) !== key);
-  clan.inventory.push({ ...inventoryItem, itemKey: key });
+  clan.inventory.push(inventoryItem);
   addClanTreasuryEvent(clan, account.id, -price, CLAN_TREASURY_EVENT_TYPE.BUY_ENHANCER);
   clan.updatedAt = new Date().toISOString();
-  saveClanState();
+  await saveClanState();
   return ok();
 }
 
@@ -7132,7 +7619,14 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "bweapupg") return await buyWeaponUpgrade(account, shopWeaponUpgradesById.get(id));
     if (act === "bwear") return await buyItem(account, findShopItem(shopWears, "w_id", id));
     if (act === "btaunt") return await buyTaunt(account, findShopItem(shopTaunts, "t_id", id), url.searchParams.get("dur"));
-    if (act === "benh") return await buyEnhancer(account, findShopItem(shopEnhancers, "e_id", id), url.searchParams.get("dur"));
+    if (act === "benh") {
+      const enhancerItem = canonicalEnhancersById.get(id);
+      return await buyEnhancer(
+        account,
+        enhancerItem && Number(enhancerItem.iC || 0) === 0 ? enhancerItem : null,
+        url.searchParams.get("dur")
+      );
+    }
     if (act === "babil") return await buyAbility(account, url);
     if (act === "bmap") return ok({ req: "" });
     return { result: false, err: [1] };
@@ -7622,6 +8116,29 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
     return;
   }
 
+  if (type === "exp") {
+    const expAwarded = eventNumber(event, details, "expAwarded", 0);
+    if (playerId > 0 && expAwarded > 0) {
+      const expResult = await awardPlayerExperience(client, playerId, expAwarded, "battle_server_enhancer");
+      if (expResult) {
+        details.expAwarded = expAwarded;
+        details.expResult = expResult;
+      }
+      const clan = playerClanRecord(playerId);
+      const member = clan?.members?.[String(playerId)];
+      const exp2clan = eventNumber(event, details, "exp2clan", 0)
+        || Math.round(expAwarded * Number(member?.expKoef || 0) / 100);
+      if (exp2clan > 0) {
+        const clanExpResult = await awardClanExperience(client, playerId, exp2clan);
+        if (clanExpResult) {
+          details.exp2clan = exp2clan;
+          details.clanExpResult = clanExpResult;
+        }
+      }
+    }
+    return;
+  }
+
   if (type === "death" || type === "score") {
     const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
     const victimPlayerId = Number(event.victimPlayerId || details.victimPlayerId || playerId || 0);
@@ -8018,6 +8535,52 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (url.pathname === "/admin/promocodes" || url.pathname === "/admin/promocodes/status") {
+    if (!hasValidPromoAdminToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
+    try {
+      if (url.pathname === "/admin/promocodes" && req.method === "GET") {
+        const result = await listPromoCodes(url.searchParams.get("limit"));
+        sendJson(res, result, result.status || 200);
+        return;
+      }
+
+      if (req.method !== "POST") {
+        sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+        return;
+      }
+      const body = await readJsonBody(req, 16 * 1024);
+      const result = url.pathname === "/admin/promocodes"
+        ? await createPromoCode(body)
+        : await setPromoCodeActive(body);
+      if (result.ok) {
+        const promo = result.promo;
+        await writeAuditEvent(pgPool, {
+          eventType: url.pathname === "/admin/promocodes" ? "promo_created" : "promo_status_changed",
+          category: "economy",
+          severity: "notice",
+          description: url.pathname === "/admin/promocodes"
+            ? `Создан промокод ${promo.code}: ${promo.rewardAmount} контрабаксов`
+            : `Промокод ${promo.code} ${promo.active ? "включён" : "выключен"}`,
+          source: "telegram_admin",
+          ipAddress: requestClientIp(req),
+          device: String(req.headers["user-agent"] || "").slice(0, 300),
+          newValue: promo,
+          metadata: {
+            telegramAdminId: Number(body?.createdByTelegramId || body?.adminTelegramId || 0) || null
+          }
+        });
+      }
+      sendJson(res, result, result.status || (result.ok ? 200 : 400));
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (error.message || "promo_admin_failed") }, status);
+    }
+    return;
+  }
+
   if (url.pathname === "/launcher-device/challenge") {
     if (req.method !== "POST") {
       sendJson(res, { result: false, error: "method_not_allowed" }, 405);
@@ -8065,23 +8628,33 @@ async function handleHttpRequest(req, res) {
         sendJson(res, { ok: false, error: "invalid_ccid" }, 400);
         return;
       }
-      const removed = await resetLauncherDeviceBinding(ccid);
-      console.log(`[launcher-device] admin reset player=${ccid} removed=${removed}`);
+      const rotated = await rotateLauncherGameLink(ccid);
+      if (!rotated?.account) {
+        sendJson(res, { ok: false, error: "player_not_found" }, 404);
+        return;
+      }
+      console.log(`[game-link] admin rotated player=${ccid} deviceRemoved=${rotated.bindingRemoved}`);
       await writeAuditEvent(pgPool, {
         playerId: ccid,
-        eventType: "admin_device_reset",
+        eventType: "admin_game_link_reset",
         category: "security",
         severity: "warning",
-        description: `Администратор сбросил привязку устройства: ${removed ? "удалена" : "не найдена"}`,
+        description: `Администратор удалил старую игровую ссылку и привязку устройства: ${rotated.bindingRemoved ? "привязка удалена" : "привязки не было"}`,
         source: "legacy_admin_token",
         ipAddress: requestClientIp(req),
         device: String(req.headers["user-agent"] || "").slice(0, 300),
-        newValue: { removed }
+        newValue: { linkRotated: true, deviceBindingRemoved: rotated.bindingRemoved }
       });
-      sendJson(res, { ok: true, ccid, removed });
+      sendJson(res, {
+        ok: true,
+        ccid,
+        removed: rotated.bindingRemoved,
+        linkRotated: true,
+        loginLink: loginLink(rotated.account, requestOrigin)
+      });
     } catch (error) {
       const status = serviceErrorStatus(error);
-      sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (error.message || "device_reset_failed") }, status);
+      sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (error.message || "game_link_reset_failed") }, status);
     }
     return;
   }
@@ -8123,7 +8696,65 @@ async function handleHttpRequest(req, res) {
       return;
     }
 
-    sendJson(res, launcherStatePayload(account), 200, { "Set-Cookie": cookieHeaders(account) }, { ascii: true });
+    const launcherSession = createLauncherSession(account, body?.deviceKeyId);
+    sendJson(res, {
+      ...launcherStatePayload(account),
+      sessionToken: launcherSession.token,
+      sessionExpiresInSeconds: launcherSession.expiresInSeconds
+    }, 200, { "Set-Cookie": cookieHeaders(account) }, { ascii: true });
+    return;
+  }
+
+  if (url.pathname === "/launcher/promo/redeem") {
+    if (req.method !== "POST") {
+      sendJson(res, { result: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const launcherAuth = await accountFromPromoLauncherBody(body);
+      if (!launcherAuth.ok) {
+        sendJson(res, { result: false, error: launcherAuth.error }, launcherAuth.status || 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, launcherAuth.account, body)) {
+        sendJson(res, { result: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+
+      const redemption = await redeemPromoCode(launcherAuth.account, body?.code, {
+        deviceKeyId: launcherAuth.device.deviceKeyId,
+        ipAddress: requestClientIp(req)
+      });
+      if (!redemption.ok) {
+        sendJson(res, { result: false, error: redemption.error }, redemption.status || 400);
+        return;
+      }
+
+      launcherAuth.account.money = Number(redemption.balance);
+      const cached = store.accounts[String(launcherAuth.account.id)];
+      if (cached) {
+        cached.money = Number(redemption.balance);
+        cached.updatedAt = new Date().toISOString();
+      }
+      console.log(
+        `[promo] player=${launcherAuth.account.id} code=${redemption.promo.code} ` +
+        `reward=${redemption.rewardAmount} balance=${redemption.balance} ` +
+        `already=${redemption.alreadyRedeemed ? 1 : 0}`
+      );
+      sendJson(res, {
+        result: true,
+        status: redemption.status,
+        alreadyRedeemed: redemption.alreadyRedeemed,
+        code: redemption.promo.code,
+        reward: { contrabucks: redemption.rewardAmount },
+        balance: redemption.balance,
+        redeemedAt: redemption.redeemedAt
+      }, 200, {}, { ascii: true });
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(res, { result: false, error: status === 503 ? "service_unavailable" : (error.message || "promo_redeem_failed") }, status);
+    }
     return;
   }
 

@@ -79,24 +79,6 @@ SELECT
   jsonb_build_object('backfillKey', 'clan_events:' || ce.id, 'creatorPlayerId', ce.creator_player_id)
 FROM clan_events ce;
 
-INSERT INTO audit_events (
-  created_at, player_id, event_type, category, severity, suspicious,
-  description, new_value, source, metadata
-)
-SELECT
-  dq.updated_at,
-  dq.player_id::integer,
-  'daily_quest_claim',
-  'progress',
-  'notice',
-  FALSE,
-  'Выполнено ежедневное задание #' || dq.quest_id,
-  jsonb_build_object('questId', dq.quest_id, 'progress', dq.progress, 'target', dq.target, 'rewardExp', dq.reward_exp, 'rewardCoins', dq.reward_coins),
-  'history_backfill',
-  jsonb_build_object('backfillKey', 'daily_quests:' || dq.player_id || ':' || dq.quest_date || ':' || dq.slot)
-FROM daily_quests dq
-WHERE dq.claimed = TRUE;
-
 INSERT INTO player_activity (player_id, last_seen_at, last_source, updated_at)
 SELECT id, updated_at, 'players.updated_at', now()
 FROM players
