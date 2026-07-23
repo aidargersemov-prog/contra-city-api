@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-22-profile-freshness-v282";
+const BUILD_ID = "battle-server-2026-07-23-enhancers-v284";
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -68,6 +68,11 @@ const LOG_SEND_PACKETS = DEBUG_PACKETS || process.env.LOG_SEND_PACKETS === "1";
 const VERBOSE_GAMEPLAY_LOGS = process.env.VERBOSE_GAMEPLAY_LOGS === "1";
 const ENABLE_BATTLE_EXP = process.env.ENABLE_BATTLE_EXP !== "0";
 const BATTLE_EXP_PER_KILL = Math.max(0, Number(process.env.BATTLE_EXP_PER_KILL || 25));
+// The client contains the enhancer percentages but not the server-side base awards.
+// Keep those bases configurable and use the current restored kill award as one score unit.
+const BATTLE_EXP_PER_ASSIST = Math.max(0, Number(process.env.BATTLE_EXP_PER_ASSIST || BATTLE_EXP_PER_KILL));
+const BATTLE_EXP_PER_FLAG = Math.max(0, Number(process.env.BATTLE_EXP_PER_FLAG || 20));
+const BATTLE_EXP_PER_CONTROL_POINT = Math.max(0, Number(process.env.BATTLE_EXP_PER_CONTROL_POINT || 20));
 const DOMINATION_STREAK_KILLS = Math.max(0, Number(process.env.DOMINATION_STREAK_KILLS || 4));
 const ACTOR_JOIN_ASYNC_DELAY_MS = Math.max(0, Number(process.env.ACTOR_JOIN_ASYNC_DELAY_MS || 1500));
 const PEER_ACTOR_REPAIR_DELAYS_MS = parseDelayList(process.env.PEER_ACTOR_REPAIR_DELAYS_MS || "");
@@ -166,6 +171,14 @@ const DAMAGE_MAX_CRIT_CHANCE = Math.max(0, Math.min(100, Number(process.env.DAMA
 const DAMAGE_SORT_RANGES_BY_POWER = process.env.DAMAGE_SORT_RANGES_BY_POWER !== "0";
 const DAMAGE_EXPLOSION_FULL_RADIUS = Math.max(0, Number(process.env.DAMAGE_EXPLOSION_FULL_RADIUS || 6.5));
 const DAMAGE_EXPLOSION_ZERO_RADIUS = Math.max(DAMAGE_EXPLOSION_FULL_RADIUS + 0.1, Number(process.env.DAMAGE_EXPLOSION_ZERO_RADIUS || 20));
+// Enhancer 1 has no numeric damage/radius payload in Assembly-CSharp. Reuse the
+// restored explosion envelope and expose the missing original values as env knobs.
+const ENHANCER_KAMIKAZE_DAMAGE = Math.max(0, Number(process.env.ENHANCER_KAMIKAZE_DAMAGE || 100));
+const ENHANCER_KAMIKAZE_FULL_RADIUS = Math.max(0, Number(process.env.ENHANCER_KAMIKAZE_FULL_RADIUS || DAMAGE_EXPLOSION_FULL_RADIUS));
+const ENHANCER_KAMIKAZE_ZERO_RADIUS = Math.max(
+  ENHANCER_KAMIKAZE_FULL_RADIUS + 0.1,
+  Number(process.env.ENHANCER_KAMIKAZE_ZERO_RADIUS || DAMAGE_EXPLOSION_ZERO_RADIUS)
+);
 const DAMAGE_MAX_PROTECTION_PERCENT = Math.max(0, Math.min(100, Number(process.env.DAMAGE_MAX_PROTECTION_PERCENT || 95)));
 const DAMAGE_MAX_HEAD_BONUS_PERCENT = Math.max(0, Number(process.env.DAMAGE_MAX_HEAD_BONUS_PERCENT || 50));
 const DAMAGE_MELEE_MAX_DISTANCE = Math.max(1, Number(process.env.DAMAGE_MELEE_MAX_DISTANCE || 12));
@@ -1190,6 +1203,8 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     visibleItemIds: new Set(),
     activeItemShots: new Map(),
     impactTimers: new Map(),
+    damageContributors: new Map(),
+    kamikazeTriggered: false,
     spawnSeq: 0,
     spawnRetry: null,
     spawnMoveWarningTimer: null,
@@ -2723,10 +2738,54 @@ const WEAR_VIEW_KEYS = [
   ["head", 9],
 ];
 
-const PASSIVE_BATTLE_ENHANCER_IDS = new Set([
-  1, 2, 3, 4, 5,
-  10, 11, 12,
-  30, 31, 32, 33, 34, 35, 36,
+const ENHANCER_TYPE = Object.freeze({
+  KAMIKAZE: 1,
+  PERSONAL_EXP: 2,
+  DISABLE_DOMINATION_ICON: 4,
+  REDUCED_SELF_PROJECTILE_DAMAGE: 5,
+  CLAN_EXP: 10,
+  CLAN_REDUCED_FRIEND_SOUND: 11,
+  CLAN_DISABLE_FRIENDLY_LAUNCHER_DAMAGE: 12,
+  CLAN_HEALTH: 13,
+  ANTI_FIRE: 30,
+  ANTI_BLOOD: 31,
+  ANTI_POISON: 32,
+  ANTI_ELECTRO: 33,
+  ANTI_FROST: 34,
+  ANTI_BIOHAZARD: 35,
+  CLAN_GRENADE_RADIUS: 150,
+  CLAN_ROCKET_RADIUS: 151,
+  CLAN_ASSIST_EXP: 152,
+  CLAN_FLAG_EXP: 153,
+  CLAN_CONTROL_EXP: 154,
+  CLAN_ZOMBIE_EXP: 155,
+  CLAN_OTHER_CLAN_KILL_EXP: 156,
+  CLAN_NUT_DAMAGE: 159,
+  CLAN_ZOMBIE_DAMAGE: 160,
+  CLAN_PISTOL_DAMAGE: 205,
+  CLAN_SHOTGUN_DAMAGE: 208,
+  CLAN_MELEE_DAMAGE: 209,
+});
+
+// IDs 3 (ReducedDamageFall / "Лёгкое приземление") and 36 ("Меркурий")
+// are intentionally absent from the restored gameplay contract.
+const PASSIVE_BATTLE_ENHANCER_IDS = new Set(Object.values(ENHANCER_TYPE));
+// Only the original byte-enum enhancers are useful to the C# client. High clan
+// IDs are server-side effects and are omitted from ActorInfo[108] to save UDP space.
+const CLIENT_VISIBLE_ENHANCER_IDS = new Set([
+  ENHANCER_TYPE.KAMIKAZE,
+  ENHANCER_TYPE.PERSONAL_EXP,
+  ENHANCER_TYPE.DISABLE_DOMINATION_ICON,
+  ENHANCER_TYPE.REDUCED_SELF_PROJECTILE_DAMAGE,
+  ENHANCER_TYPE.CLAN_EXP,
+  ENHANCER_TYPE.CLAN_REDUCED_FRIEND_SOUND,
+  ENHANCER_TYPE.CLAN_DISABLE_FRIENDLY_LAUNCHER_DAMAGE,
+  ENHANCER_TYPE.ANTI_FIRE,
+  ENHANCER_TYPE.ANTI_BLOOD,
+  ENHANCER_TYPE.ANTI_POISON,
+  ENHANCER_TYPE.ANTI_ELECTRO,
+  ENHANCER_TYPE.ANTI_FROST,
+  ENHANCER_TYPE.ANTI_BIOHAZARD,
 ]);
 
 const IMPACT_TYPE = Object.freeze({
@@ -2734,7 +2793,10 @@ const IMPACT_TYPE = Object.freeze({
   FIRE: 1,
   BLOOD: 2,
   POISON: 3,
+  ELECTRO: 4,
   FROST: 5,
+  BIOHAZARD: 6,
+  STUNNING: 7,
 });
 
 const IMPACT_DOT_DEFINITIONS = [
@@ -2760,10 +2822,19 @@ for (const definition of IMPACT_DOT_DEFINITIONS) {
 }
 
 const IMPACT_PROTECTION_ENHANCER_BY_TYPE = new Map([
-  [IMPACT_TYPE.FIRE, 30],
-  [IMPACT_TYPE.BLOOD, 31],
-  [IMPACT_TYPE.POISON, 32],
-  [IMPACT_TYPE.FROST, 34],
+  [IMPACT_TYPE.FIRE, ENHANCER_TYPE.ANTI_FIRE],
+  [IMPACT_TYPE.BLOOD, ENHANCER_TYPE.ANTI_BLOOD],
+  [IMPACT_TYPE.POISON, ENHANCER_TYPE.ANTI_POISON],
+  [IMPACT_TYPE.ELECTRO, ENHANCER_TYPE.ANTI_ELECTRO],
+  [IMPACT_TYPE.FROST, ENHANCER_TYPE.ANTI_FROST],
+  [IMPACT_TYPE.BIOHAZARD, ENHANCER_TYPE.ANTI_BIOHAZARD],
+]);
+const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
+  [5, ENHANCER_TYPE.ANTI_FIRE],
+  [11, ENHANCER_TYPE.ANTI_FROST],
+  [12, ENHANCER_TYPE.ANTI_POISON],
+  [13, ENHANCER_TYPE.ANTI_ELECTRO],
+  [14, ENHANCER_TYPE.ANTI_BIOHAZARD],
 ]);
 const ARCING_LAUNCHER_VELOCITY = 10;
 const ARCING_LAUNCHER_LIFE = 7000;
@@ -3488,6 +3559,10 @@ function selectedEnhancers(profile) {
     .map(([enhancerType, item]) => ({ enhancerType, item }));
 }
 
+function selectedClientEnhancers(profile) {
+  return selectedEnhancers(profile).filter(({ enhancerType }) => CLIENT_VISIBLE_ENHANCER_IDS.has(Number(enhancerType)));
+}
+
 function selectedEnhancerSummary(profile) {
   const selected = selectedEnhancers(profile);
   if (!selected.length) return "none";
@@ -3511,7 +3586,13 @@ function weaponImpactDefinition(item = {}) {
     fire: IMPACT_TYPE.FIRE,
     blood: IMPACT_TYPE.BLOOD,
     poison: IMPACT_TYPE.POISON,
+    electro: IMPACT_TYPE.ELECTRO,
+    electric: IMPACT_TYPE.ELECTRO,
     frost: IMPACT_TYPE.FROST,
+    biohazard: IMPACT_TYPE.BIOHAZARD,
+    virus: IMPACT_TYPE.BIOHAZARD,
+    stunning: IMPACT_TYPE.STUNNING,
+    slow: IMPACT_TYPE.STUNNING,
   })[workshopType] ?? base?.type ?? IMPACT_TYPE.NONE;
   if (type === IMPACT_TYPE.NONE) return base;
 
@@ -3534,7 +3615,10 @@ function impactTypeName(impactType) {
   if (impactType === IMPACT_TYPE.FIRE) return "Fire";
   if (impactType === IMPACT_TYPE.BLOOD) return "Blood";
   if (impactType === IMPACT_TYPE.POISON) return "Poison";
+  if (impactType === IMPACT_TYPE.ELECTRO) return "Electro";
   if (impactType === IMPACT_TYPE.FROST) return "Frost";
+  if (impactType === IMPACT_TYPE.BIOHAZARD) return "Biohazard";
+  if (impactType === IMPACT_TYPE.STUNNING) return "Stunning";
   return "None";
 }
 
@@ -3898,6 +3982,8 @@ function gameplayModifiersForProfile(profile = null) {
     weaponAmmoPercent: 0,
     weaponMinDamageFlat: 0,
     weaponMaxDamageFlat: 0,
+    grenadeRadiusPercent: 0,
+    rocketRadiusPercent: 0,
     damageBonuses: [],
     protections: {},
     rangeProtections: { short: {}, medium: {}, long: {} },
@@ -3922,6 +4008,28 @@ function gameplayModifiersForProfile(profile = null) {
     modifiers.weaponAmmoPercent += numberOr(bonus.weaponAmmoPercent?.[index], 0);
     modifiers.weaponMinDamageFlat += numberOr(bonus.weaponMinDamageFlat?.[index], 0);
       modifiers.weaponMaxDamageFlat += numberOr(bonus.weaponMaxDamageFlat?.[index], 0);
+    }
+  }
+
+  const enhancerTypes = new Set(selectedEnhancers(profile).map(({ enhancerType }) => Number(enhancerType)));
+  if (enhancerTypes.has(ENHANCER_TYPE.CLAN_HEALTH)) {
+    modifiers.healthPercent += 5;
+  }
+  if (enhancerTypes.has(ENHANCER_TYPE.CLAN_GRENADE_RADIUS)) {
+    modifiers.grenadeRadiusPercent += 10;
+  }
+  if (enhancerTypes.has(ENHANCER_TYPE.CLAN_ROCKET_RADIUS)) {
+    modifiers.rocketRadiusPercent += 10;
+  }
+  const enhancerWeaponDamageBonuses = [
+    [ENHANCER_TYPE.CLAN_PISTOL_DAMAGE, [3], 8],
+    [ENHANCER_TYPE.CLAN_SHOTGUN_DAMAGE, [7], 15],
+    [ENHANCER_TYPE.CLAN_MELEE_DAMAGE, [1, 2], 15],
+  ];
+  for (const [enhancerType, types, amount] of enhancerWeaponDamageBonuses) {
+    if (!enhancerTypes.has(enhancerType)) continue;
+    for (const range of ALL_DAMAGE_RANGES) {
+      modifiers.damageBonuses.push({ range, types, amount });
     }
   }
 
@@ -3976,6 +4084,13 @@ function applyWeaponGameplayBonuses(item, profile = null) {
   const modifiers = gameplayModifiersForProfile(profile);
   const result = { ...item };
   const weaponType = numberOr(result.wt, 0);
+
+  const radiusPercent = weaponType === 8
+    ? numberOr(modifiers.rocketRadiusPercent, 0)
+    : ((weaponType === 9 || weaponType === 15) ? numberOr(modifiers.grenadeRadiusPercent, 0) : 0);
+  if (radiusPercent !== 0) {
+    result.rad = Math.max(1, Math.round(numberOr(result.rad, 0) * (1 + radiusPercent / 100)));
+  }
 
   for (const bonus of modifiers.damageBonuses) {
     if (!bonus.types.includes(weaponType)) continue;
@@ -4113,7 +4228,7 @@ function makeWearDictionaryRaw(profile = null) {
 }
 
 function makeEnhancerDictionaryRaw(profile = null) {
-  const selected = selectedEnhancers(profile);
+  const selected = selectedClientEnhancers(profile);
   if (!selected.length) return null;
   // CombatPlayer.ContainsEnhancer() only checks ActorInfo[108] dictionary keys.
   return rawTypedDictionary(0x62, 0x68, selected.map(({ enhancerType }) => ({
@@ -4705,7 +4820,7 @@ function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw =
   const maxSlots = FULL_LOADOUT_SLOT_LIMIT;
   const wearCount = selectedWears(profile).length;
   const wearList = selectedWearSummary(profile);
-  const enhancerCount = selectedEnhancers(profile).length;
+  const enhancerCount = selectedClientEnhancers(profile).length;
   const enhancerList = selectedEnhancerSummary(profile);
   let fallback = null;
   for (const candidate of mandatoryLoadoutActorCandidates(incomingActor, profile, sharedOptions)) {
@@ -4753,7 +4868,7 @@ function updateActorWireData(session, incomingActor, profile, channel = 0) {
   session.actorWearSummary = selectedWearSummary(profile);
   session.actorTauntCount = selectedTaunts(profile).length;
   session.actorTauntSummary = selectedTauntSummary(profile);
-  session.actorEnhancerCount = selectedEnhancers(profile).length;
+  session.actorEnhancerCount = selectedClientEnhancers(profile).length;
   session.actorEnhancerSummary = selectedEnhancerSummary(profile);
   session.peerActorHasWears = actorProfileHasWears(peerActor.label, session.actorWearCount);
   session.joinActorHasWears = actorProfileHasWears(joinActor.label, session.actorWearCount);
@@ -4884,9 +4999,13 @@ function tryDeliverCtfFlag(session, channel, source = "move") {
 
   Object.assign(carried, carriedHome, { bearer: -1, state: 0 });
   session.points = numberOr(session.points, 0) + 1;
+  const flagExp = awardBattleExp(session, BATTLE_EXP_PER_FLAG, "flag-deliver", {
+    eventBonusPercent: hasSelectedEnhancer(session.loadedProfile, ENHANCER_TYPE.CLAN_FLAG_EXP) ? 100 : 0,
+    persist: true,
+  });
   sendReliableToWholeRoom(room, makeFlagEvent(1, carried), channel, { requireGameState: false });
   sendReliableToWholeRoom(room, makeScoreUpdateEvent(session), channel, { requireGameState: false });
-  console.log(`[flag] delivered actor=${session.actorId} flagTeam=${carried.team} score=${teamScorePoints(session, session.team)} source=${source} pos=${fmtPoint(session.lastTransform)}`);
+  console.log(`[flag] delivered actor=${session.actorId} flagTeam=${carried.team} score=${teamScorePoints(session, session.team)} exp=${flagExp} source=${source} pos=${fmtPoint(session.lastTransform)}`);
   maybeFinishStandardRound(room, "flag-deliver", channel, session);
   return true;
 }
@@ -5028,6 +5147,10 @@ function updateControlPoint(room, point, channel) {
       const player = room.players.get(actorId);
       if (!player || player.team !== point.team) continue;
       player.points = numberOr(player.points, 0) + 1;
+      awardBattleExp(player, BATTLE_EXP_PER_CONTROL_POINT, "control-capture", {
+        eventBonusPercent: hasSelectedEnhancer(player.loadedProfile, ENHANCER_TYPE.CLAN_CONTROL_EXP) ? 100 : 0,
+        persist: true,
+      });
     }
     room.controlPointScores ||= makeControlPointScoreState();
     room.controlPointScores[point.team] = numberOr(room.controlPointScores[point.team], 0) + 1;
@@ -5632,9 +5755,21 @@ function autoTeamForTeamRoom(room) {
   return team2 < team1 ? 2 : 1;
 }
 
-function awardBattleExp(session, amount, reason = "kill") {
+function enhancerExpPercent(session) {
+  if (!session) return 0;
+  let percent = 0;
+  if (hasSelectedEnhancer(session.loadedProfile, ENHANCER_TYPE.PERSONAL_EXP)) percent += 50;
+  if (hasSelectedEnhancer(session.loadedProfile, ENHANCER_TYPE.CLAN_EXP)) percent += 50;
+  return percent;
+}
+
+function awardBattleExp(session, amount, reason = "kill", options = {}) {
   if (!ENABLE_BATTLE_EXP || !session) return 0;
-  const exp = Math.max(0, Math.trunc(numberOr(amount, 0)));
+  const base = Math.max(0, Math.trunc(numberOr(amount, 0)));
+  const passivePercent = enhancerExpPercent(session);
+  const eventBonusPercent = Math.max(0, numberOr(options.eventBonusPercent, 0));
+  const flatBonus = Math.max(0, Math.trunc(numberOr(options.flatBonus, 0)));
+  const exp = Math.max(0, Math.round(base * (1 + (passivePercent + eventBonusPercent) / 100)) + flatBonus);
   if (exp <= 0) return 0;
   session.expEarned = numberOr(session.expEarned, 0) + exp;
   session.matchExp = numberOr(session.matchExp, 0) + exp;
@@ -5643,13 +5778,45 @@ function awardBattleExp(session, amount, reason = "kill") {
   if (exp2clan > 0) {
     session.exp2clan = numberOr(session.exp2clan, 0) + exp2clan;
   }
-  console.log(`[event] exp actor=${session.actorId} player=${session.playerId || "unknown"} reason=${reason} add=${exp} total=${session.expEarned}`);
+  if (options.persist === true) {
+    postBattleEvent(session, "exp", {
+      expAwarded: exp,
+      exp2clan,
+      eventData: {
+        reason,
+        base,
+        passivePercent,
+        eventBonusPercent,
+        flatBonus,
+      },
+    });
+  }
+  console.log(`[event] exp actor=${session.actorId} player=${session.playerId || "unknown"} reason=${reason} base=${base} passivePct=${passivePercent} eventPct=${eventBonusPercent} flat=${flatBonus} add=${exp} total=${session.expEarned}`);
   return exp;
 }
 
 function battleExpForKill(shooter, targetSession) {
   if (!ENABLE_BATTLE_EXP || !shooter || !targetSession || shooter === targetSession) return 0;
   return BATTLE_EXP_PER_KILL;
+}
+
+function sessionClanId(session) {
+  return numberOr(session?.loadedProfile?.clan?.cid ?? session?.loadedProfile?.clan?.id, 0);
+}
+
+function battleExpOptionsForKill(shooter, targetSession) {
+  const shooterClanId = sessionClanId(shooter);
+  const targetClanId = sessionClanId(targetSession);
+  const zombieBonus = isZombiePlayerSession(targetSession)
+    && hasSelectedEnhancer(shooter?.loadedProfile, ENHANCER_TYPE.CLAN_ZOMBIE_EXP);
+  const otherClanBonus = shooterClanId > 0
+    && targetClanId > 0
+    && shooterClanId !== targetClanId
+    && hasSelectedEnhancer(shooter?.loadedProfile, ENHANCER_TYPE.CLAN_OTHER_CLAN_KILL_EXP);
+  return {
+    eventBonusPercent: zombieBonus ? 100 : 0,
+    flatBonus: otherClanBonus ? 5 : 0,
+  };
 }
 
 function makeScorePlayerRaw(session, team, options = {}) {
@@ -5766,6 +5933,8 @@ function buildSpawnEvent(session, requestedTeam, reason) {
     session.zombieType = ZOMBIE_TYPE.REGULAR;
   }
   resetZombieInfectionProgress(session);
+  session.damageContributors = new Map();
+  session.kamikazeTriggered = false;
   session.spawned = true;
   session.dead = false;
   session.moveSeen = false;
@@ -7583,12 +7752,65 @@ function isExplosiveDamageWeapon(weaponType, launchMode) {
   return type === 108 && mode === LAUNCH_MODE.TURRET_SHOT;
 }
 
-function explosionDistanceCoefficient(distance) {
+function explosionRadiusMultiplierForShooter(shooter, weaponType) {
+  const type = Number(weaponType);
+  if (
+    type === 8
+    && hasSelectedEnhancer(shooter?.loadedProfile, ENHANCER_TYPE.CLAN_ROCKET_RADIUS)
+  ) {
+    return 1.1;
+  }
+  if (
+    (type === 9 || type === 15)
+    && hasSelectedEnhancer(shooter?.loadedProfile, ENHANCER_TYPE.CLAN_GRENADE_RADIUS)
+  ) {
+    return 1.1;
+  }
+  return 1;
+}
+
+function explosionDistanceCoefficient(distance, radiusMultiplier = 1) {
   if (!Number.isFinite(distance)) return 1;
-  if (distance <= DAMAGE_EXPLOSION_FULL_RADIUS) return 1;
-  if (distance >= DAMAGE_EXPLOSION_ZERO_RADIUS) return 0;
-  const span = DAMAGE_EXPLOSION_ZERO_RADIUS - DAMAGE_EXPLOSION_FULL_RADIUS;
-  return Math.max(0, Math.min(1, 1 - (distance - DAMAGE_EXPLOSION_FULL_RADIUS) / span));
+  const multiplier = Math.max(0.01, numberOr(radiusMultiplier, 1));
+  const fullRadius = DAMAGE_EXPLOSION_FULL_RADIUS * multiplier;
+  const zeroRadius = DAMAGE_EXPLOSION_ZERO_RADIUS * multiplier;
+  if (distance <= fullRadius) return 1;
+  if (distance >= zeroRadius) return 0;
+  const span = zeroRadius - fullRadius;
+  return Math.max(0, Math.min(1, 1 - (distance - fullRadius) / span));
+}
+
+function directEnhancerReductionForTarget(targetSession, shooter, weaponType) {
+  let percent = 0;
+  const protectionEnhancer = DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE.get(Number(weaponType));
+  if (protectionEnhancer && hasSelectedEnhancer(targetSession?.loadedProfile, protectionEnhancer)) {
+    percent += 50;
+  }
+  if (
+    shooter === targetSession
+    && isProjectileWeaponType(weaponType)
+    && hasSelectedEnhancer(targetSession?.loadedProfile, ENHANCER_TYPE.REDUCED_SELF_PROJECTILE_DAMAGE)
+  ) {
+    percent += 50;
+  }
+  return clampNumber(percent, 0, 100);
+}
+
+function outgoingEnhancerDamagePercent(shooter, targetSession, hitZone) {
+  let percent = 0;
+  if (
+    hitZone === HIT_ZONE_ENGINE
+    && hasSelectedEnhancer(shooter?.loadedProfile, ENHANCER_TYPE.CLAN_NUT_DAMAGE)
+  ) {
+    percent += 5;
+  }
+  if (
+    isZombiePlayerSession(targetSession)
+    && hasSelectedEnhancer(shooter?.loadedProfile, ENHANCER_TYPE.CLAN_ZOMBIE_DAMAGE)
+  ) {
+    percent += 5;
+  }
+  return percent;
 }
 
 function damageRangeName(distance) {
@@ -7655,13 +7877,66 @@ function sessionCurrentHealthEnergy(session) {
   };
 }
 
-function friendlyFireBlocked(shooter, target) {
-  if (shooter && target && shooter === target) return false;
-  const mode = roomMode(shooter);
-  if (!hasTeamDamageMode(mode) || shooter.room?.friendlyFire) return false;
+function sessionsAreAllies(shooter, target) {
+  if (!shooter || !target || shooter === target) return false;
+  if (!hasTeamDamageMode(roomMode(shooter))) return false;
   const shooterTeam = Number(shooter.team);
   const targetTeam = Number(target.team);
   return shooterTeam > 0 && targetTeam > 0 && shooterTeam === targetTeam;
+}
+
+function friendlyFireBlocked(shooter, target, weaponType = 0) {
+  if (shooter && target && shooter === target) return false;
+  if (
+    sessionsAreAllies(shooter, target)
+    && isProjectileWeaponType(weaponType)
+    && hasSelectedEnhancer(target.loadedProfile, ENHANCER_TYPE.CLAN_DISABLE_FRIENDLY_LAUNCHER_DAMAGE)
+  ) {
+    return true;
+  }
+  if (!hasTeamDamageMode(roomMode(shooter)) || shooter.room?.friendlyFire) return false;
+  return sessionsAreAllies(shooter, target);
+}
+
+function recordDamageContribution(targetSession, shooter, amount) {
+  const damage = Math.max(0, Math.trunc(numberOr(amount, 0)));
+  if (!targetSession || !shooter || shooter === targetSession || damage <= 0) return;
+  if (!targetSession.room || targetSession.room !== shooter.room) return;
+  targetSession.damageContributors ||= new Map();
+  const actorId = Number(shooter.actorId);
+  if (!Number.isInteger(actorId) || actorId <= 0) return;
+  const previous = targetSession.damageContributors.get(actorId) || { damage: 0, lastAt: 0 };
+  targetSession.damageContributors.set(actorId, {
+    damage: numberOr(previous.damage, 0) + damage,
+    lastAt: Date.now(),
+  });
+}
+
+function resolveKillAssistant(killer, targetSession) {
+  const contributors = targetSession?.damageContributors;
+  if (!(contributors instanceof Map) || contributors.size === 0) return null;
+  const candidates = Array.from(contributors.entries())
+    .filter(([actorId]) => Number(actorId) !== Number(killer?.actorId))
+    .map(([actorId, entry]) => ({
+      session: targetSession.room?.players?.get(Number(actorId)) || null,
+      damage: numberOr(entry?.damage, 0),
+      lastAt: numberOr(entry?.lastAt, 0),
+    }))
+    .filter(({ session }) => {
+      if (!session || session.room !== targetSession.room) return false;
+      if (!hasTeamDamageMode(roomMode(killer))) return true;
+      return Number(session.team) > 0 && Number(session.team) === Number(killer?.team);
+    })
+    .sort((left, right) => right.damage - left.damage || right.lastAt - left.lastAt);
+  return candidates[0]?.session || null;
+}
+
+function awardAssistExp(assistant) {
+  if (!assistant) return 0;
+  return awardBattleExp(assistant, BATTLE_EXP_PER_ASSIST, "assist", {
+    eventBonusPercent: hasSelectedEnhancer(assistant.loadedProfile, ENHANCER_TYPE.CLAN_ASSIST_EXP) ? 100 : 0,
+    persist: true,
+  });
 }
 
 function shotTimestampValue(data) {
@@ -7782,7 +8057,7 @@ function recordKillFragState(shooter, targetSession) {
   return null;
 }
 
-function makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse, fragInfo = null) {
+function makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse, fragInfo = null, assistantActorId = null) {
   const current = sessionCurrentHealthEnergy(shooter);
   const entries = [
     { key: rawByte(94), value: rawInt(targetActorId) },
@@ -7793,10 +8068,162 @@ function makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impuls
   ];
   if (impulse) entries.push({ key: rawByte(54), value: makePointRaw(impulse) });
   if (fragInfo?.code) entries.push({ key: rawByte(33), value: rawByte(fragInfo.code) });
+  if (Number.isInteger(Number(assistantActorId)) && Number(assistantActorId) > 0) {
+    entries.push({ key: rawByte(47), value: rawInt(Number(assistantActorId)) });
+  }
   return rawEvent(95, [
     { key: 254, value: rawInt(shooter.actorId) },
     { key: 245, value: rawHashtable(entries) },
   ]);
+}
+
+function kamikazeDistanceCoefficient(distance) {
+  if (!Number.isFinite(distance)) return 0;
+  if (distance <= ENHANCER_KAMIKAZE_FULL_RADIUS) return 1;
+  if (distance >= ENHANCER_KAMIKAZE_ZERO_RADIUS) return 0;
+  const span = ENHANCER_KAMIKAZE_ZERO_RADIUS - ENHANCER_KAMIKAZE_FULL_RADIUS;
+  return Math.max(0, Math.min(1, 1 - (distance - ENHANCER_KAMIKAZE_FULL_RADIUS) / span));
+}
+
+function applyKamikazeExplosion(deadSession, channel = 0) {
+  const result = { impactEvents: [], killEvents: [], scoreEvents: [], killedSessions: [], summaries: [] };
+  if (!deadSession?.room || !deadSession.dead || deadSession.kamikazeTriggered) return result;
+  if (!hasSelectedEnhancer(deadSession.loadedProfile, ENHANCER_TYPE.KAMIKAZE)) return result;
+  const origin = deadSession.lastTransform;
+  if (!origin) return result;
+  deadSession.kamikazeTriggered = true;
+
+  const chainedDeaths = [];
+  for (const targetSession of Array.from(deadSession.room.players.values())) {
+    if (!targetSession || targetSession === deadSession || !targetSession.spawned || targetSession.dead) continue;
+    // The enhancer description explicitly says "surrounding enemies", even in
+    // rooms where ordinary friendly fire is enabled.
+    if (sessionsAreAllies(deadSession, targetSession)) continue;
+    const distance = distanceBetweenPoints(origin, targetSession.lastTransform);
+    const coefficient = kamikazeDistanceCoefficient(distance);
+    if (coefficient <= 0) continue;
+
+    const targetCurrent = sessionCurrentHealthEnergy(targetSession);
+    const range = damageRangeName(distance);
+    const protectionKey = "grenade";
+    const protection = clampNumber(
+      numberOr(targetCurrent.stats.modifiers.protections?.[protectionKey], 0)
+        + numberOr(targetCurrent.stats.modifiers.rangeProtections?.[range]?.[protectionKey], 0),
+      -DAMAGE_MAX_PROTECTION_PERCENT,
+      DAMAGE_MAX_PROTECTION_PERCENT
+    );
+    const damageReduction = clampNumber(
+      targetCurrent.stats.modifiers.damageReductionPercent ?? 0,
+      0,
+      DAMAGE_MAX_PROTECTION_PERCENT
+    );
+    const totalDamage = Math.max(0, Math.round(
+      ENHANCER_KAMIKAZE_DAMAGE
+      * coefficient
+      * (1 - protection / 100)
+      * (1 - damageReduction / 100)
+    ));
+    if (totalDamage <= 0) continue;
+
+    const energyDamage = Math.min(targetCurrent.energy, totalDamage);
+    const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
+    targetSession.energy = targetCurrent.energy - energyDamage;
+    targetSession.health = targetCurrent.health - healthDamage;
+    recordDamageContribution(targetSession, deadSession, healthDamage + energyDamage);
+    result.impactEvents.push(makePlayerImpactEvent(
+      deadSession,
+      targetSession.actorId,
+      IMPACT_TYPE.NONE,
+      healthDamage,
+      energyDamage
+    ));
+    result.summaries.push(`${targetSession.actorId}:${healthDamage}/${energyDamage}@${formatCaptureDistance(distance)}`);
+
+    if (targetCurrent.health <= 0 || targetSession.health > 0) continue;
+    const assistant = resolveKillAssistant(deadSession, targetSession);
+    const assistExpAwarded = awardAssistExp(assistant);
+    targetSession.dead = true;
+    targetSession.waitingSelfSpawnMove = false;
+    resetZombieInfectionProgress(targetSession);
+    targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+    targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
+    deadSession.kills = numberOr(deadSession.kills, 0) + 1;
+    deadSession.points = numberOr(deadSession.points, 0) + 1;
+    deadSession.matchKills = numberOr(deadSession.matchKills, 0) + 1;
+    const fragInfo = recordKillFragState(deadSession, targetSession);
+    const expAwarded = awardBattleExp(
+      deadSession,
+      battleExpForKill(deadSession, targetSession),
+      "kamikaze-kill",
+      battleExpOptionsForKill(deadSession, targetSession)
+    );
+    const exp2clanAwarded = expAwarded > 0
+      ? Math.round(expAwarded * numberOr(deadSession.loadedProfile?.clan?.ek, 0) / 100)
+      : 0;
+
+    clearSpawnMoveWarningTimer(targetSession);
+    clearSpawnSelfRetryTimers(targetSession);
+    clearSessionWeaponReloadTimers(targetSession);
+    clearSessionActiveShotLedgers(targetSession);
+    clearSessionImpactTimers(targetSession);
+    clearPeerSpawnTimers(targetSession);
+    clearPickupSpawnRepairTimers(targetSession);
+    clearSpawnStallRecovery(targetSession);
+    targetSession.damageContributors = new Map();
+    targetSession.pendingSpawnBroadcast = null;
+    result.killEvents.push(makeKillPlayerEvent(
+      deadSession,
+      targetSession.actorId,
+      203,
+      0,
+      null,
+      fragInfo,
+      assistant?.actorId
+    ));
+    result.killedSessions.push(targetSession);
+    chainedDeaths.push(targetSession);
+    postBattleEvent(targetSession, "death", {
+      health: targetSession.health,
+      energy: targetSession.energy,
+      killerPlayerId: deadSession.playerId,
+      victimPlayerId: targetSession.playerId,
+      killerPlayerName: deadSession.playerName,
+      victimPlayerName: targetSession.playerName,
+      killerActorId: deadSession.actorId,
+      victimActorId: targetSession.actorId,
+      victimZombieType: numberOr(targetSession.zombieType, 0),
+      weaponId: 996,
+      weaponType: 203,
+      weaponSystemName: "OHCA_Kamikadze",
+      hitZone: 0,
+      healthDamage,
+      energyDamage,
+      expAwarded,
+      exp2clan: exp2clanAwarded,
+      assistantActorId: numberOr(assistant?.actorId, 0),
+      assistantPlayerId: assistant?.playerId || "",
+      assistExpAwarded,
+      fragType: fragInfo?.name || "none",
+      domination: fragInfo?.code === KILL_FRAG_TYPE_DOMINATION ? 1 : 0,
+      revenge: fragInfo?.code === KILL_FRAG_TYPE_REVENGE ? 1 : 0,
+      dominationStreak: numberOr(fragInfo?.dominationStreak, 0),
+      revengeStreak: numberOr(fragInfo?.revengeStreak, 0),
+    });
+  }
+
+  if (result.killEvents.length > 0) {
+    result.scoreEvents.push(makeScoreUpdateEvent(deadSession));
+  }
+  console.log(`[enhancer] kamikaze actor=${deadSession.actorId} damage=${ENHANCER_KAMIKAZE_DAMAGE} radius=${ENHANCER_KAMIKAZE_FULL_RADIUS}/${ENHANCER_KAMIKAZE_ZERO_RADIUS} hits=${result.summaries.join(",") || "none"} kills=${result.killEvents.length}`);
+  for (const chainedSession of chainedDeaths) {
+    const chained = applyKamikazeExplosion(chainedSession, channel);
+    result.impactEvents.push(...chained.impactEvents);
+    result.killEvents.push(...chained.killEvents);
+    result.scoreEvents.push(...chained.scoreEvents);
+    result.killedSessions.push(...chained.killedSessions);
+    result.summaries.push(...chained.summaries);
+  }
+  return result;
 }
 
 function isZombieInfectionHit(shooter, targetSession, weaponType) {
@@ -7830,7 +8257,12 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
     targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
     targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
     fragInfo = recordKillFragState(shooter, targetSession);
-    expAwarded = awardBattleExp(shooter, battleExpForKill(shooter, targetSession), "zombie-infect");
+    expAwarded = awardBattleExp(
+      shooter,
+      battleExpForKill(shooter, targetSession),
+      "zombie-infect",
+      battleExpOptionsForKill(shooter, targetSession)
+    );
     exp2clanAwarded = expAwarded > 0 ? Math.round(expAwarded * numberOr(shooter.loadedProfile?.clan?.ek, 0) / 100) : 0;
   }
 
@@ -7843,6 +8275,8 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   clearPickupSpawnRepairTimers(targetSession);
   clearSpawnStallRecovery(targetSession);
   targetSession.pendingSpawnBroadcast = null;
+  targetSession.damageContributors = new Map();
+  targetSession.kamikazeTriggered = false;
   resetZombieInfectionProgress(targetSession);
   targetSession.team = ZOMBIE_TEAM;
   targetSession.zombieType = ZOMBIE_TYPE.REGULAR;
@@ -7961,8 +8395,10 @@ function applyImpactDotDamage(effect, targetSession) {
   const requestedDamage = impactDotRequestedDamage(effect);
   const referenceMultiplier = Math.max(0.05, 1 - IMPACT_REFERENCE_DAMAGE_REDUCTION / 100);
   const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
+  const enhancerDamagePercent = outgoingEnhancerDamagePercent(effect.shooter, targetSession, 0);
   const totalDamage = Math.max(0, Math.round(
     (requestedDamage / referenceMultiplier) *
+    (1 + enhancerDamagePercent / 100) *
     (1 - damageReduction / 100) *
     (1 - enhancerReduction / 100)
   ));
@@ -7970,6 +8406,7 @@ function applyImpactDotDamage(effect, targetSession) {
   const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
+  recordDamageContribution(targetSession, effect.shooter, healthDamage + energyDamage);
   return {
     targetCurrent,
     requestedDamage,
@@ -7978,6 +8415,7 @@ function applyImpactDotDamage(effect, targetSession) {
     energyDamage,
     damageReduction,
     enhancerReduction,
+    enhancerDamagePercent,
   };
 }
 
@@ -8000,13 +8438,22 @@ function applyImpactDotKill(effect, targetSession, damage) {
   let expAwarded = 0;
   let exp2clanAwarded = 0;
   let fragInfo = null;
+  let assistant = null;
+  let assistExpAwarded = 0;
   if (targetSession !== shooter) {
+    assistant = resolveKillAssistant(shooter, targetSession);
     shooter.kills = numberOr(shooter.kills, 0) + 1;
     shooter.points = numberOr(shooter.points, 0) + 1;
     shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
     fragInfo = recordKillFragState(shooter, targetSession);
-    expAwarded = awardBattleExp(shooter, battleExpForKill(shooter, targetSession), "dot-kill");
+    expAwarded = awardBattleExp(
+      shooter,
+      battleExpForKill(shooter, targetSession),
+      "dot-kill",
+      battleExpOptionsForKill(shooter, targetSession)
+    );
     exp2clanAwarded = expAwarded > 0 ? Math.round(expAwarded * numberOr(shooter.loadedProfile?.clan?.ek, 0) / 100) : 0;
+    assistExpAwarded = awardAssistExp(assistant);
   } else {
     shooter.matchSuicides = numberOr(shooter.matchSuicides, 0) + 1;
   }
@@ -8018,6 +8465,7 @@ function applyImpactDotKill(effect, targetSession, damage) {
   clearPeerSpawnTimers(targetSession);
   clearPickupSpawnRepairTimers(targetSession);
   clearSpawnStallRecovery(targetSession);
+  targetSession.damageContributors = new Map();
   targetSession.pendingSpawnBroadcast = null;
   postBattleEvent(targetSession, "death", {
     health: targetSession.health,
@@ -8037,13 +8485,24 @@ function applyImpactDotKill(effect, targetSession, damage) {
     energyDamage: damage.energyDamage,
     expAwarded,
     exp2clan: exp2clanAwarded,
+    assistantActorId: numberOr(assistant?.actorId, 0),
+    assistantPlayerId: assistant?.playerId || "",
+    assistExpAwarded,
     fragType: fragInfo?.name || "none",
     domination: fragInfo?.code === KILL_FRAG_TYPE_DOMINATION ? 1 : 0,
     revenge: fragInfo?.code === KILL_FRAG_TYPE_REVENGE ? 1 : 0,
     dominationStreak: numberOr(fragInfo?.dominationStreak, 0),
     revengeStreak: numberOr(fragInfo?.revengeStreak, 0),
   });
-  return makeKillPlayerEvent(shooter, targetSession.actorId, effect.weaponType, 0, null, fragInfo);
+  return makeKillPlayerEvent(
+    shooter,
+    targetSession.actorId,
+    effect.weaponType,
+    0,
+    null,
+    fragInfo,
+    assistant?.actorId
+  );
 }
 
 function sendImpactDotPayload(effect, payload, label, options = {}) {
@@ -8087,15 +8546,25 @@ function applyImpactDotTick(effect, targetSession) {
     damage.energyDamage
   );
   const sent = sendImpactDotPayload(effect, impactEvent, "impact-dot", { requireMoveSeen: true });
-  console.log(`[event] impact-dot actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} tick=${effect.tick + 1}/${effect.ticks} dmg=${damage.healthDamage}/${damage.energyDamage} roll=${damage.requestedDamage}/${effect.min}-${effect.max} hp=${targetSession.health}/${damage.targetCurrent.maxHealth} en=${targetSession.energy}/${damage.targetCurrent.stats.maxEnergy} dmgRed=${damage.damageReduction} enhRed=${damage.enhancerReduction} sent=${sent}`);
+  console.log(`[event] impact-dot actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} tick=${effect.tick + 1}/${effect.ticks} dmg=${damage.healthDamage}/${damage.energyDamage} roll=${damage.requestedDamage}/${effect.min}-${effect.max} hp=${targetSession.health}/${damage.targetCurrent.maxHealth} en=${targetSession.energy}/${damage.targetCurrent.stats.maxEnergy} dmgRed=${damage.damageReduction} enhRed=${damage.enhancerReduction} enhDmg=${damage.enhancerDamagePercent} sent=${sent}`);
 
   if (damage.targetCurrent.health > 0 && targetSession.health <= 0) {
     const killEvent = applyImpactDotKill(effect, targetSession, damage);
     sendImpactDotPayload(effect, killEvent, "kill-dot");
+    const kamikaze = applyKamikazeExplosion(targetSession, effect.channel ?? 0);
+    for (const impact of kamikaze.impactEvents) {
+      sendImpactDotPayload(effect, impact, "impact-kamikaze");
+    }
+    for (const kill of kamikaze.killEvents) {
+      sendImpactDotPayload(effect, kill, "kill-kamikaze");
+    }
+    for (const score of kamikaze.scoreEvents) {
+      sendImpactDotPayload(effect, score, "score-kamikaze");
+    }
     const scoreEvent = makeScoreUpdateEvent(effect.shooter);
     const scorePeers = sendImpactDotPayload(effect, scoreEvent, "score");
     console.log(`[sync] impact-dot-kill actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} scorePeers=${scorePeers} kills=${numberOr(effect.shooter.kills, 0)} deaths=${numberOr(targetSession.deaths, 0)}`);
-    gateKilledSessionsAfterDelivery({ killedSessions: [targetSession] });
+    gateKilledSessionsAfterDelivery({ killedSessions: [targetSession, ...kamikaze.killedSessions] });
     maybeFinishZombieRound(effect.shooter.room, "impact-dot-kill", effect.channel ?? 0);
     maybeFinishStandardRound(effect.shooter.room, "impact-dot-kill", effect.channel ?? 0);
     return;
@@ -8118,11 +8587,12 @@ function startImpactDot(shooter, targetSession, damageState, data, targetIndex) 
   const timers = ensureSessionImpactTimers(targetSession);
   if (!timers) return "";
 
+  const baseTicks = Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS));
   const effect = {
     type: definition.type,
     min: numberOr(definition.min, 0),
     max: numberOr(definition.max, definition.min),
-    ticks: Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS)),
+    ticks: baseTicks,
     tick: 0,
     shooter,
     targetActorId: targetSession.actorId,
@@ -8182,7 +8652,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.summary = `${targetActorId}:not-live`;
     return result;
   }
-  if (friendlyFireBlocked(shooter, targetSession)) {
+  if (friendlyFireBlocked(shooter, targetSession, weaponType)) {
     result.summary = `${targetActorId}:friendly`;
     return result;
   }
@@ -8243,7 +8713,10 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const headDamageBonus = hitZone === HIT_ZONE_CABIN
     ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
     : 0;
-  const explosionCoefficient = explosive ? explosionDistanceCoefficient(originDistance ?? actorDistance) : 1;
+  const explosionRadiusMultiplier = explosive ? explosionRadiusMultiplierForShooter(shooter, weaponType) : 1;
+  const explosionCoefficient = explosive
+    ? explosionDistanceCoefficient(originDistance ?? actorDistance, explosionRadiusMultiplier)
+    : 1;
   const protectionKey = weaponProtectionKey(weaponType);
   const globalProtection = targetCurrent.stats.modifiers.protections?.[protectionKey] ?? 0;
   const rangeProtection = targetCurrent.stats.modifiers.rangeProtections?.[range]?.[protectionKey] ?? 0;
@@ -8257,25 +8730,30 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     0,
     DAMAGE_MAX_PROTECTION_PERCENT
   );
+  const enhancerReduction = directEnhancerReductionForTarget(targetSession, shooter, weaponType);
+  const enhancerDamagePercent = outgoingEnhancerDamagePercent(shooter, targetSession, hitZone);
   const totalDamage = Math.max(0, Math.round(
     baseDamage *
     explosionCoefficient *
     hitZoneMultiplier(hitZone) *
     (1 + headDamageBonus / 100) *
+    (1 + enhancerDamagePercent / 100) *
     (crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
     (1 - protection / 100) *
-    (1 - damageReduction / 100)
+    (1 - damageReduction / 100) *
+    (1 - enhancerReduction / 100)
   ));
 
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
   const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
+  recordDamageContribution(targetSession, shooter, healthDamage + energyDamage);
 
   result.energyDamage = energyDamage;
   result.healthDamage = healthDamage;
   result.crit = crit && totalDamage > 0;
-  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:prot=${protectionKey}:${protection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
 
   if (targetCurrent.health > 0 && targetSession.health <= 0) {
     targetSession.dead = true;
@@ -8286,15 +8764,24 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     let expAwarded = 0;
     let exp2clanAwarded = 0;
     let fragInfo = null;
+    let assistant = null;
+    let assistExpAwarded = 0;
     if (targetSession !== shooter) {
+      assistant = resolveKillAssistant(shooter, targetSession);
       shooter.kills = numberOr(shooter.kills, 0) + 1;
       shooter.points = numberOr(shooter.points, 0) + 1;
       shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
       if (hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
       if (hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
       fragInfo = recordKillFragState(shooter, targetSession);
-      expAwarded = awardBattleExp(shooter, battleExpForKill(shooter, targetSession), "kill");
+      expAwarded = awardBattleExp(
+        shooter,
+        battleExpForKill(shooter, targetSession),
+        "kill",
+        battleExpOptionsForKill(shooter, targetSession)
+      );
       exp2clanAwarded = expAwarded > 0 ? Math.round(expAwarded * numberOr(shooter.loadedProfile?.clan?.ek, 0) / 100) : 0;
+      assistExpAwarded = awardAssistExp(assistant);
     } else {
       shooter.matchSuicides = numberOr(shooter.matchSuicides, 0) + 1;
     }
@@ -8306,12 +8793,21 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     clearPeerSpawnTimers(targetSession);
     clearPickupSpawnRepairTimers(targetSession);
     clearSpawnStallRecovery(targetSession);
+    targetSession.damageContributors = new Map();
     targetSession.pendingSpawnBroadcast = null;
     const impulse = shotImpulseVector(data, shooter, targetSession);
     result.killed = true;
     result.killedSession = targetSession;
-    result.killEvent = makeKillPlayerEvent(shooter, targetActorId, weaponType, hitZone, impulse, fragInfo);
-    result.summary += `:kill=1:exp=${expAwarded}:frag=${fragInfo?.name || "none"}`;
+    result.killEvent = makeKillPlayerEvent(
+      shooter,
+      targetActorId,
+      weaponType,
+      hitZone,
+      impulse,
+      fragInfo,
+      assistant?.actorId
+    );
+    result.summary += `:kill=1:exp=${expAwarded}:assistant=${assistant?.actorId || 0}:assistExp=${assistExpAwarded}:frag=${fragInfo?.name || "none"}`;
     postBattleEvent(targetSession, "death", {
       health: targetSession.health,
       energy: targetSession.energy,
@@ -8330,6 +8826,9 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
       energyDamage,
       expAwarded,
       exp2clan: exp2clanAwarded,
+      assistantActorId: numberOr(assistant?.actorId, 0),
+      assistantPlayerId: assistant?.playerId || "",
+      assistExpAwarded,
       fragType: fragInfo?.name || "none",
       domination: fragInfo?.code === KILL_FRAG_TYPE_DOMINATION ? 1 : 0,
       revenge: fragInfo?.code === KILL_FRAG_TYPE_REVENGE ? 1 : 0,
@@ -8354,7 +8853,9 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
   const replacements = new Map();
   const killEvents = [];
   const impactEvents = [];
+  const enhancerScoreEvents = [];
   const killedSessions = new Set();
+  const kamikazeCandidates = new Set();
   let shotCrit = false;
   const summaries = [];
   const stats = { shots: 1, hits: 0, playerTargets: 0, headHits: 0, nutsHits: 0, kills: 0 };
@@ -8372,7 +8873,10 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
         const damage = applyShotDamageToTarget(session, data, damageState, weaponType, launchMode, target, index);
         shotCrit = shotCrit || damage.crit;
         if (damage.killEvent) killEvents.push(damage.killEvent);
-        if (damage.killedSession) killedSessions.add(damage.killedSession);
+        if (damage.killedSession) {
+          killedSessions.add(damage.killedSession);
+          kamikazeCandidates.add(damage.killedSession);
+        }
         if (damage.hit) {
           stats.hits += 1;
           stats.playerTargets += 1;
@@ -8390,6 +8894,18 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
           [93, rawDamageShort(damage.energyDamage)],
         ]));
       });
+      // Apply death explosions only after every direct target in this Shot97 has
+      // been resolved, so target-array order cannot change direct damage/assists.
+      for (const deadSession of kamikazeCandidates) {
+        const kamikaze = applyKamikazeExplosion(deadSession, session.lastChannel || 0);
+        impactEvents.push(...kamikaze.impactEvents);
+        killEvents.push(...kamikaze.killEvents);
+        enhancerScoreEvents.push(...kamikaze.scoreEvents);
+        for (const killedSession of kamikaze.killedSessions) killedSessions.add(killedSession);
+        if (kamikaze.killEvents.length || kamikaze.impactEvents.length) {
+          summaries.push(`kamikaze:${deadSession.actorId}=${kamikaze.impactEvents.length}/${kamikaze.killEvents.length}`);
+        }
+      }
       replacements.set(86, rawTypedArray(0x68, targetBodies));
       if (recoveredMeleeTargetBodies) {
         summaries.unshift(`melee-segment-recovered=${recoveredMeleeTargetBodies.length}`);
@@ -8421,6 +8937,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
     localShotEvent,
     killEvents,
     impactEvents,
+    enhancerScoreEvents,
     killedSessions: Array.from(killedSessions),
     scoreEvent: killEvents.length ? makeScoreUpdateEvent(session) : null,
     stats,
@@ -9163,6 +9680,8 @@ function resetSessionRoomProgress(session) {
   session.visibleItemIds = new Set();
   session.expEarned = 0;
   session.exp2clan = 0;
+  session.damageContributors = new Map();
+  session.kamikazeTriggered = false;
   resetSessionFragState(session);
   clearSessionActiveShotLedgers(session);
   session.team = -1;
@@ -9320,6 +9839,8 @@ function resetTransportForReconnect(session, reason) {
   session.points = 0;
   session.expEarned = 0;
   session.exp2clan = 0;
+  session.damageContributors = new Map();
+  session.kamikazeTriggered = false;
 }
 
 function removeDuplicatePlayerSessions(room, session) {
@@ -9992,7 +10513,7 @@ function emitAchievementEvents(sourceSession, achievements) {
 }
 
 function battleEventPriority(type) {
-  return ["join", "death", "summary", "matchend", "match-end", "leave"].includes(String(type || "").toLowerCase())
+  return ["join", "death", "exp", "summary", "matchend", "match-end", "leave"].includes(String(type || "").toLowerCase())
     ? "high"
     : "normal";
 }
@@ -11157,6 +11678,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       for (const killEvent of response.killEvents || []) {
         broadcastReliableToRoom(session, killEvent, channel, "kill");
       }
+      for (const enhancerScoreEvent of response.enhancerScoreEvents || []) {
+        broadcastReliableToRoom(session, enhancerScoreEvent, channel, "score-enhancer");
+      }
       if (response.scoreEvent) {
         const scorePeers = broadcastReliableToRoom(session, response.scoreEvent, channel, "score");
         console.log(`[sync] score-update actor=${session.actorId} peers=${scorePeers} kills=${numberOr(session.kills, 0)} deaths=${numberOr(session.deaths, 0)} points=${numberOr(session.points, 0)} team1=${teamScorePoints(session, 1)} team2=${teamScorePoints(session, 2)}`);
@@ -11175,6 +11699,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
           response.localShotEvent || response.shotEvent,
           ...(response.impactEvents || []),
           ...(response.killEvents || []),
+          ...(response.enhancerScoreEvents || []),
           ...(response.scoreEvent ? [response.scoreEvent] : []),
           ...(response.localAmmoSync ? [response.localAmmoSync] : []),
           ...zombieRoundEndEvents,
@@ -11473,6 +11998,7 @@ async function handleUdp(port, socket, msg, rinfo) {
 }
 
 console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
+console.log(`[config] enhancers active=${Array.from(PASSIVE_BATTLE_ENHANCER_IDS).join(",")} clientVisible=${Array.from(CLIENT_VISIBLE_ENHANCER_IDS).join(",")} expAssist=${BATTLE_EXP_PER_ASSIST} expFlag=${BATTLE_EXP_PER_FLAG} expControl=${BATTLE_EXP_PER_CONTROL_POINT} kamikaze=${ENHANCER_KAMIKAZE_DAMAGE}@${ENHANCER_KAMIKAZE_FULL_RADIUS}/${ENHANCER_KAMIKAZE_ZERO_RADIUS}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
 console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms outbox=${UDP_OUTBOX_FLUSH_MS}ms/${UDP_OUTBOX_MAX_COMMANDS}cmd/${UDP_OUTBOX_MAX_BYTES}bytes packetMax=${MAX_UDP_PACKET_BYTES} atomicProfileJoin=required`);
 console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT_QUEUE_MAX}/timeout${BATTLE_EVENT_TIMEOUT_MS}ms moveFlush=${BATTLE_MOVE_FLUSH_MS}ms profileQueue=${PROFILE_LOAD_CONCURRENCY}/${PROFILE_LOAD_QUEUE_MAX} profileCache=${PROFILE_CACHE_MAX}/${PROFILE_CACHE_TTL_MS}ms profileChangeSettle=${PROFILE_CHANGE_SETTLE_MS}ms/track${PROFILE_CHANGE_TRACK_MS}ms catalogCache=${CATALOG_CACHE_TTL_MS}ms`);
