@@ -9,7 +9,7 @@ import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.j
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-24-max-30-day-shop-v60";
+const API_BUILD_ID = "railway-api-2026-07-25-telegram-pairing-clean-v63";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -50,6 +50,7 @@ const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
 const PROMO_ADMIN_TOKEN = process.env.PROMO_ADMIN_TOKEN || "";
 const TELEGRAM_LINK_API_TOKEN = process.env.TELEGRAM_LINK_API_TOKEN || "";
+const TELEGRAM_ADMIN_ID = Number(process.env.TELEGRAM_ADMIN_ID || 1656163678);
 const TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || "ContraCityGame_Bot")
   .trim()
   .replace(/^@/, "");
@@ -99,6 +100,24 @@ const TELEGRAM_LINK_FLOW_TTL_MS = Math.max(120000, Math.min(
   30 * 60 * 1000,
   Number(process.env.TELEGRAM_LINK_FLOW_TTL_MS || 10 * 60 * 1000)
 ));
+const TELEGRAM_PAIRING_CODE_TTL_MS = Math.max(120000, Math.min(
+  30 * 60 * 1000,
+  Number(process.env.TELEGRAM_PAIRING_CODE_TTL_MS || 10 * 60 * 1000)
+));
+const TELEGRAM_LOGIN_REQUEST_TTL_MS = Math.max(120000, Math.min(
+  30 * 60 * 1000,
+  Number(process.env.TELEGRAM_LOGIN_REQUEST_TTL_MS || 15 * 60 * 1000)
+));
+const TELEGRAM_RESET_CONFIRM_TTL_MS = Math.max(30000, Math.min(
+  5 * 60 * 1000,
+  Number(process.env.TELEGRAM_RESET_CONFIRM_TTL_MS || 60 * 1000)
+));
+const TELEGRAM_CLEANUP_INTERVAL_MS = Math.max(60000, Number(
+  process.env.TELEGRAM_CLEANUP_INTERVAL_MS || 5 * 60 * 1000
+));
+const TELEGRAM_PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const TELEGRAM_CLEANUP_ADVISORY_LOCK = 741963521;
+const TELEGRAM_RESET_ADVISORY_LOCK = 741963522;
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
 const revokedGameLinkKeys = new Map();
@@ -271,8 +290,7 @@ function isOriginGuardExempt(pathname) {
   return pathname === "/health" ||
     pathname.startsWith("/battle/") ||
     pathname.startsWith("/admin/promocodes") ||
-    pathname.startsWith("/bot/telegram-link") ||
-    pathname === "/bot/telegram-links" ||
+    pathname.startsWith("/bot/telegram") ||
     pathname === "/launcher/promo/redeem" ||
     pathname === "/admin/device-reset" ||
     pathname === "/db";
@@ -301,10 +319,18 @@ function requestRatePolicy(pathname) {
   if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
   if (pathname === "/admin/logs/auth/login") return { windowMs: 15 * 60 * 1000, limit: 20 };
   if (pathname.startsWith("/admin/promocodes")) return { windowMs: 60000, limit: 120 };
-  if (pathname.startsWith("/bot/telegram-link") || pathname === "/bot/telegram-links") {
-    return { windowMs: 60000, limit: 180 };
+  if (pathname.startsWith("/bot/telegram")) {
+    // Every private bot request originates from the same Railway container.
+    // The service token is the perimeter; per-Telegram limits are enforced
+    // after parsing the authenticated request body.
+    return { windowMs: 60000, limit: 2400 };
   }
-  if (pathname.startsWith("/launcher/telegram/")) return { windowMs: 60000, limit: 60 };
+  if (pathname.startsWith("/launcher/telegram/")) {
+    // Do not let players behind the same carrier/NAT block each other.
+    // Account/session/device limits and the persisted five-attempt gate are
+    // the effective launcher boundaries.
+    return { windowMs: 60000, limit: 1200 };
+  }
   if (pathname === "/launcher/promo/redeem") return { windowMs: 60000, limit: 20 };
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
@@ -367,6 +393,20 @@ function allowResolvedIdentityRequest(req, account, body = {}) {
   if (session && !allowRequestIdentityBucket(req, `session:${session}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: SESSION_RATE_LIMIT_REQUESTS }, now)) return false;
   if (device && !allowRequestIdentityBucket(req, `device:${device}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: DEVICE_RATE_LIMIT_REQUESTS }, now)) return false;
   return true;
+}
+
+function allowTelegramIdentityRequest(req, telegramUserId, action, {
+  windowMs = 60000,
+  limit = 120
+} = {}) {
+  const id = Number(telegramUserId || 0);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  return allowRequestIdentityBucket(
+    req,
+    `telegram:${id}:${String(action || "request")}`,
+    { windowMs, limit },
+    Date.now()
+  );
 }
 
 function allowHttpRequest(req, url) {
@@ -1346,7 +1386,8 @@ const restoredAssemblageDefinitions = [
   { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"]] },
   { id: 36, code: "spy", items: [["Hats", "business"], ["Masks", "businessgoogles"], ["Shirts", "business"], ["Pants", "business"], ["Gloves", "business"], ["Boots", "business"]] },
   { id: 37, code: "contranos", items: [["Heads", "thanos"], ["Masks", "thanos"], ["Shirts", "thanos"], ["Pants", "thanos"], ["Gloves", "thanos"], ["Boots", "thanos"], ["Backpacks", "thanos"]] },
-  { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] }
+  { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] },
+  { id: 39, code: "gavai", items: [["Hats", "capgavaimag"], ["Masks", "gavaibandana"], ["Shirts", "gavaihoodie"], ["Pants", "shortigavai"], ["Boots", "gavaibootsmag"], ["Backpacks", "popugagavai"]] }
 ];
 
 // Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
@@ -2239,6 +2280,17 @@ async function savePostgresStore(nextStore) {
 }
 
 let store = await initStore();
+if (pgPool && TELEGRAM_LINK_API_TOKEN) {
+  cleanupTelegramPairingState().catch((error) => {
+    console.error("[telegram-pairing] initial cleanup failed", error);
+  });
+  const telegramCleanupTimer = setInterval(() => {
+    cleanupTelegramPairingState().catch((error) => {
+      console.error("[telegram-pairing] scheduled cleanup failed", error);
+    });
+  }, TELEGRAM_CLEANUP_INTERVAL_MS);
+  telegramCleanupTimer.unref();
+}
 
 const adminLogsApi = createAdminLogsApi({
   getPool: () => pgPool,
@@ -3225,14 +3277,36 @@ async function launcherTelegramStatus(account, req, executor = pgPool) {
     };
   }
 
+  const systemState = await telegramSystemState(executor);
+  if (!systemState) {
+    return {
+      available: false,
+      required: true,
+      verified: false,
+      linked: false,
+      reason: "service_unavailable",
+      state: "unavailable",
+      user: null
+    };
+  }
   const currentLinkKeyHash = launcherLinkKeyHash(account.key);
   let binding = await loadTelegramBinding(account.id, executor);
-  if (binding?.link_key_hash && !safeTokenEquals(binding.link_key_hash, currentLinkKeyHash)) {
+  if (binding && (
+      Number(binding.binding_epoch || 0) !== Number(systemState.binding_epoch) ||
+      (binding.link_key_hash && !safeTokenEquals(binding.link_key_hash, currentLinkKeyHash))
+    )) {
     await executor.query("DELETE FROM launcher_telegram_bindings WHERE player_id = $1", [Number(account.id)]);
     await executor.query(
-      `UPDATE launcher_telegram_flows
+      `UPDATE launcher_telegram_login_requests
        SET state = 'cancelled', updated_at = now()
        WHERE player_id = $1 AND state IN ('pending', 'claimed')`,
+      [Number(account.id)]
+    );
+    await executor.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'cancelled', updated_at = now()
+       WHERE (player_id = $1 OR expected_player_id = $1)
+         AND state IN ('issued', 'claimed')`,
       [Number(account.id)]
     );
     binding = null;
@@ -3269,354 +3343,23 @@ function telegramStatusPayload(status) {
   };
 }
 
-async function createTelegramLinkFlow(account, device, req) {
-  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
-    return { ok: false, status: 503, error: "telegram_link_unavailable" };
-  }
-  const bindingStatus = await launcherTelegramStatus(account, req);
-  if (bindingStatus.verified) {
-    return {
-      ok: true,
-      status: "confirmed",
-      botUrl: null,
-      expiresAt: null,
-      telegram: telegramStatusPayload(bindingStatus)
-    };
-  }
-
-  const ipHash = bindingStatus.ipHash;
-  if (!ipHash) return { ok: false, status: 503, error: "launcher_ip_unavailable" };
-  const startToken = `cc_${randomLauncherToken()}`;
-  const tokenHash = telegramLinkTokenHash(startToken);
-  const expiresAt = new Date(Date.now() + TELEGRAM_LINK_FLOW_TTL_MS);
-  const linkKeyHash = launcherLinkKeyHash(account.key);
-  const client = await pgPool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `UPDATE launcher_telegram_flows
-       SET state = 'cancelled', updated_at = now()
-       WHERE player_id = $1 AND state IN ('pending', 'claimed')`,
-      [Number(account.id)]
-    );
-    await client.query(
-      `INSERT INTO launcher_telegram_flows (
-         token_hash, player_id, device_key_id, link_key_hash,
-         launcher_ip_hash, state, expires_at
-       )
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
-      [tokenHash, Number(account.id), device.deviceKeyId, linkKeyHash, ipHash, expiresAt.toISOString()]
-    );
-    await client.query("COMMIT");
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-
-  return {
-    ok: true,
-    status: "pending",
-    botUrl: `https://t.me/${encodeURIComponent(TELEGRAM_BOT_USERNAME)}?start=${encodeURIComponent(startToken)}`,
-    expiresAt: expiresAt.toISOString(),
-    telegram: {
-      ...telegramStatusPayload(bindingStatus),
-      state: "pending"
-    }
-  };
-}
-
-async function latestTelegramLinkFlow(account, device, req) {
-  const status = await launcherTelegramStatus(account, req);
-  if (!status.available) {
-    return { ok: false, status: 503, error: "telegram_link_unavailable" };
-  }
-  if (status.verified) {
-    return {
-      ok: true,
-      status: "confirmed",
-      telegram: telegramStatusPayload(status)
-    };
-  }
-  const result = await pgPool.query(
-    `SELECT *
-     FROM launcher_telegram_flows
-     WHERE player_id = $1
-       AND device_key_id = $2
-       AND link_key_hash = $3
-       AND launcher_ip_hash = $4
-       AND state IN ('pending', 'claimed', 'confirmed')
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [
-      Number(account.id),
-      device.deviceKeyId,
-      launcherLinkKeyHash(account.key),
-      status.ipHash
-    ]
-  );
-  const flow = result.rows[0];
-  if (!flow) return { ok: true, status: "required", telegram: telegramStatusPayload(status) };
-  if (new Date(flow.expires_at).getTime() <= Date.now() && flow.state !== "confirmed") {
-    await pgPool.query(
-      "UPDATE launcher_telegram_flows SET state = 'cancelled', updated_at = now() WHERE id = $1",
-      [Number(flow.id)]
-    );
-    return { ok: true, status: "expired", telegram: { ...telegramStatusPayload(status), state: "expired" } };
-  }
-  const flowUser = telegramUserPayload(flow);
-  return {
-    ok: true,
-    status: String(flow.state),
-    expiresAt: postgresTimestamp(flow.expires_at),
-    telegram: {
-      ...telegramStatusPayload(status),
-      state: String(flow.state),
-      user: flowUser || status.user
-    }
-  };
-}
-
-async function claimTelegramLink(startTokenValue, rawUser) {
-  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
-    return { ok: false, status: 503, error: "telegram_link_unavailable" };
-  }
-  const startToken = normalizeTelegramStartToken(startTokenValue);
-  const telegramUser = normalizeTelegramIdentity(rawUser);
-  if (!startToken) return { ok: false, status: 400, error: "telegram_link_invalid" };
-  if (!telegramUser) return { ok: false, status: 400, error: "telegram_user_invalid" };
-
-  const client = await pgPool.connect();
-  try {
-    await client.query("BEGIN");
-    const flowResult = await client.query(
-      `SELECT f.*, p.cckey, p.name AS player_name,
-              d.device_key_id AS bound_device_key_id,
-              d.link_key_hash AS device_link_key_hash
-       FROM launcher_telegram_flows f
-       JOIN players p ON p.id = f.player_id
-       LEFT JOIN launcher_devices d ON d.player_id = f.player_id
-       WHERE f.token_hash = $1
-       FOR UPDATE OF f, p`,
-      [telegramLinkTokenHash(startToken)]
-    );
-    const flow = flowResult.rows[0];
-    if (!flow || !["pending", "claimed"].includes(flow.state)) {
-      await client.query("ROLLBACK");
-      return { ok: false, status: 404, error: "telegram_link_invalid" };
-    }
-    if (new Date(flow.expires_at).getTime() <= Date.now()) {
-      await client.query(
-        "UPDATE launcher_telegram_flows SET state = 'cancelled', updated_at = now() WHERE id = $1",
-        [Number(flow.id)]
-      );
-      await client.query("COMMIT");
-      return { ok: false, status: 410, error: "telegram_link_expired" };
-    }
-    const currentLinkHash = launcherLinkKeyHash(flow.cckey);
-    if (!flow.bound_device_key_id ||
-        flow.bound_device_key_id !== flow.device_key_id ||
-        !safeTokenEquals(flow.link_key_hash, currentLinkHash) ||
-        !safeTokenEquals(flow.device_link_key_hash, currentLinkHash)) {
-      await client.query(
-        "UPDATE launcher_telegram_flows SET state = 'cancelled', updated_at = now() WHERE id = $1",
-        [Number(flow.id)]
-      );
-      await client.query("COMMIT");
-      return { ok: false, status: 409, error: "telegram_link_stale" };
-    }
-
-    const playerBinding = await client.query(
-      "SELECT telegram_user_id, link_key_hash FROM launcher_telegram_bindings WHERE player_id = $1 FOR UPDATE",
-      [Number(flow.player_id)]
-    );
-    const boundToPlayer = playerBinding.rows[0];
-    if (boundToPlayer &&
-        safeTokenEquals(boundToPlayer.link_key_hash, currentLinkHash) &&
-        Number(boundToPlayer.telegram_user_id) !== telegramUser.id) {
-      await client.query("ROLLBACK");
-      return { ok: false, status: 409, error: "telegram_account_mismatch" };
-    }
-    const boundElsewhere = await client.query(
-      "SELECT player_id FROM launcher_telegram_bindings WHERE telegram_user_id = $1 AND player_id <> $2",
-      [telegramUser.id, Number(flow.player_id)]
-    );
-    if (boundElsewhere.rowCount) {
-      await client.query("ROLLBACK");
-      return { ok: false, status: 409, error: "telegram_already_bound" };
-    }
-
-    await client.query(
-      `UPDATE launcher_telegram_flows
-       SET state = 'claimed',
-           telegram_user_id = $2,
-           telegram_username = $3,
-           telegram_first_name = $4,
-           telegram_last_name = $5,
-           claimed_at = COALESCE(claimed_at, now()),
-           updated_at = now()
-       WHERE id = $1`,
-      [
-        Number(flow.id),
-        telegramUser.id,
-        telegramUser.username,
-        telegramUser.firstName,
-        telegramUser.lastName
-      ]
-    );
-    await client.query("COMMIT");
-    return {
-      ok: true,
-      status: "claimed",
-      player: { id: Number(flow.player_id), name: String(flow.player_name || "") },
-      telegram: telegramUser,
-      expiresAt: postgresTimestamp(flow.expires_at)
-    };
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function confirmTelegramLink(startTokenValue, rawUser) {
-  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
-    return { ok: false, status: 503, error: "telegram_link_unavailable" };
-  }
-  const startToken = normalizeTelegramStartToken(startTokenValue);
-  const telegramUser = normalizeTelegramIdentity(rawUser);
-  if (!startToken) return { ok: false, status: 400, error: "telegram_link_invalid" };
-  if (!telegramUser) return { ok: false, status: 400, error: "telegram_user_invalid" };
-
-  const client = await pgPool.connect();
-  try {
-    await client.query("BEGIN");
-    const flowResult = await client.query(
-      `SELECT f.*, p.cckey, p.name AS player_name,
-              d.device_key_id AS bound_device_key_id,
-              d.link_key_hash AS device_link_key_hash
-       FROM launcher_telegram_flows f
-       JOIN players p ON p.id = f.player_id
-       LEFT JOIN launcher_devices d ON d.player_id = f.player_id
-       WHERE f.token_hash = $1
-       FOR UPDATE OF f, p`,
-      [telegramLinkTokenHash(startToken)]
-    );
-    const flow = flowResult.rows[0];
-    if (!flow || flow.state !== "claimed") {
-      await client.query("ROLLBACK");
-      return { ok: false, status: 404, error: "telegram_link_not_claimed" };
-    }
-    if (new Date(flow.expires_at).getTime() <= Date.now()) {
-      await client.query(
-        "UPDATE launcher_telegram_flows SET state = 'cancelled', updated_at = now() WHERE id = $1",
-        [Number(flow.id)]
-      );
-      await client.query("COMMIT");
-      return { ok: false, status: 410, error: "telegram_link_expired" };
-    }
-    if (Number(flow.telegram_user_id) !== telegramUser.id) {
-      await client.query("ROLLBACK");
-      return { ok: false, status: 403, error: "telegram_account_mismatch" };
-    }
-    const currentLinkHash = launcherLinkKeyHash(flow.cckey);
-    if (!flow.bound_device_key_id ||
-        flow.bound_device_key_id !== flow.device_key_id ||
-        !safeTokenEquals(flow.link_key_hash, currentLinkHash) ||
-        !safeTokenEquals(flow.device_link_key_hash, currentLinkHash)) {
-      await client.query(
-        "UPDATE launcher_telegram_flows SET state = 'cancelled', updated_at = now() WHERE id = $1",
-        [Number(flow.id)]
-      );
-      await client.query("COMMIT");
-      return { ok: false, status: 409, error: "telegram_link_stale" };
-    }
-
-    try {
-      await client.query(
-        `INSERT INTO launcher_telegram_bindings (
-           player_id, telegram_user_id, telegram_username,
-           telegram_first_name, telegram_last_name, link_key_hash,
-           last_ip_hash, confirmed_at, last_verified_at, updated_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now(), now())
-         ON CONFLICT (player_id) DO UPDATE SET
-           telegram_user_id = EXCLUDED.telegram_user_id,
-           telegram_username = EXCLUDED.telegram_username,
-           telegram_first_name = EXCLUDED.telegram_first_name,
-           telegram_last_name = EXCLUDED.telegram_last_name,
-           link_key_hash = EXCLUDED.link_key_hash,
-           last_ip_hash = EXCLUDED.last_ip_hash,
-           last_verified_at = now(),
-           updated_at = now()`,
-        [
-          Number(flow.player_id),
-          telegramUser.id,
-          telegramUser.username,
-          telegramUser.firstName,
-          telegramUser.lastName,
-          currentLinkHash,
-          String(flow.launcher_ip_hash)
-        ]
-      );
-    } catch (error) {
-      if (error?.code === "23505") {
-        await client.query("ROLLBACK");
-        return { ok: false, status: 409, error: "telegram_already_bound" };
-      }
-      throw error;
-    }
-    await client.query(
-      `UPDATE launcher_telegram_flows
-       SET state = 'confirmed', confirmed_at = now(), updated_at = now()
-       WHERE id = $1`,
-      [Number(flow.id)]
-    );
-    await writeAuditEvent(client, {
-      playerId: Number(flow.player_id),
-      playerName: String(flow.player_name || ""),
-      eventType: "telegram_link_confirmed",
-      category: "security",
-      severity: "notice",
-      description: `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} подтверждён для лаунчера`,
-      source: "telegram_bot",
-      device: String(flow.device_key_id || ""),
-      newValue: {
-        telegramUserId: telegramUser.id,
-        telegramUsername: telegramUser.username,
-        ipReverified: true
-      }
-    });
-    await client.query("COMMIT");
-    return {
-      ok: true,
-      status: "confirmed",
-      player: { id: Number(flow.player_id), name: String(flow.player_name || "") },
-      telegram: telegramUser
-    };
-  } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 async function listTelegramBindings(limitValue = 50) {
   if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
   const limit = Math.max(1, Math.min(100, Number(limitValue) || 50));
-  const result = await pgPool.query(
-    `SELECT b.*, p.name AS player_name
-     FROM launcher_telegram_bindings b
-     JOIN players p ON p.id = b.player_id
-     ORDER BY b.updated_at DESC
-     LIMIT $1`,
-    [limit]
-  );
+  const [result, countResult] = await Promise.all([
+    pgPool.query(
+      `SELECT b.*, p.name AS player_name
+       FROM launcher_telegram_bindings b
+       JOIN players p ON p.id = b.player_id
+       ORDER BY b.updated_at DESC
+       LIMIT $1`,
+      [limit]
+    ),
+    pgPool.query("SELECT COUNT(*)::integer AS count FROM launcher_telegram_bindings")
+  ]);
   return {
     ok: true,
+    total: Number(countResult.rows[0]?.count || 0),
     links: result.rows.map((row) => ({
       playerId: Number(row.player_id),
       playerName: String(row.player_name || ""),
@@ -3625,6 +3368,1408 @@ async function listTelegramBindings(limitValue = 50) {
       lastVerifiedAt: postgresTimestamp(row.last_verified_at)
     }))
   };
+}
+
+function randomOpaqueId(prefix, byteLength = 18) {
+  return `${prefix}_${crypto.randomBytes(byteLength).toString("base64url")}`;
+}
+
+function normalizeTelegramPairingCode(value) {
+  const compact = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (compact.length !== 8) return "";
+  for (const character of compact) {
+    if (!TELEGRAM_PAIRING_CODE_ALPHABET.includes(character)) return "";
+  }
+  return `${compact.slice(0, 4)}-${compact.slice(4)}`;
+}
+
+function createTelegramPairingCodeValue() {
+  let compact = "";
+  for (let index = 0; index < 8; index += 1) {
+    compact += TELEGRAM_PAIRING_CODE_ALPHABET[
+      crypto.randomInt(0, TELEGRAM_PAIRING_CODE_ALPHABET.length)
+    ];
+  }
+  return `${compact.slice(0, 4)}-${compact.slice(4)}`;
+}
+
+function telegramPairingCodeHash(value) {
+  const normalized = normalizeTelegramPairingCode(value);
+  if (!normalized || !TELEGRAM_LINK_API_TOKEN) return "";
+  return crypto
+    .createHmac("sha256", TELEGRAM_LINK_API_TOKEN)
+    .update(`pairing-code:${normalized}`, "utf8")
+    .digest("hex");
+}
+
+function normalizeTelegramPairingRequestId(value, prefixes = ["pc", "lr", "ga"]) {
+  const requestId = String(value || "").trim();
+  const prefix = requestId.split("_", 1)[0];
+  if (!prefixes.includes(prefix)) return "";
+  return /^[a-z]{2}_[A-Za-z0-9_-]{20,60}$/.test(requestId) ? requestId : "";
+}
+
+async function telegramSystemState(executor = pgPool, { lock = false } = {}) {
+  if (!executor) return null;
+  const result = await executor.query(
+    `SELECT id, binding_epoch, last_reset_at, last_reset_by_telegram_id, updated_at
+     FROM launcher_telegram_system_state
+     WHERE id = 1
+     ${lock ? "FOR UPDATE" : ""}`
+  );
+  return result.rows[0] || null;
+}
+
+function telegramPairingPurpose(status) {
+  return status?.linked ? "ip_reverify" : "link";
+}
+
+async function createTelegramLoginRequest(account, device, req) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const bindingStatus = await launcherTelegramStatus(account, req);
+  if (!bindingStatus.available) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  if (bindingStatus.verified) {
+    return {
+      ok: true,
+      status: "confirmed",
+      loginRequestId: null,
+      expiresAt: null,
+      remainingAttempts: 5,
+      telegram: telegramStatusPayload(bindingStatus)
+    };
+  }
+
+  const ipHash = bindingStatus.ipHash;
+  if (!ipHash) return { ok: false, status: 503, error: "launcher_ip_unavailable" };
+  const purpose = telegramPairingPurpose(bindingStatus);
+  const linkKeyHash = launcherLinkKeyHash(account.key);
+  const expectedTelegramUserId = Number(bindingStatus.user?.id || 0) || null;
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const bindingEpoch = Number(systemState.binding_epoch);
+
+    const existingResult = await client.query(
+      `SELECT r.*,
+              c.state AS code_state,
+              c.telegram_user_id,
+              c.telegram_username,
+              c.telegram_first_name,
+              c.telegram_last_name
+       FROM launcher_telegram_login_requests r
+       LEFT JOIN launcher_telegram_pairing_codes c ON c.login_request_id = r.request_id
+       WHERE r.player_id = $1
+         AND r.device_key_id = $2
+         AND r.link_key_hash = $3
+         AND r.launcher_ip_hash = $4
+         AND r.binding_epoch = $5
+         AND r.state IN ('pending', 'claimed')
+       ORDER BY r.created_at DESC
+       LIMIT 1
+       FOR UPDATE OF r`,
+      [
+        Number(account.id),
+        device.deviceKeyId,
+        linkKeyHash,
+        ipHash,
+        bindingEpoch
+      ]
+    );
+    const existing = existingResult.rows[0];
+    if (existing && new Date(existing.expires_at).getTime() > Date.now()) {
+      await client.query("COMMIT");
+      const codeUser = telegramUserPayload(existing);
+      return {
+        ok: true,
+        status: existing.state === "claimed" ? "claimed" : "required",
+        loginRequestId: String(existing.request_id),
+        expiresAt: postgresTimestamp(existing.expires_at),
+        remainingAttempts: Math.max(0, 5 - Number(existing.failed_attempts || 0)),
+        telegram: {
+          ...telegramStatusPayload(bindingStatus),
+          state: existing.state === "claimed" ? "claimed" : "required",
+          user: codeUser || bindingStatus.user
+        }
+      };
+    }
+
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = CASE
+         WHEN expires_at <= now() THEN 'expired'
+         ELSE 'cancelled'
+       END,
+       updated_at = now()
+       WHERE player_id = $1
+         AND state IN ('pending', 'claimed')`,
+      [Number(account.id)]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = CASE
+         WHEN expires_at <= now() THEN 'expired'
+         ELSE 'cancelled'
+       END,
+       updated_at = now()
+       WHERE login_request_id IN (
+         SELECT request_id
+         FROM launcher_telegram_login_requests
+         WHERE player_id = $1
+           AND state IN ('expired', 'cancelled')
+       )
+         AND state IN ('issued', 'claimed')`,
+      [Number(account.id)]
+    );
+
+    const loginRequestId = randomOpaqueId("lr");
+    const expiresAt = new Date(Date.now() + TELEGRAM_LOGIN_REQUEST_TTL_MS);
+    await client.query(
+      `INSERT INTO launcher_telegram_login_requests (
+         request_id, player_id, purpose, expected_telegram_user_id,
+         device_key_id, link_key_hash, launcher_ip_hash,
+         binding_epoch, expires_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        loginRequestId,
+        Number(account.id),
+        purpose,
+        expectedTelegramUserId,
+        device.deviceKeyId,
+        linkKeyHash,
+        ipHash,
+        bindingEpoch,
+        expiresAt.toISOString()
+      ]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: "required",
+      loginRequestId,
+      expiresAt: expiresAt.toISOString(),
+      remainingAttempts: 5,
+      telegram: {
+        ...telegramStatusPayload(bindingStatus),
+        state: "required"
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function latestTelegramPairingStatus(account, device, req, loginRequestIdValue = "") {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const bindingStatus = await launcherTelegramStatus(account, req);
+  if (!bindingStatus.available) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  if (bindingStatus.verified) {
+    return {
+      ok: true,
+      status: "confirmed",
+      loginRequestId: null,
+      expiresAt: null,
+      remainingAttempts: 5,
+      telegram: telegramStatusPayload(bindingStatus)
+    };
+  }
+
+  const loginRequestId = normalizeTelegramPairingRequestId(loginRequestIdValue, ["lr"]);
+  const values = [
+    Number(account.id),
+    device.deviceKeyId,
+    launcherLinkKeyHash(account.key),
+    bindingStatus.ipHash
+  ];
+  const requestFilter = loginRequestId
+    ? "AND r.request_id = $5"
+    : "";
+  if (loginRequestId) values.push(loginRequestId);
+  const result = await pgPool.query(
+    `SELECT r.*,
+            c.request_id AS pairing_request_id,
+            c.state AS code_state,
+            c.telegram_user_id,
+            c.telegram_username,
+            c.telegram_first_name,
+            c.telegram_last_name
+     FROM launcher_telegram_login_requests r
+     LEFT JOIN launcher_telegram_pairing_codes c ON c.login_request_id = r.request_id
+     WHERE r.player_id = $1
+       AND r.device_key_id = $2
+       AND r.link_key_hash = $3
+       AND r.launcher_ip_hash = $4
+       ${requestFilter}
+     ORDER BY r.created_at DESC
+     LIMIT 1`,
+    values
+  );
+  const loginRequest = result.rows[0];
+  if (!loginRequest) {
+    return {
+      ok: true,
+      status: "required",
+      loginRequestId: null,
+      expiresAt: null,
+      remainingAttempts: 5,
+      telegram: telegramStatusPayload(bindingStatus)
+    };
+  }
+
+  const expired = new Date(loginRequest.expires_at).getTime() <= Date.now();
+  if (expired && ["pending", "claimed"].includes(loginRequest.state)) {
+    await pgPool.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'expired', updated_at = now()
+       WHERE request_id = $1 AND state IN ('pending', 'claimed')`,
+      [String(loginRequest.request_id)]
+    );
+    await pgPool.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'expired', updated_at = now()
+       WHERE login_request_id = $1 AND state IN ('issued', 'claimed')`,
+      [String(loginRequest.request_id)]
+    );
+    loginRequest.state = "expired";
+  }
+
+  const state = loginRequest.state === "claimed"
+    ? "claimed"
+    : String(loginRequest.state || "required");
+  return {
+    ok: true,
+    status: state === "pending" ? "required" : state,
+    loginRequestId: String(loginRequest.request_id),
+    pairingRequestId: loginRequest.pairing_request_id
+      ? String(loginRequest.pairing_request_id)
+      : null,
+    expiresAt: postgresTimestamp(loginRequest.expires_at),
+    remainingAttempts: Math.max(0, 5 - Number(loginRequest.failed_attempts || 0)),
+    telegram: {
+      ...telegramStatusPayload(bindingStatus),
+      state: state === "pending" ? "required" : state,
+      user: telegramUserPayload(loginRequest) || bindingStatus.user
+    }
+  };
+}
+
+async function claimTelegramPairingCode(account, device, req, body) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const loginRequestId = normalizeTelegramPairingRequestId(body?.loginRequestId, ["lr"]);
+  const code = normalizeTelegramPairingCode(body?.code);
+  if (!loginRequestId) {
+    return { ok: false, status: 400, error: "telegram_login_request_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const loginResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_login_requests
+       WHERE request_id = $1
+       FOR UPDATE`,
+      [loginRequestId]
+    );
+    const loginRequest = loginResult.rows[0];
+    const currentIpHash = launcherIpHash(req);
+    const currentLinkHash = launcherLinkKeyHash(account.key);
+    if (!loginRequest ||
+        Number(loginRequest.player_id) !== Number(account.id) ||
+        loginRequest.device_key_id !== device.deviceKeyId ||
+        !safeTokenEquals(loginRequest.link_key_hash, currentLinkHash) ||
+        !safeTokenEquals(loginRequest.launcher_ip_hash, currentIpHash)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "telegram_login_request_invalid" };
+    }
+    if (Number(loginRequest.binding_epoch) !== Number(systemState.binding_epoch)) {
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'cancelled', updated_at = now()
+         WHERE request_id = $1`,
+        [loginRequestId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 409, error: "telegram_binding_reset" };
+    }
+    if (new Date(loginRequest.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [loginRequestId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "telegram_code_expired" };
+    }
+    if (loginRequest.state === "locked" || Number(loginRequest.failed_attempts || 0) >= 5) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 429, error: "telegram_code_attempts_exceeded", remainingAttempts: 0 };
+    }
+    if (loginRequest.state === "claimed") {
+      const existingClaim = await client.query(
+        `SELECT *
+         FROM launcher_telegram_pairing_codes
+         WHERE login_request_id = $1
+         LIMIT 1`,
+        [loginRequestId]
+      );
+      await client.query("ROLLBACK");
+      if (existingClaim.rowCount) {
+        return {
+          ok: true,
+          status: "claimed",
+          loginRequestId,
+          remainingAttempts: Math.max(0, 5 - Number(loginRequest.failed_attempts || 0)),
+          telegram: {
+            available: true,
+            required: true,
+            verified: false,
+            linked: loginRequest.purpose === "ip_reverify",
+            reason: loginRequest.purpose === "ip_reverify" ? "ip_changed" : "not_linked",
+            state: "claimed",
+            user: telegramUserPayload(existingClaim.rows[0])
+          }
+        };
+      }
+      return { ok: false, status: 409, error: "telegram_code_already_used" };
+    }
+    if (loginRequest.state !== "pending") {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: `telegram_request_${loginRequest.state}` };
+    }
+
+    const codeHash = telegramPairingCodeHash(code);
+    const codeResult = codeHash
+      ? await client.query(
+        `SELECT *
+         FROM launcher_telegram_pairing_codes
+         WHERE code_hash = $1
+         FOR UPDATE`,
+        [codeHash]
+      )
+      : { rows: [], rowCount: 0 };
+    const pairing = codeResult.rows[0];
+    const pairingValid = pairing &&
+      pairing.state === "issued" &&
+      new Date(pairing.expires_at).getTime() > Date.now() &&
+      Number(pairing.binding_epoch) === Number(systemState.binding_epoch);
+    if (!pairingValid) {
+      const codeWasAlreadyUsed = Boolean(pairing && pairing.state !== "issued");
+      const failedAttempts = Math.min(5, Number(loginRequest.failed_attempts || 0) + 1);
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET failed_attempts = $2,
+             state = CASE WHEN $2 >= 5 THEN 'locked' ELSE state END,
+             updated_at = now()
+         WHERE request_id = $1`,
+        [loginRequestId, failedAttempts]
+      );
+      await client.query("COMMIT");
+      return {
+        ok: false,
+        status: failedAttempts >= 5 ? 429 : 400,
+        error: failedAttempts >= 5
+          ? "telegram_code_attempts_exceeded"
+          : (codeWasAlreadyUsed ? "telegram_code_already_used" : "telegram_code_invalid"),
+        remainingAttempts: Math.max(0, 5 - failedAttempts)
+      };
+    }
+
+    const bindingResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_bindings
+       WHERE player_id = $1 OR telegram_user_id = $2
+       FOR UPDATE`,
+      [Number(account.id), Number(pairing.telegram_user_id)]
+    );
+    const playerBinding = bindingResult.rows.find(
+      (row) => Number(row.player_id) === Number(account.id)
+    );
+    const telegramBinding = bindingResult.rows.find(
+      (row) => Number(row.telegram_user_id) === Number(pairing.telegram_user_id)
+    );
+
+    if (loginRequest.purpose === "link") {
+      if (pairing.purpose !== "link" ||
+          pairing.expected_player_id ||
+          playerBinding ||
+          telegramBinding) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: playerBinding ? "telegram_player_already_bound" : "telegram_already_bound"
+        };
+      }
+    } else {
+      const expectedTelegramUserId = Number(loginRequest.expected_telegram_user_id || 0);
+      if (pairing.purpose !== "ip_reverify" ||
+          Number(pairing.expected_player_id || 0) !== Number(account.id) ||
+          Number(pairing.telegram_user_id) !== expectedTelegramUserId ||
+          !playerBinding ||
+          Number(playerBinding.telegram_user_id) !== expectedTelegramUserId ||
+          !telegramBinding ||
+          Number(telegramBinding.player_id) !== Number(account.id)) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "telegram_account_mismatch" };
+      }
+    }
+
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'claimed',
+           login_request_id = $2,
+           player_id = $3,
+           device_key_id = $4,
+           link_key_hash = $5,
+           launcher_ip_hash = $6,
+           claimed_at = now(),
+           updated_at = now()
+       WHERE request_id = $1 AND state = 'issued'`,
+      [
+        String(pairing.request_id),
+        loginRequestId,
+        Number(account.id),
+        device.deviceKeyId,
+        currentLinkHash,
+        currentIpHash
+      ]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'claimed', claimed_at = now(), updated_at = now()
+       WHERE request_id = $1 AND state = 'pending'`,
+      [loginRequestId]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: "claimed",
+      loginRequestId,
+      pairingRequestId: String(pairing.request_id),
+      expiresAt: postgresTimestamp(loginRequest.expires_at),
+      remainingAttempts: Math.max(0, 5 - Number(loginRequest.failed_attempts || 0)),
+      telegram: {
+        available: true,
+        required: true,
+        verified: false,
+        linked: loginRequest.purpose === "ip_reverify",
+        reason: loginRequest.purpose === "ip_reverify" ? "ip_changed" : "not_linked",
+        state: "claimed",
+        user: telegramUserPayload(pairing)
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") {
+      return { ok: false, status: 409, error: "telegram_code_already_used" };
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function botTelegramAccountStatus(telegramUserIdValue) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const telegramUserId = Number(telegramUserIdValue || 0);
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) {
+    return { ok: false, status: 400, error: "telegram_user_invalid" };
+  }
+  const bindingResult = await pgPool.query(
+    `SELECT b.*, p.name AS player_name
+     FROM launcher_telegram_bindings b
+     JOIN players p ON p.id = b.player_id
+     WHERE b.telegram_user_id = $1`,
+    [telegramUserId]
+  );
+  const binding = bindingResult.rows[0] || null;
+  const loginResult = binding
+    ? await pgPool.query(
+      `SELECT *
+       FROM launcher_telegram_login_requests
+       WHERE player_id = $1
+         AND expected_telegram_user_id = $2
+         AND purpose = 'ip_reverify'
+         AND state IN ('pending', 'claimed')
+         AND expires_at > now()
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [Number(binding.player_id), telegramUserId]
+    )
+    : { rows: [] };
+  const loginRequest = loginResult.rows[0] || null;
+  const codeResult = await pgPool.query(
+    `SELECT request_id, purpose, state, expires_at
+     FROM launcher_telegram_pairing_codes
+     WHERE telegram_user_id = $1
+       AND state IN ('issued', 'claimed')
+       AND expires_at > now()
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [telegramUserId]
+  );
+  const activeCode = codeResult.rows[0] || null;
+  return {
+    ok: true,
+    linked: Boolean(binding),
+    player: binding ? {
+      id: Number(binding.player_id),
+      name: String(binding.player_name || "")
+    } : null,
+    pendingLogin: loginRequest ? {
+      requestId: String(loginRequest.request_id),
+      expiresAt: postgresTimestamp(loginRequest.expires_at)
+    } : null,
+    activePairing: activeCode ? {
+      requestId: String(activeCode.request_id),
+      purpose: String(activeCode.purpose),
+      state: String(activeCode.state),
+      expiresAt: postgresTimestamp(activeCode.expires_at)
+    } : null
+  };
+}
+
+async function createBotTelegramPairingCode(rawUser, chatIdValue) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const telegramUser = normalizeTelegramIdentity(rawUser);
+  const chatId = Number(chatIdValue || 0);
+  if (!telegramUser || !Number.isSafeInteger(chatId) || chatId <= 0) {
+    return { ok: false, status: 400, error: "telegram_user_invalid" };
+  }
+
+  for (let collisionAttempt = 0; collisionAttempt < 4; collisionAttempt += 1) {
+    const code = createTelegramPairingCodeValue();
+    const codeHash = telegramPairingCodeHash(code);
+    const requestId = randomOpaqueId("pc");
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "SELECT pg_advisory_xact_lock_shared($1)",
+        [TELEGRAM_RESET_ADVISORY_LOCK]
+      );
+      const systemState = await telegramSystemState(client);
+      if (!systemState) throw new Error("telegram_system_state_missing");
+      const bindingResult = await client.query(
+        `SELECT b.*, p.name AS player_name
+         FROM launcher_telegram_bindings b
+         JOIN players p ON p.id = b.player_id
+         WHERE b.telegram_user_id = $1
+         FOR UPDATE OF b`,
+        [telegramUser.id]
+      );
+      const binding = bindingResult.rows[0] || null;
+      let purpose = "link";
+      let expectedPlayerId = null;
+      let loginRequestId = null;
+      if (binding) {
+        const loginResult = await client.query(
+          `SELECT *
+           FROM launcher_telegram_login_requests
+           WHERE player_id = $1
+             AND expected_telegram_user_id = $2
+             AND purpose = 'ip_reverify'
+             AND state IN ('pending', 'claimed')
+             AND expires_at > now()
+           ORDER BY created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
+          [Number(binding.player_id), telegramUser.id]
+        );
+        const loginRequest = loginResult.rows[0];
+        if (!loginRequest) {
+          await client.query("ROLLBACK");
+          return {
+            ok: false,
+            status: 409,
+            error: "telegram_already_bound",
+            player: {
+              id: Number(binding.player_id),
+              name: String(binding.player_name || "")
+            }
+          };
+        }
+        if (loginRequest.state === "claimed") {
+          const claimedResult = await client.query(
+            `SELECT request_id, state, expires_at
+             FROM launcher_telegram_pairing_codes
+             WHERE login_request_id = $1
+               AND state = 'claimed'
+             LIMIT 1`,
+            [String(loginRequest.request_id)]
+          );
+          await client.query("ROLLBACK");
+          return {
+            ok: false,
+            status: 409,
+            error: "telegram_confirmation_pending",
+            pairing: claimedResult.rows[0] ? {
+              requestId: String(claimedResult.rows[0].request_id),
+              state: "claimed",
+              expiresAt: postgresTimestamp(claimedResult.rows[0].expires_at)
+            } : null
+          };
+        }
+        purpose = "ip_reverify";
+        expectedPlayerId = Number(binding.player_id);
+        loginRequestId = String(loginRequest.request_id);
+      }
+
+      const claimedResult = await client.query(
+        `SELECT request_id, state, expires_at
+         FROM launcher_telegram_pairing_codes
+         WHERE telegram_user_id = $1
+           AND state = 'claimed'
+           AND expires_at > now()
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [telegramUser.id]
+      );
+      if (claimedResult.rowCount) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: "telegram_confirmation_pending",
+          pairing: {
+            requestId: String(claimedResult.rows[0].request_id),
+            state: "claimed",
+            expiresAt: postgresTimestamp(claimedResult.rows[0].expires_at)
+          }
+        };
+      }
+
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = CASE
+           WHEN expires_at <= now() THEN 'expired'
+           ELSE 'cancelled'
+         END,
+         updated_at = now()
+         WHERE telegram_user_id = $1
+           AND state = 'issued'`,
+        [telegramUser.id]
+      );
+
+      const expiresAt = new Date(Date.now() + TELEGRAM_PAIRING_CODE_TTL_MS);
+      await client.query(
+        `INSERT INTO launcher_telegram_pairing_codes (
+           request_id, code_hash, telegram_user_id,
+           telegram_username, telegram_first_name, telegram_last_name,
+           purpose, expected_player_id, login_request_id,
+           binding_epoch, bot_chat_id, expires_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          requestId,
+          codeHash,
+          telegramUser.id,
+          telegramUser.username,
+          telegramUser.firstName,
+          telegramUser.lastName,
+          purpose,
+          expectedPlayerId,
+          loginRequestId,
+          Number(systemState.binding_epoch),
+          chatId,
+          expiresAt.toISOString()
+        ]
+      );
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        status: "issued",
+        requestId,
+        code,
+        purpose,
+        expiresAt: expiresAt.toISOString(),
+        player: binding ? {
+          id: Number(binding.player_id),
+          name: String(binding.player_name || "")
+        } : null
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      if (error?.code === "23505" && collisionAttempt < 3) continue;
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  return { ok: false, status: 503, error: "telegram_code_generation_failed" };
+}
+
+async function attachBotTelegramPairingMessage(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const requestId = normalizeTelegramPairingRequestId(body?.requestId, ["pc"]);
+  const telegramUserId = Number(body?.telegramUserId || 0);
+  const chatId = Number(body?.chatId || 0);
+  const messageId = Number(body?.messageId || 0);
+  if (!requestId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      !Number.isSafeInteger(chatId) || chatId <= 0 ||
+      !Number.isSafeInteger(messageId) || messageId <= 0) {
+    return { ok: false, status: 400, error: "telegram_message_invalid" };
+  }
+  const result = await pgPool.query(
+    `UPDATE launcher_telegram_pairing_codes
+     SET bot_chat_id = $3,
+         bot_message_id = $4,
+         updated_at = now()
+     WHERE request_id = $1
+       AND telegram_user_id = $2
+       AND state IN ('issued', 'claimed')
+     RETURNING request_id, state`,
+    [requestId, telegramUserId, chatId, messageId]
+  );
+  if (!result.rowCount) {
+    return { ok: false, status: 404, error: "telegram_pairing_not_found" };
+  }
+  return { ok: true, requestId, state: String(result.rows[0].state) };
+}
+
+async function listBotTelegramConfirmations(limitValue = 20) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const limit = Math.max(1, Math.min(100, Number(limitValue) || 20));
+  const systemState = await telegramSystemState();
+  if (!systemState) return { ok: false, status: 503, error: "telegram_system_state_missing" };
+  const result = await pgPool.query(
+    `SELECT c.*, p.name AS player_name
+     FROM launcher_telegram_pairing_codes c
+     JOIN players p ON p.id = c.player_id
+     WHERE c.state = 'claimed'
+       AND c.confirmation_notified_at IS NULL
+       AND c.expires_at > now()
+       AND c.binding_epoch = $1
+     ORDER BY c.claimed_at ASC
+     LIMIT $2`,
+    [Number(systemState.binding_epoch), limit]
+  );
+  return {
+    ok: true,
+    confirmations: result.rows.map((row) => ({
+      requestId: String(row.request_id),
+      purpose: String(row.purpose),
+      chatId: Number(row.bot_chat_id),
+      messageId: row.bot_message_id == null ? null : Number(row.bot_message_id),
+      player: {
+        id: Number(row.player_id),
+        name: String(row.player_name || "")
+      },
+      telegram: telegramUserPayload(row),
+      expiresAt: postgresTimestamp(row.expires_at)
+    }))
+  };
+}
+
+async function markBotTelegramConfirmationNotified(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const requestId = normalizeTelegramPairingRequestId(body?.requestId, ["pc"]);
+  const telegramUserId = Number(body?.telegramUserId || 0);
+  const chatId = Number(body?.chatId || 0);
+  const messageId = Number(body?.messageId || 0);
+  if (!requestId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      !Number.isSafeInteger(chatId) || chatId <= 0 ||
+      !Number.isSafeInteger(messageId) || messageId <= 0) {
+    return { ok: false, status: 400, error: "telegram_message_invalid" };
+  }
+  const result = await pgPool.query(
+    `UPDATE launcher_telegram_pairing_codes
+     SET bot_chat_id = $3,
+         bot_message_id = $4,
+         confirmation_notified_at = COALESCE(confirmation_notified_at, now()),
+         updated_at = now()
+     WHERE request_id = $1
+       AND telegram_user_id = $2
+       AND state = 'claimed'
+     RETURNING request_id`,
+    [requestId, telegramUserId, chatId, messageId]
+  );
+  if (!result.rowCount) {
+    return { ok: false, status: 404, error: "telegram_pairing_not_found" };
+  }
+  return { ok: true, requestId };
+}
+
+async function decideTelegramPairing(requestIdValue, rawUser, decisionValue) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const requestId = normalizeTelegramPairingRequestId(requestIdValue, ["pc"]);
+  const telegramUser = normalizeTelegramIdentity(rawUser);
+  const decision = String(decisionValue || "").toLowerCase();
+  if (!requestId || !telegramUser || !["confirm", "reject"].includes(decision)) {
+    return { ok: false, status: 400, error: "telegram_pairing_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const result = await client.query(
+      `SELECT c.*, r.state AS login_state, r.expires_at AS login_expires_at,
+              p.cckey, p.name AS player_name,
+              d.device_key_id AS bound_device_key_id,
+              d.link_key_hash AS device_link_key_hash
+       FROM launcher_telegram_pairing_codes c
+       JOIN launcher_telegram_login_requests r ON r.request_id = c.login_request_id
+       JOIN players p ON p.id = c.player_id
+       LEFT JOIN launcher_devices d ON d.player_id = c.player_id
+       WHERE c.request_id = $1
+       FOR UPDATE OF c, r, p`,
+      [requestId]
+    );
+    const pairing = result.rows[0];
+    if (pairing &&
+        Number(pairing.telegram_user_id) === telegramUser.id &&
+        ["confirmed", "rejected"].includes(pairing.state) &&
+        pairing.login_state === pairing.state) {
+      await client.query("ROLLBACK");
+      return {
+        ok: true,
+        status: String(pairing.state),
+        purpose: String(pairing.purpose),
+        player: {
+          id: Number(pairing.player_id),
+          name: String(pairing.player_name || "")
+        },
+        telegram: telegramUser
+      };
+    }
+    if (!pairing ||
+        pairing.state !== "claimed" ||
+        pairing.login_state !== "claimed") {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "telegram_pairing_not_claimed" };
+    }
+    if (Number(pairing.telegram_user_id) !== telegramUser.id) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "telegram_account_mismatch" };
+    }
+    if (Number(pairing.binding_epoch) !== Number(systemState.binding_epoch)) {
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = 'cancelled', updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'cancelled', updated_at = now()
+         WHERE request_id = $1`,
+        [String(pairing.login_request_id)]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 409, error: "telegram_binding_reset" };
+    }
+    if (new Date(pairing.expires_at).getTime() <= Date.now() ||
+        new Date(pairing.login_expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [String(pairing.login_request_id)]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "telegram_code_expired" };
+    }
+    if (decision === "reject") {
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = 'rejected', rejected_at = now(), updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'rejected', rejected_at = now(), updated_at = now()
+         WHERE request_id = $1`,
+        [String(pairing.login_request_id)]
+      );
+      await writeAuditEvent(client, {
+        playerId: Number(pairing.player_id),
+        playerName: String(pairing.player_name || ""),
+        eventType: "telegram_pairing_rejected",
+        category: "security",
+        severity: "notice",
+        description: `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} отклонил привязку`,
+        source: "telegram_bot",
+        device: String(pairing.device_key_id || ""),
+        metadata: { purpose: String(pairing.purpose) }
+      });
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        status: "rejected",
+        player: {
+          id: Number(pairing.player_id),
+          name: String(pairing.player_name || "")
+        }
+      };
+    }
+
+    const currentLinkHash = launcherLinkKeyHash(pairing.cckey);
+    if (!pairing.bound_device_key_id ||
+        pairing.bound_device_key_id !== pairing.device_key_id ||
+        !safeTokenEquals(pairing.link_key_hash, currentLinkHash) ||
+        !safeTokenEquals(pairing.device_link_key_hash, currentLinkHash)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "telegram_link_stale" };
+    }
+
+    const bindingResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_bindings
+       WHERE player_id = $1 OR telegram_user_id = $2
+       FOR UPDATE`,
+      [Number(pairing.player_id), telegramUser.id]
+    );
+    const playerBinding = bindingResult.rows.find(
+      (row) => Number(row.player_id) === Number(pairing.player_id)
+    );
+    const telegramBinding = bindingResult.rows.find(
+      (row) => Number(row.telegram_user_id) === telegramUser.id
+    );
+    if (pairing.purpose === "link") {
+      if (playerBinding || telegramBinding) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: playerBinding ? "telegram_player_already_bound" : "telegram_already_bound"
+        };
+      }
+      await client.query(
+        `INSERT INTO launcher_telegram_bindings (
+           player_id, telegram_user_id, telegram_username,
+           telegram_first_name, telegram_last_name, link_key_hash,
+           last_ip_hash, binding_epoch,
+           confirmed_at, last_verified_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now(), now())`,
+        [
+          Number(pairing.player_id),
+          telegramUser.id,
+          telegramUser.username,
+          telegramUser.firstName,
+          telegramUser.lastName,
+          currentLinkHash,
+          String(pairing.launcher_ip_hash),
+          Number(systemState.binding_epoch)
+        ]
+      );
+    } else {
+      if (!playerBinding ||
+          !telegramBinding ||
+          Number(playerBinding.telegram_user_id) !== telegramUser.id ||
+          Number(telegramBinding.player_id) !== Number(pairing.player_id) ||
+          Number(pairing.expected_player_id || 0) !== Number(pairing.player_id)) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "telegram_account_mismatch" };
+      }
+      await client.query(
+        `UPDATE launcher_telegram_bindings
+         SET telegram_username = $2,
+             telegram_first_name = $3,
+             telegram_last_name = $4,
+             link_key_hash = $5,
+             last_ip_hash = $6,
+             binding_epoch = $7,
+             last_verified_at = now(),
+             updated_at = now()
+         WHERE player_id = $1`,
+        [
+          Number(pairing.player_id),
+          telegramUser.username,
+          telegramUser.firstName,
+          telegramUser.lastName,
+          currentLinkHash,
+          String(pairing.launcher_ip_hash),
+          Number(systemState.binding_epoch)
+        ]
+      );
+    }
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'confirmed', confirmed_at = now(), updated_at = now()
+       WHERE request_id = $1`,
+      [requestId]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'confirmed', confirmed_at = now(), updated_at = now()
+       WHERE request_id = $1`,
+      [String(pairing.login_request_id)]
+    );
+    await writeAuditEvent(client, {
+      playerId: Number(pairing.player_id),
+      playerName: String(pairing.player_name || ""),
+      eventType: pairing.purpose === "ip_reverify"
+        ? "telegram_ip_reverified"
+        : "telegram_link_confirmed",
+      category: "security",
+      severity: "notice",
+      description: pairing.purpose === "ip_reverify"
+        ? `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} подтвердил новый IP`
+        : `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} подтверждён для лаунчера`,
+      source: "telegram_bot",
+      device: String(pairing.device_key_id || ""),
+      newValue: {
+        telegramUserId: telegramUser.id,
+        telegramUsername: telegramUser.username,
+        purpose: String(pairing.purpose),
+        bindingEpoch: Number(systemState.binding_epoch)
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: "confirmed",
+      purpose: String(pairing.purpose),
+      player: {
+        id: Number(pairing.player_id),
+        name: String(pairing.player_name || "")
+      },
+      telegram: telegramUser
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") {
+      return { ok: false, status: 409, error: "telegram_already_bound" };
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resetTelegramBindingForPlayer(playerIdValue, adminTelegramIdValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const playerId = Number(playerIdValue || 0);
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0) {
+    return { ok: false, status: 400, error: "invalid_player_id" };
+  }
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      "SELECT id, name FROM players WHERE id = $1 FOR UPDATE",
+      [playerId]
+    );
+    if (!playerResult.rowCount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "player_not_found" };
+    }
+    const bindingResult = await client.query(
+      "DELETE FROM launcher_telegram_bindings WHERE player_id = $1",
+      [playerId]
+    );
+    const codeResult = await client.query(
+      "DELETE FROM launcher_telegram_pairing_codes WHERE player_id = $1 OR expected_player_id = $1",
+      [playerId]
+    );
+    const requestResult = await client.query(
+      "DELETE FROM launcher_telegram_login_requests WHERE player_id = $1",
+      [playerId]
+    );
+    await writeAuditEvent(client, {
+      playerId,
+      playerName: String(playerResult.rows[0].name || ""),
+      eventType: "telegram_binding_admin_reset",
+      category: "security",
+      severity: "warning",
+      description: "Администратор сбросил Telegram-привязку игрока",
+      source: "telegram_admin",
+      metadata: {
+        adminTelegramId,
+        removedBinding: bindingResult.rowCount,
+        removedCodes: codeResult.rowCount,
+        removedLoginRequests: requestResult.rowCount
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      player: {
+        id: playerId,
+        name: String(playerResult.rows[0].name || "")
+      },
+      removed: {
+        bindings: bindingResult.rowCount,
+        codes: codeResult.rowCount,
+        loginRequests: requestResult.rowCount
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function prepareGlobalTelegramBindingReset(adminTelegramIdValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = CASE WHEN expires_at <= now() THEN 'expired' ELSE 'cancelled' END,
+           updated_at = now()
+       WHERE admin_telegram_user_id = $1
+         AND action = 'reset_all'
+         AND state = 'prepared'`,
+      [adminTelegramId]
+    );
+    const countResult = await client.query(
+      "SELECT COUNT(*)::integer AS count FROM launcher_telegram_bindings"
+    );
+    const affectedCount = Number(countResult.rows[0]?.count || 0);
+    const requestId = randomOpaqueId("ga");
+    const expiresAt = new Date(Date.now() + TELEGRAM_RESET_CONFIRM_TTL_MS);
+    await client.query(
+      `INSERT INTO launcher_telegram_admin_actions (
+         request_id, action, admin_telegram_user_id,
+         binding_epoch, affected_count, expires_at
+       )
+       VALUES ($1, 'reset_all', $2, $3, $4, $5)`,
+      [
+        requestId,
+        adminTelegramId,
+        Number(systemState.binding_epoch),
+        affectedCount,
+        expiresAt.toISOString()
+      ]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      requestId,
+      affectedCount,
+      expiresAt: expiresAt.toISOString()
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function executeGlobalTelegramBindingReset(requestIdValue, adminTelegramIdValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const requestId = normalizeTelegramPairingRequestId(requestIdValue, ["ga"]);
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (!requestId) return { ok: false, status: 400, error: "reset_confirmation_invalid" };
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [TELEGRAM_RESET_ADVISORY_LOCK]);
+    const systemState = await telegramSystemState(client, { lock: true });
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const actionResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_admin_actions
+       WHERE request_id = $1
+       FOR UPDATE`,
+      [requestId]
+    );
+    const action = actionResult.rows[0];
+    if (!action ||
+        action.action !== "reset_all" ||
+        Number(action.admin_telegram_user_id) !== adminTelegramId ||
+        action.state !== "prepared" ||
+        Number(action.binding_epoch) !== Number(systemState.binding_epoch)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "reset_confirmation_invalid" };
+    }
+    if (new Date(action.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE launcher_telegram_admin_actions
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "reset_confirmation_expired" };
+    }
+
+    const bindingResult = await client.query("DELETE FROM launcher_telegram_bindings");
+    const codeResult = await client.query("DELETE FROM launcher_telegram_pairing_codes");
+    const loginResult = await client.query("DELETE FROM launcher_telegram_login_requests");
+    const nextEpoch = Number(systemState.binding_epoch) + 1;
+    await client.query(
+      `UPDATE launcher_telegram_system_state
+       SET binding_epoch = $1,
+           last_reset_at = now(),
+           last_reset_by_telegram_id = $2,
+           updated_at = now()
+       WHERE id = 1`,
+      [nextEpoch, adminTelegramId]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = 'executed', executed_at = now(), updated_at = now()
+       WHERE request_id = $1`,
+      [requestId]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = 'cancelled', updated_at = now()
+       WHERE request_id <> $1
+         AND state = 'prepared'`,
+      [requestId]
+    );
+    await writeAuditEvent(client, {
+      eventType: "telegram_bindings_global_reset",
+      category: "security",
+      severity: "critical",
+      description: `Администратор глобально сбросил ${bindingResult.rowCount} Telegram-привязок`,
+      source: "telegram_admin",
+      metadata: {
+        adminTelegramId,
+        previousEpoch: Number(systemState.binding_epoch),
+        nextEpoch,
+        removedBindings: bindingResult.rowCount,
+        removedCodes: codeResult.rowCount,
+        removedLoginRequests: loginResult.rowCount
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      bindingEpoch: nextEpoch,
+      removed: {
+        bindings: bindingResult.rowCount,
+        codes: codeResult.rowCount,
+        loginRequests: loginResult.rowCount
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function cleanupTelegramPairingState() {
+  if (!pgPool) return;
+  const client = await pgPool.connect();
+  let locked = false;
+  try {
+    const lockResult = await client.query(
+      "SELECT pg_try_advisory_lock($1) AS locked",
+      [TELEGRAM_CLEANUP_ADVISORY_LOCK]
+    );
+    locked = lockResult.rows[0]?.locked === true;
+    if (!locked) return;
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'expired', updated_at = now()
+       WHERE state IN ('issued', 'claimed')
+         AND expires_at <= now()`
+    );
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'expired', updated_at = now()
+       WHERE state IN ('pending', 'claimed')
+         AND expires_at <= now()`
+    );
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = 'expired', updated_at = now()
+       WHERE state = 'prepared'
+         AND expires_at <= now()`
+    );
+    await client.query(
+      `DELETE FROM launcher_telegram_pairing_codes
+       WHERE state IN ('confirmed', 'rejected', 'cancelled', 'expired')
+         AND updated_at < now() - interval '24 hours'`
+    );
+    await client.query(
+      `DELETE FROM launcher_telegram_login_requests
+       WHERE state IN ('confirmed', 'rejected', 'cancelled', 'expired', 'locked')
+         AND updated_at < now() - interval '24 hours'`
+    );
+    await client.query(
+      `DELETE FROM launcher_telegram_admin_actions
+       WHERE state IN ('executed', 'cancelled', 'expired')
+         AND updated_at < now() - interval '24 hours'`
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("[telegram-pairing] cleanup failed", error);
+  } finally {
+    if (locked) {
+      await client.query("SELECT pg_advisory_unlock($1)", [TELEGRAM_CLEANUP_ADVISORY_LOCK]).catch(() => {});
+    }
+    client.release();
+  }
 }
 
 async function redeemPromoCode(account, rawCode, context = {}) {
@@ -4001,7 +5146,14 @@ async function rotateLauncherGameLink(accountId) {
         [playerId]
       );
       telegramBindingRemoved = telegramBinding.rowCount > 0;
-      await client.query("DELETE FROM launcher_telegram_flows WHERE player_id = $1", [playerId]);
+      await client.query(
+        "DELETE FROM launcher_telegram_pairing_codes WHERE player_id = $1 OR expected_player_id = $1",
+        [playerId]
+      );
+      await client.query(
+        "DELETE FROM launcher_telegram_login_requests WHERE player_id = $1",
+        [playerId]
+      );
       await client.query(
         "UPDATE players SET cckey = $2, updated_at = now() WHERE id = $1",
         [playerId, nextKey]
@@ -9164,34 +10316,87 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
-  if (url.pathname === "/bot/telegram-link/claim" ||
-      url.pathname === "/bot/telegram-link/confirm" ||
-      url.pathname === "/bot/telegram-links") {
+  if (url.pathname.startsWith("/bot/telegram")) {
     if (!hasValidTelegramLinkApiToken(req)) {
       sendJson(res, { ok: false, error: "not_found" }, 404);
       return;
     }
     try {
-      if (url.pathname === "/bot/telegram-links") {
+      let result;
+      if (url.pathname === "/bot/telegram/account" ||
+          url.pathname === "/bot/telegram/confirmations" ||
+          url.pathname === "/bot/telegram/links") {
         if (req.method !== "GET") {
           sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
           return;
         }
-        const result = await listTelegramBindings(url.searchParams.get("limit"));
-        sendJson(res, result, result.status || 200);
-        return;
+        if (url.pathname === "/bot/telegram/account") {
+          const telegramUserId = Number(url.searchParams.get("telegramUserId") || 0);
+          if (!allowTelegramIdentityRequest(req, telegramUserId, "account", { limit: 120 })) {
+            sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+            return;
+          }
+          result = await botTelegramAccountStatus(telegramUserId);
+        } else if (url.pathname === "/bot/telegram/confirmations") {
+          result = await listBotTelegramConfirmations(url.searchParams.get("limit"));
+        } else {
+          result = await listTelegramBindings(url.searchParams.get("limit"));
+        }
+      } else {
+        if (req.method !== "POST") {
+          sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+          return;
+        }
+        const body = await readJsonBody(req, 16 * 1024);
+        const telegramUserId = Number(
+          body?.telegram?.id || body?.telegramUserId || body?.adminTelegramId || 0
+        );
+        const codeCreation = url.pathname === "/bot/telegram/code/create";
+        if (telegramUserId && !allowTelegramIdentityRequest(
+          req,
+          telegramUserId,
+          codeCreation ? "code-create" : url.pathname,
+          codeCreation
+            ? { windowMs: 10 * 60 * 1000, limit: 5 }
+            : { windowMs: 60000, limit: 120 }
+        )) {
+          sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+          return;
+        }
+
+        if (url.pathname === "/bot/telegram/code/create") {
+          result = await createBotTelegramPairingCode(body?.telegram, body?.chatId);
+        } else if (url.pathname === "/bot/telegram/code/message") {
+          result = await attachBotTelegramPairingMessage(body);
+        } else if (url.pathname === "/bot/telegram/confirmation/notified") {
+          result = await markBotTelegramConfirmationNotified(body);
+        } else if (url.pathname === "/bot/telegram/code/decision") {
+          result = await decideTelegramPairing(
+            body?.requestId,
+            body?.telegram,
+            body?.decision
+          );
+        } else if (url.pathname === "/bot/telegram/admin/reset-player") {
+          result = await resetTelegramBindingForPlayer(
+            body?.playerId,
+            body?.adminTelegramId
+          );
+        } else if (url.pathname === "/bot/telegram/admin/reset-all/prepare") {
+          result = await prepareGlobalTelegramBindingReset(body?.adminTelegramId);
+        } else if (url.pathname === "/bot/telegram/admin/reset-all/execute") {
+          result = await executeGlobalTelegramBindingReset(
+            body?.requestId,
+            body?.adminTelegramId
+          );
+        } else {
+          sendJson(res, { ok: false, error: "not_found" }, 404);
+          return;
+        }
       }
-      if (req.method !== "POST") {
-        sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
-        return;
-      }
-      const body = await readJsonBody(req, 16 * 1024);
-      const result = url.pathname === "/bot/telegram-link/claim"
-        ? await claimTelegramLink(body?.startToken, body?.telegram)
-        : await confirmTelegramLink(body?.startToken, body?.telegram);
-      sendJson(res, result, result.status && Number.isInteger(result.status)
+      const responseStatus = !result.ok && Number.isInteger(result.status)
         ? result.status
-        : (result.ok ? 200 : 400));
+        : 200;
+      sendJson(res, result, responseStatus);
     } catch (error) {
       const status = serviceErrorStatus(error);
       sendJson(res, {
@@ -9288,7 +10493,9 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
-  if (url.pathname === "/launcher/telegram/start" || url.pathname === "/launcher/telegram/status") {
+  if (url.pathname === "/launcher/telegram/request" ||
+      url.pathname === "/launcher/telegram/code/claim" ||
+      url.pathname === "/launcher/telegram/status") {
     if (req.method !== "POST") {
       sendJson(res, { result: false, error: "method_not_allowed" }, 405);
       return;
@@ -9304,11 +10511,36 @@ async function handleHttpRequest(req, res) {
         sendJson(res, { result: false, error: "rate_limited" }, 429, { "retry-after": "60" });
         return;
       }
-      const result = url.pathname === "/launcher/telegram/start"
-        ? await createTelegramLinkFlow(launcherAuth.account, launcherAuth.device, req)
-        : await latestTelegramLinkFlow(launcherAuth.account, launcherAuth.device, req);
+      let result;
+      if (url.pathname === "/launcher/telegram/request") {
+        result = await createTelegramLoginRequest(
+          launcherAuth.account,
+          launcherAuth.device,
+          req
+        );
+      } else if (url.pathname === "/launcher/telegram/code/claim") {
+        result = await claimTelegramPairingCode(
+          launcherAuth.account,
+          launcherAuth.device,
+          req,
+          body
+        );
+      } else {
+        result = await latestTelegramPairingStatus(
+          launcherAuth.account,
+          launcherAuth.device,
+          req,
+          body?.loginRequestId
+        );
+      }
       if (!result.ok) {
-        sendJson(res, { result: false, error: result.error }, result.status || 400);
+        sendJson(res, {
+          result: false,
+          error: result.error,
+          ...(Number.isFinite(Number(result.remainingAttempts))
+            ? { remainingAttempts: Number(result.remainingAttempts) }
+            : {})
+        }, result.status || 400);
         return;
       }
       sendJson(res, { result: true, ...result }, 200, {}, { ascii: true });
@@ -9647,6 +10879,9 @@ server.listen(PORT, () => {
   if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
   if (!TELEGRAM_LINK_API_TOKEN) {
     console.warn("[security] TELEGRAM_LINK_API_TOKEN is missing; launcher Telegram verification is unavailable");
+  }
+  if (!Number.isSafeInteger(TELEGRAM_ADMIN_ID) || TELEGRAM_ADMIN_ID <= 0) {
+    console.warn("[security] TELEGRAM_ADMIN_ID is invalid; Telegram binding resets are disabled");
   }
   if (!CLOUDFRONT_ORIGIN_SECRET) console.warn(`[security] CLOUDFRONT_ORIGIN_SECRET is missing; origin guard mode=${ORIGIN_GUARD_MODE}`);
   console.log(`[security] originGuard=${ORIGIN_GUARD_MODE} viewerIp=cloudfront-viewer-address rateBuckets=${RATE_LIMIT_BUCKET_CAP} connections=${MAX_HTTP_CONNECTIONS} inFlight=${MAX_HTTP_IN_FLIGHT}/ip${MAX_HTTP_IN_FLIGHT_PER_IP} pgPool=${POSTGRES_POOL_MAX} pgQueryTimeout=${POSTGRES_QUERY_TIMEOUT_MS}ms pgQueue=${POSTGRES_MUTATION_QUEUE_MAX}`);
