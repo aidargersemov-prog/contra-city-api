@@ -3113,6 +3113,7 @@ const RESTORED_SET_BONUS_DEFINITIONS = [
   { id: 36, code: "spy", required: ["1:business", "2:businessgoogles", "4:business", "5:business", "3:business", "6:business"] },
   { id: 37, code: "contranos", required: ["9:thanos", "2:thanos", "4:thanos", "5:thanos", "3:thanos", "6:thanos", "7:thanos"] },
   { id: 38, code: "blue_soldier", required: ["9:spec99", "1:ushanka2", "4:trooper2", "5:pant032", "3:glov022", "6:slip99", "7:rec2", "8:vodka"] },
+  { id: 39, code: "gavai", required: ["1:capgavaimag", "2:gavaibandana", "4:gavaihoodie", "5:shortigavai", "6:gavaibootsmag", "7:popugagavai"] }
 ].map((definition) => ({
   ...definition,
   bonusText: ASSEMBLAGE_BONUS_TEXTS[definition.id] || "",
@@ -3686,7 +3687,8 @@ const SHOTGUN_JUMP_PERCENT_BY_BOOT = new Map(Object.entries({
   "6:boot02": 17,      // Р СћР В°Р Р…Р В¶Р ВµРЎР‚РЎвЂ№
   "6:anarch": 20,      // Р С™Р ВµР Т‘Р С•Р Р…РЎвЂ№
   "6:avenger": 20,     // Р РЋР С‘Р Р…РЎРЉР вЂќР С‘Р С”Р В°РЎвЂљРЎвЂ№
-  "6:slip99": 40,      // Р РЃР В»Р ВµР С—Р В°Р Р…РЎвЂ№
+  "6:slip99": 25,      // Р РЃР В»Р ВµР С—Р В°Р Р…РЎвЂ№
+  "6:gavaibootsmag": 25, // axyenno
 }));
 
 function restoredWearBonusText(selectedWear) {
