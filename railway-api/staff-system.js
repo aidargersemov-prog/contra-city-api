@@ -71,6 +71,8 @@ export function staffProfilePayload(roleValue, displayName = "") {
     canKick: rank >= STAFF_ROLE_RANK.helper,
     canCreatePrivateRooms: rank >= STAFF_ROLE_RANK.moderator,
     canBan: rank >= STAFF_ROLE_RANK.admin,
+    canSpectate: rank >= STAFF_ROLE_RANK.moderator,
+    canUseDeveloperTools: role === "developer",
   };
 }
 
@@ -80,7 +82,7 @@ export function legacyPermissionPayload(roleValue) {
     a: 0,
     p: rank >= STAFF_ROLE_RANK.moderator ? 1 : 0,
     k: rank >= STAFF_ROLE_RANK.helper ? 1 : 0,
-    g: 0,
+    g: rank >= STAFF_ROLE_RANK.moderator ? 1 : 0,
   };
 }
 
@@ -116,6 +118,25 @@ function staffChatRow(row) {
     displayName: String(row.player_name || ""),
     role: normalizeStaffRole(row.role),
     message: String(row.message || ""),
+    createdAt: row.created_at?.toISOString?.() || row.created_at,
+  };
+}
+
+function staffActionRow(row) {
+  return {
+    id: Number(row.id),
+    actorPlayerId: Number(row.actor_player_id),
+    actorName: String(row.actor_name || ""),
+    actorRole: normalizeStaffRole(row.actor_role),
+    targetPlayerId: Number(row.target_player_id),
+    targetName: String(row.target_name || ""),
+    targetRole: normalizeStaffRole(row.target_role),
+    action: String(row.action || ""),
+    reason: String(row.reason || ""),
+    durationMinutes: Number(row.duration_minutes || 0),
+    source: String(row.source || ""),
+    roomName: String(row.room_name || ""),
+    mapName: String(row.map_name || ""),
     createdAt: row.created_at?.toISOString?.() || row.created_at,
   };
 }
@@ -172,7 +193,65 @@ export async function staffAjaxPayload(db, account, act, searchParams) {
     return { result: true, ok: true, messages: inserted.rows.map(staffChatRow) };
   }
 
+  if (normalizedAct === "action_list" || normalizedAct === "logs") {
+    const result = await db.query(
+      `SELECT
+         action_log.*,
+         actor.name AS actor_name,
+         target.name AS target_name
+       FROM player_staff_actions action_log
+       JOIN players actor ON actor.id = action_log.actor_player_id
+       JOIN players target ON target.id = action_log.target_player_id
+       WHERE action_log.action IN ('kick', 'ban')
+       ORDER BY action_log.id DESC
+       LIMIT 100`
+    );
+    return { result: true, ok: true, actions: result.rows.map(staffActionRow) };
+  }
+
   return staffFailure("unknown_staff_action", 404);
+}
+
+export async function executeBattleDeveloperControl(db, body) {
+  if (!db?.query) return staffFailure("postgres_required", 503);
+  const actorPlayerId = positivePlayerId(body?.actorPlayerId);
+  const control = String(body?.control || "").trim().toLowerCase();
+  const enabled = body?.enabled === true || body?.enabled === 1 || String(body?.enabled || "") === "1";
+  const requestedValue = Number(body?.value || 0);
+  if (!actorPlayerId) return staffFailure("invalid_staff_actor", 400);
+  if (!["infinite_ammo", "infinite_hp", "shotgun_recoil"].includes(control)) {
+    return staffFailure("invalid_developer_control", 400);
+  }
+  if (
+    control === "shotgun_recoil" &&
+    (!Number.isInteger(requestedValue) || requestedValue < 0 || requestedValue > 500)
+  ) {
+    return staffFailure("invalid_recoil_value", 400);
+  }
+
+  const account = await db.query(
+    `SELECT p.id, p.name
+     FROM players p
+     WHERE p.id = $1
+     LIMIT 1`,
+    [actorPlayerId]
+  );
+  if (!account.rows[0]) return staffFailure("player_not_found", 404);
+  const role = await loadActiveStaffRole(db, actorPlayerId);
+  if (role !== "developer") return staffFailure("developer_role_required");
+
+  return {
+    result: true,
+    ok: true,
+    actor: {
+      playerId: actorPlayerId,
+      displayName: cleanText(account.rows[0].name, 80),
+      role,
+    },
+    control,
+    enabled: control === "shotgun_recoil" ? requestedValue > 0 : enabled,
+    value: control === "shotgun_recoil" ? requestedValue : (enabled ? 1 : 0),
+  };
 }
 
 function battleActionContract(body) {

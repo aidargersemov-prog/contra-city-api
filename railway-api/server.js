@@ -8,6 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
 import {
+  executeBattleDeveloperControl,
   executeBattleStaffAction,
   legacyPermissionPayload,
   loadActiveStaffRole,
@@ -16,7 +17,7 @@ import {
 } from "./staff-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-29-staff-rbac-v64";
+const API_BUILD_ID = "railway-api-2026-07-29-battle-pass-store-v68";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -118,6 +119,10 @@ const TELEGRAM_LOGIN_REQUEST_TTL_MS = Math.max(120000, Math.min(
 const TELEGRAM_RESET_CONFIRM_TTL_MS = Math.max(30000, Math.min(
   5 * 60 * 1000,
   Number(process.env.TELEGRAM_RESET_CONFIRM_TTL_MS || 60 * 1000)
+));
+const DONATE_ORDER_TTL_MS = Math.max(5 * 60 * 1000, Math.min(
+  60 * 60 * 1000,
+  Number(process.env.DONATE_ORDER_TTL_MS || 20 * 60 * 1000)
 ));
 const TELEGRAM_CLEANUP_INTERVAL_MS = Math.max(60000, Number(
   process.env.TELEGRAM_CLEANUP_INTERVAL_MS || 5 * 60 * 1000
@@ -342,7 +347,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/staff/control") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -3915,13 +3920,27 @@ async function botTelegramAccountStatus(telegramUserIdValue) {
     return { ok: false, status: 400, error: "telegram_user_invalid" };
   }
   const bindingResult = await pgPool.query(
-    `SELECT b.*, p.name AS player_name
+    `SELECT b.*,
+            p.name AS player_name,
+            p.level AS player_level,
+            p.money AS player_money,
+            p.cckey AS player_key,
+            s.binding_epoch AS current_binding_epoch
      FROM launcher_telegram_bindings b
      JOIN players p ON p.id = b.player_id
+     JOIN launcher_telegram_system_state s ON s.id = 1
      WHERE b.telegram_user_id = $1`,
     [telegramUserId]
   );
-  const binding = bindingResult.rows[0] || null;
+  const rawBinding = bindingResult.rows[0] || null;
+  const binding = rawBinding &&
+      Number(rawBinding.binding_epoch || 0) === Number(rawBinding.current_binding_epoch || 0) &&
+      safeTokenEquals(
+        String(rawBinding.link_key_hash || ""),
+        launcherLinkKeyHash(rawBinding.player_key)
+      )
+    ? rawBinding
+    : null;
   const loginResult = binding
     ? await pgPool.query(
       `SELECT *
@@ -3953,7 +3972,13 @@ async function botTelegramAccountStatus(telegramUserIdValue) {
     linked: Boolean(binding),
     player: binding ? {
       id: Number(binding.player_id),
-      name: String(binding.player_name || "")
+      name: String(binding.player_name || ""),
+      level: Number(binding.player_level || 1),
+      money: Number(binding.player_money || 0),
+      gameLink: loginLink({
+        id: Number(binding.player_id),
+        key: String(binding.player_key || "")
+      })
     } : null,
     pendingLogin: loginRequest ? {
       requestId: String(loginRequest.request_id),
@@ -3966,6 +3991,633 @@ async function botTelegramAccountStatus(telegramUserIdValue) {
       expiresAt: postgresTimestamp(activeCode.expires_at)
     } : null
   };
+}
+
+function normalizeDonateProductId(value) {
+  const productId = String(value || "").trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{2,50}$/.test(productId) ? productId : "";
+}
+
+function normalizeDonateOrderId(value) {
+  const orderId = String(value || "").trim();
+  return /^do_[A-Za-z0-9_-]{20,80}$/.test(orderId) ? orderId : "";
+}
+
+function donateProductPayload(row) {
+  return {
+    id: String(row.id),
+    title: String(row.title || ""),
+    rewardKind: String(row.reward_kind || "coins"),
+    rewardAmount: Number(row.reward_amount || row.coins || 0),
+    coins: Number(row.coins),
+    rubles: Number(row.rubles),
+    stars: Number(row.stars),
+    active: Boolean(row.active)
+  };
+}
+
+function donateOrderPayload(row) {
+  return {
+    id: String(row.id),
+    status: String(row.status),
+    player: {
+      id: Number(row.player_id),
+      name: String(row.player_name || "")
+    },
+    telegramUserId: Number(row.telegram_user_id),
+    product: {
+      id: String(row.product_id),
+      title: String(row.product_title || ""),
+      rewardKind: String(row.reward_kind || "coins"),
+      rewardAmount: Number(row.reward_amount || row.coins || 0),
+      coins: Number(row.coins),
+      rubles: Number(row.rubles),
+      stars: Number(row.stars)
+    },
+    expiresAt: postgresTimestamp(row.expires_at),
+    paidAt: postgresTimestamp(row.paid_at)
+  };
+}
+
+async function listDonateProducts() {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const result = await pgPool.query(
+    `SELECT id, title, reward_kind, reward_amount,
+            coins, rubles, stars, active
+     FROM donate_products
+     WHERE active = TRUE
+     ORDER BY display_order ASC, id ASC`
+  );
+  return {
+    ok: true,
+    currency: "XTR",
+    products: result.rows.map(donateProductPayload)
+  };
+}
+
+function storeEntitlementPayload(row) {
+  return {
+    battlePassSeason: Number(row.battle_pass_season || 7),
+    battlePassLevel: Number(row.battle_pass_level || 1),
+    battlePassPremium: Boolean(row.battle_pass_premium),
+    battlePassPremiumPlus: Boolean(row.battle_pass_premium_plus),
+    tropicalCases: Number(row.tropical_cases || 0),
+    summerCases: Number(row.summer_cases || 0)
+  };
+}
+
+async function loadStoreEntitlements(client, playerId, lock = false) {
+  await client.query(
+    `INSERT INTO player_store_entitlements (player_id, battle_pass_level)
+     SELECT id, LEAST(100, GREATEST(1, level))
+     FROM players
+     WHERE id = $1
+     ON CONFLICT (player_id) DO NOTHING`,
+    [playerId]
+  );
+  const result = await client.query(
+    `SELECT *
+     FROM player_store_entitlements
+     WHERE player_id = $1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [playerId]
+  );
+  return result.rows[0] || null;
+}
+
+async function validateStoreProductEligibility(client, playerId, product) {
+  const rewardKind = String(product.reward_kind || "coins");
+  const rewardAmount = Number(product.reward_amount || product.coins || 0);
+  if (rewardKind === "coins" ||
+      rewardKind === "case_tropical" ||
+      rewardKind === "case_summer") {
+    return { ok: true };
+  }
+
+  const state = await loadStoreEntitlements(client, playerId, true);
+  if (!state) {
+    return { ok: false, status: 500, error: "store_entitlement_unavailable" };
+  }
+  if (rewardKind === "battle_pass_premium" &&
+      Boolean(state.battle_pass_premium)) {
+    return { ok: false, status: 409, error: "battle_pass_already_owned" };
+  }
+  if (rewardKind === "battle_pass_premium_plus" &&
+      Boolean(state.battle_pass_premium_plus)) {
+    return { ok: false, status: 409, error: "battle_pass_plus_already_owned" };
+  }
+  if ((rewardKind === "battle_pass_levels" ||
+       rewardKind === "battle_pass_premium_plus") &&
+      Number(state.battle_pass_level) + rewardAmount > 100) {
+    return { ok: false, status: 409, error: "battle_pass_level_limit" };
+  }
+  return { ok: true };
+}
+
+async function createDonateOrder(telegramUserIdValue, rawProductId) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const telegramUserId = Number(telegramUserIdValue || 0);
+  const productId = normalizeDonateProductId(rawProductId);
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) {
+    return { ok: false, status: 400, error: "telegram_user_invalid" };
+  }
+  if (!productId) return { ok: false, status: 400, error: "donate_product_invalid" };
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE donate_orders
+       SET status = CASE
+             WHEN expires_at <= now() THEN 'expired'
+             ELSE 'cancelled'
+           END,
+           updated_at = now()
+       WHERE telegram_user_id = $1
+         AND status = 'pending'`,
+      [telegramUserId]
+    );
+    const bindingResult = await client.query(
+      `SELECT b.player_id, p.name AS player_name
+       FROM launcher_telegram_bindings b
+       JOIN players p ON p.id = b.player_id
+       WHERE b.telegram_user_id = $1
+       FOR UPDATE OF b`,
+      [telegramUserId]
+    );
+    const binding = bindingResult.rows[0] || null;
+    if (!binding) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "telegram_account_not_linked" };
+    }
+    const productResult = await client.query(
+      `SELECT id, title, reward_kind, reward_amount,
+              coins, rubles, stars, active
+       FROM donate_products
+       WHERE id = $1
+       FOR SHARE`,
+      [productId]
+    );
+    const product = productResult.rows[0] || null;
+    if (!product || !product.active) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_product_not_found" };
+    }
+    const eligibility = await validateStoreProductEligibility(
+      client,
+      Number(binding.player_id),
+      product
+    );
+    if (!eligibility.ok) {
+      await client.query("ROLLBACK");
+      return eligibility;
+    }
+
+    const orderId = randomOpaqueId("do");
+    const expiresAt = new Date(Date.now() + DONATE_ORDER_TTL_MS);
+    const orderResult = await client.query(
+       `INSERT INTO donate_orders (
+         id, player_id, telegram_user_id, product_id,
+         product_title, reward_kind, reward_amount,
+         coins, rubles, stars, status, expires_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
+       RETURNING *`,
+      [
+        orderId,
+        Number(binding.player_id),
+        telegramUserId,
+        String(product.id),
+        String(product.title),
+        String(product.reward_kind),
+        Number(product.reward_amount),
+        Number(product.coins),
+        Number(product.rubles),
+        Number(product.stars),
+        expiresAt
+      ]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      order: donateOrderPayload({
+        ...orderResult.rows[0],
+        player_name: binding.player_name
+      })
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function validateDonateCheckout(orderIdValue, telegramUserIdValue, currencyValue, totalAmountValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const orderId = normalizeDonateOrderId(orderIdValue);
+  const telegramUserId = Number(telegramUserIdValue || 0);
+  const currency = String(currencyValue || "");
+  const totalAmount = Number(totalAmountValue || 0);
+  if (!orderId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      currency !== "XTR" ||
+      !Number.isSafeInteger(totalAmount) || totalAmount <= 0) {
+    return { ok: false, status: 400, error: "donate_checkout_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `SELECT o.*, p.name AS player_name
+       FROM donate_orders o
+       JOIN players p ON p.id = o.player_id
+       WHERE o.id = $1
+       FOR UPDATE OF o`,
+      [orderId]
+    );
+    const order = result.rows[0] || null;
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_order_not_found" };
+    }
+    if (order.status !== "pending") {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: order.status === "paid" ? "donate_order_already_paid" : "donate_order_unavailable"
+      };
+    }
+    if (new Date(order.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE donate_orders
+         SET status = 'expired', updated_at = now()
+         WHERE id = $1 AND status = 'pending'`,
+        [orderId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "donate_order_expired" };
+    }
+    if (Number(order.telegram_user_id) !== telegramUserId ||
+        Number(order.stars) !== totalAmount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "donate_checkout_mismatch" };
+    }
+    const eligibility = await validateStoreProductEligibility(
+      client,
+      Number(order.player_id),
+      order
+    );
+    if (!eligibility.ok) {
+      await client.query("ROLLBACK");
+      return eligibility;
+    }
+    await client.query("COMMIT");
+    return { ok: true, order: donateOrderPayload(order) };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function donatePaymentPayload(row, duplicate = false) {
+  return {
+    ok: true,
+    duplicate,
+    orderId: String(row.order_id),
+    telegramPaymentChargeId: String(row.telegram_payment_charge_id),
+    player: {
+      id: Number(row.player_id),
+      name: String(row.player_name || "")
+    },
+    product: {
+      id: String(row.product_id),
+      title: String(row.product_title || ""),
+      rewardKind: String(row.reward_kind || "coins"),
+      rewardAmount: Number(row.reward_amount || row.coins || 0),
+      coins: Number(row.coins),
+      rubles: Number(row.rubles),
+      stars: Number(row.stars)
+    },
+    rewardBefore: row.reward_before || {},
+    rewardAfter: row.reward_after || {},
+    balanceBefore: Number(row.balance_before),
+    balanceAfter: Number(row.balance_after),
+    paidAt: postgresTimestamp(row.telegram_paid_at)
+  };
+}
+
+async function loadDonatePaymentByCharge(chargeId, executor = pgPool) {
+  const result = await executor.query(
+    `SELECT dp.*, p.name AS player_name
+     FROM donate_payments dp
+     JOIN players p ON p.id = dp.player_id
+     WHERE dp.telegram_payment_charge_id = $1`,
+    [chargeId]
+  );
+  return result.rows[0] || null;
+}
+
+async function applyStoreReward(client, order, player) {
+  const rewardKind = String(order.reward_kind || "coins");
+  const rewardAmount = Number(order.reward_amount || order.coins || 0);
+  const balanceBefore = Number(player.money || 0);
+
+  if (rewardKind === "coins") {
+    const balanceAfter = balanceBefore + Number(order.coins);
+    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > 2_147_483_647) {
+      return { ok: false, status: 409, error: "balance_limit_reached" };
+    }
+    await client.query(
+      "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+      [Number(order.player_id), balanceAfter]
+    );
+    return {
+      ok: true,
+      balanceBefore,
+      balanceAfter,
+      rewardBefore: { coins: balanceBefore },
+      rewardAfter: { coins: balanceAfter }
+    };
+  }
+
+  const stateRow = await loadStoreEntitlements(
+    client,
+    Number(order.player_id),
+    true
+  );
+  if (!stateRow) {
+    return { ok: false, status: 500, error: "store_entitlement_unavailable" };
+  }
+
+  const before = storeEntitlementPayload(stateRow);
+  const after = { ...before };
+  if (rewardKind === "battle_pass_premium") {
+    if (before.battlePassPremium) {
+      return { ok: false, status: 409, error: "battle_pass_already_owned" };
+    }
+    after.battlePassPremium = true;
+  } else if (rewardKind === "battle_pass_premium_plus") {
+    if (before.battlePassPremiumPlus) {
+      return { ok: false, status: 409, error: "battle_pass_plus_already_owned" };
+    }
+    if (before.battlePassLevel + rewardAmount > 100) {
+      return { ok: false, status: 409, error: "battle_pass_level_limit" };
+    }
+    after.battlePassPremium = true;
+    after.battlePassPremiumPlus = true;
+    after.battlePassLevel += rewardAmount;
+  } else if (rewardKind === "battle_pass_levels") {
+    if (before.battlePassLevel + rewardAmount > 100) {
+      return { ok: false, status: 409, error: "battle_pass_level_limit" };
+    }
+    after.battlePassLevel += rewardAmount;
+  } else if (rewardKind === "case_tropical") {
+    after.tropicalCases += rewardAmount;
+  } else if (rewardKind === "case_summer") {
+    after.summerCases += rewardAmount;
+  } else {
+    return { ok: false, status: 409, error: "store_reward_unsupported" };
+  }
+
+  if (!Number.isSafeInteger(after.tropicalCases) ||
+      !Number.isSafeInteger(after.summerCases) ||
+      after.tropicalCases > 2_147_483_647 ||
+      after.summerCases > 2_147_483_647) {
+    return { ok: false, status: 409, error: "store_inventory_limit" };
+  }
+
+  await client.query(
+    `UPDATE player_store_entitlements
+     SET battle_pass_level = $2,
+         battle_pass_premium = $3,
+         battle_pass_premium_plus = $4,
+         tropical_cases = $5,
+         summer_cases = $6,
+         updated_at = now()
+     WHERE player_id = $1`,
+    [
+      Number(order.player_id),
+      after.battlePassLevel,
+      after.battlePassPremium,
+      after.battlePassPremiumPlus,
+      after.tropicalCases,
+      after.summerCases
+    ]
+  );
+  return {
+    ok: true,
+    balanceBefore,
+    balanceAfter: balanceBefore,
+    rewardBefore: before,
+    rewardAfter: after
+  };
+}
+
+async function settleDonatePayment(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const orderId = normalizeDonateOrderId(body?.orderId);
+  const telegramUserId = Number(body?.telegramUserId || 0);
+  const currency = String(body?.currency || "");
+  const totalAmount = Number(body?.totalAmount || 0);
+  const telegramPaymentChargeId = String(body?.telegramPaymentChargeId || "").trim();
+  const providerPaymentChargeId = String(body?.providerPaymentChargeId || "").trim();
+  const telegramPaidAtValue = String(body?.paidAt || "");
+  const telegramPaidAtMs = Date.parse(telegramPaidAtValue);
+  if (!orderId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      currency !== "XTR" ||
+      !Number.isSafeInteger(totalAmount) || totalAmount <= 0 ||
+      !telegramPaymentChargeId || telegramPaymentChargeId.length > 512 ||
+      providerPaymentChargeId.length > 512 ||
+      !Number.isFinite(telegramPaidAtMs)) {
+    return { ok: false, status: 400, error: "donate_payment_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  let committedPayment = null;
+  try {
+    await client.query("BEGIN");
+    const duplicate = await loadDonatePaymentByCharge(telegramPaymentChargeId, client);
+    if (duplicate) {
+      if (String(duplicate.order_id) !== orderId ||
+          Number(duplicate.telegram_user_id) !== telegramUserId ||
+          Number(duplicate.stars) !== totalAmount) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_payment_charge_conflict" };
+      }
+      await client.query("COMMIT");
+      return donatePaymentPayload(duplicate, true);
+    }
+
+    const orderResult = await client.query(
+      `SELECT o.*, p.name AS player_name
+       FROM donate_orders o
+       JOIN players p ON p.id = o.player_id
+       WHERE o.id = $1
+       FOR UPDATE OF o`,
+      [orderId]
+    );
+    const order = orderResult.rows[0] || null;
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_order_not_found" };
+    }
+    if (order.status === "paid") {
+      const previousResult = await client.query(
+        `SELECT dp.*, p.name AS player_name
+         FROM donate_payments dp
+         JOIN players p ON p.id = dp.player_id
+         WHERE dp.order_id = $1`,
+        [orderId]
+      );
+      const previous = previousResult.rows[0] || null;
+      await client.query("COMMIT");
+      if (previous &&
+          String(previous.telegram_payment_charge_id) === telegramPaymentChargeId &&
+          Number(previous.telegram_user_id) === telegramUserId &&
+          Number(previous.stars) === totalAmount) {
+        return donatePaymentPayload(previous, true);
+      }
+      return { ok: false, status: 409, error: "donate_order_already_paid" };
+    }
+    if ((order.status !== "pending" && order.status !== "expired") ||
+        Number(order.telegram_user_id) !== telegramUserId ||
+        Number(order.stars) !== totalAmount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "donate_payment_mismatch" };
+    }
+
+    const playerResult = await client.query(
+      "SELECT id, name, money FROM players WHERE id = $1 FOR UPDATE",
+      [Number(order.player_id)]
+    );
+    const player = playerResult.rows[0] || null;
+    if (!player) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "player_not_found" };
+    }
+    const reward = await applyStoreReward(client, order, player);
+    if (!reward.ok) {
+      await client.query("ROLLBACK");
+      return reward;
+    }
+    const balanceBefore = reward.balanceBefore;
+    const balanceAfter = reward.balanceAfter;
+    const paymentResult = await client.query(
+      `INSERT INTO donate_payments (
+         telegram_payment_charge_id, provider_payment_charge_id,
+         order_id, player_id, telegram_user_id, product_id,
+         product_title, reward_kind, reward_amount,
+         currency, stars, coins, rubles,
+         reward_before, reward_after,
+         balance_before, balance_after, telegram_paid_at
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, $8, $9,
+         'XTR', $10, $11, $12,
+         $13, $14,
+         $15, $16, $17
+       )
+       RETURNING *`,
+      [
+        telegramPaymentChargeId,
+        providerPaymentChargeId,
+        orderId,
+        Number(order.player_id),
+        telegramUserId,
+        String(order.product_id),
+        String(order.product_title),
+        String(order.reward_kind),
+        Number(order.reward_amount),
+        Number(order.stars),
+        Number(order.coins),
+        Number(order.rubles),
+        reward.rewardBefore,
+        reward.rewardAfter,
+        balanceBefore,
+        balanceAfter,
+        new Date(telegramPaidAtMs)
+      ]
+    );
+    await client.query(
+      `UPDATE donate_orders
+       SET status = 'paid',
+           telegram_payment_charge_id = $2,
+           paid_at = $3,
+           updated_at = now()
+       WHERE id = $1`,
+      [orderId, telegramPaymentChargeId, new Date(telegramPaidAtMs)]
+    );
+    await writeAuditEvent(client, {
+      playerId: Number(order.player_id),
+      playerName: String(player.name || order.player_name || ""),
+      eventType: "telegram_stars_donate",
+      category: "economy",
+      severity: "notice",
+      description:
+        `Telegram Stars: выдано «${String(order.product_title)}» ` +
+        `за ${Number(order.stars)} ⭐`,
+      oldValue: reward.rewardBefore,
+      newValue: {
+        ...reward.rewardAfter,
+        productId: String(order.product_id)
+      },
+      source: "telegram_stars",
+      metadata: {
+        orderId,
+        telegramUserId,
+        telegramPaymentChargeId,
+        stars: Number(order.stars),
+        rubles: Number(order.rubles),
+        rewardKind: String(order.reward_kind),
+        rewardAmount: Number(order.reward_amount)
+      }
+    });
+    await client.query("COMMIT");
+    committedPayment = {
+      ...paymentResult.rows[0],
+      player_name: player.name
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") {
+      const duplicate = await loadDonatePaymentByCharge(telegramPaymentChargeId);
+      if (duplicate) {
+        if (String(duplicate.order_id) === orderId &&
+            Number(duplicate.telegram_user_id) === telegramUserId &&
+            Number(duplicate.stars) === totalAmount) {
+          return donatePaymentPayload(duplicate, true);
+        }
+        return {
+          ok: false,
+          status: 409,
+          error: "donate_payment_charge_conflict"
+        };
+      }
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const cached = store.accounts[String(committedPayment.player_id)];
+  if (cached) {
+    cached.money = Number(committedPayment.balance_after);
+    cached.updatedAt = new Date().toISOString();
+  }
+  console.log(
+    `[store] player=${committedPayment.player_id} order=${orderId} ` +
+    `product=${committedPayment.product_id} stars=${committedPayment.stars} ` +
+    `reward=${committedPayment.reward_kind}:${committedPayment.reward_amount} ` +
+    `balance=${committedPayment.balance_after}`
+  );
+  return donatePaymentPayload(committedPayment, false);
 }
 
 async function createBotTelegramPairingCode(rawUser, chatIdValue) {
@@ -9337,6 +9989,14 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "cname" || act === "cpname") return changeName(account, url);
   }
 
+  if (page === "bp" && act === "state") {
+    if (!pgPool) {
+      return { result: false, error: "postgres_required" };
+    }
+    const state = await loadStoreEntitlements(pgPool, Number(account.id), false);
+    return ok({ battlePass: storeEntitlementPayload(state) });
+  }
+
   if (page === "pl") {
     if (act === "i") {
       const objectLoadout = usesProfileObjectLoadout(account, url);
@@ -10341,12 +11001,15 @@ async function handleHttpRequest(req, res) {
       let result;
       if (url.pathname === "/bot/telegram/account" ||
           url.pathname === "/bot/telegram/confirmations" ||
-          url.pathname === "/bot/telegram/links") {
+          url.pathname === "/bot/telegram/links" ||
+          url.pathname === "/bot/telegram/store/catalog") {
         if (req.method !== "GET") {
           sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
           return;
         }
-        if (url.pathname === "/bot/telegram/account") {
+        if (url.pathname === "/bot/telegram/store/catalog") {
+          result = await listDonateProducts();
+        } else if (url.pathname === "/bot/telegram/account") {
           const telegramUserId = Number(url.searchParams.get("telegramUserId") || 0);
           if (!allowTelegramIdentityRequest(req, telegramUserId, "account", { limit: 120 })) {
             sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
@@ -10382,6 +11045,17 @@ async function handleHttpRequest(req, res) {
 
         if (url.pathname === "/bot/telegram/code/create") {
           result = await createBotTelegramPairingCode(body?.telegram, body?.chatId);
+        } else if (url.pathname === "/bot/telegram/store/order") {
+          result = await createDonateOrder(body?.telegramUserId, body?.productId);
+        } else if (url.pathname === "/bot/telegram/store/precheckout") {
+          result = await validateDonateCheckout(
+            body?.orderId,
+            body?.telegramUserId,
+            body?.currency,
+            body?.totalAmount
+          );
+        } else if (url.pathname === "/bot/telegram/store/settle") {
+          result = await settleDonatePayment(body);
         } else if (url.pathname === "/bot/telegram/code/message") {
           result = await attachBotTelegramPairingMessage(body);
         } else if (url.pathname === "/bot/telegram/confirmation/notified") {
@@ -10792,6 +11466,30 @@ async function handleHttpRequest(req, res) {
       sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/staff/control") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.actorPlayerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const result = await executeBattleDeveloperControl(pgPool, body);
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "developer_control_failed" }, serviceErrorStatus(error));
     }
     return;
   }
