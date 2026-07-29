@@ -22,7 +22,24 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-23-enhancers-v284";
+const BUILD_ID = "battle-server-2026-07-29-staff-rbac-v285";
+const STAFF_ROLE_ORDER = Object.freeze(["none", "helper", "moderator", "admin", "owner", "developer"]);
+const STAFF_ROLE_RANK = Object.freeze({
+  none: 0,
+  helper: 1,
+  moderator: 2,
+  admin: 3,
+  owner: 4,
+  developer: 4,
+});
+const STAFF_CAPABILITY_MIN_ROLE = Object.freeze({
+  kick: "helper",
+  panel: "moderator",
+  private_room: "moderator",
+  ban: "admin",
+});
+const STAFF_DISCONNECT_GRACE_MS = boundedEnvInt("STAFF_DISCONNECT_GRACE_MS", 750, 250, 3000);
+const STAFF_REASON_MAX_LENGTH = boundedEnvInt("STAFF_REASON_MAX_LENGTH", 300, 1, 1000);
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -1226,6 +1243,10 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     playerId: Number(credentials.authId || 0) > 0 ? Number(credentials.authId) : 1,
     playerAuthKey: String(credentials.authKey || ""),
     playerName: process.env.DEFAULT_PLAYER_NAME || "ContraCity",
+    staffRole: "none",
+    staffRank: 0,
+    staffProfileLoadedAt: 0,
+    moderationDisconnectPending: false,
     health: runtimeStats.maxHealth,
     energy: runtimeStats.maxEnergy,
     kills: 0,
@@ -4398,6 +4419,58 @@ function actorCredentials(incomingActor) {
   return { authId, authKey };
 }
 
+function normalizeStaffRole(value) {
+  const role = String(value ?? "").trim().toLowerCase();
+  const aliases = {
+    mod: "moderator",
+    moder: "moderator",
+    administrator: "admin",
+    dev: "developer",
+  };
+  const normalized = aliases[role] || role;
+  return Object.prototype.hasOwnProperty.call(STAFF_ROLE_RANK, normalized) ? normalized : "none";
+}
+
+function staffProfileFromPayload(profilePayload) {
+  const raw = profilePayload?.conf?.staff;
+  if (typeof raw === "string") return { role: normalizeStaffRole(raw) };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { role: "none" };
+  const activeValue = raw.active ?? raw.enabled ?? raw.a;
+  const activeText = String(activeValue ?? "").trim().toLowerCase();
+  const active = activeValue == null || activeValue === true || activeValue === 1 || ["1", "true", "on", "yes"].includes(activeText);
+  if (!active) return { role: "none" };
+  return { role: normalizeStaffRole(raw.role ?? raw.r ?? raw.name) };
+}
+
+function staffRoleRank(value) {
+  return Number(STAFF_ROLE_RANK[normalizeStaffRole(value)] || 0);
+}
+
+function staffHasCapability(sessionOrRole, capability) {
+  const role = typeof sessionOrRole === "string"
+    ? normalizeStaffRole(sessionOrRole)
+    : normalizeStaffRole(sessionOrRole?.staffRole);
+  const minimum = STAFF_CAPABILITY_MIN_ROLE[capability];
+  return Boolean(minimum) && staffRoleRank(role) >= staffRoleRank(minimum);
+}
+
+function applySessionStaffProfile(session, profile) {
+  if (!session) return "none";
+  const role = normalizeStaffRole(profile?.staffRole);
+  session.staffRole = role;
+  session.staffRank = staffRoleRank(role);
+  session.staffProfileLoadedAt = Date.now();
+  return role;
+}
+
+function cachedStaffCanModerate(sourceSession, targetSession, capability) {
+  if (!sourceSession || !targetSession) return false;
+  if (Number(sourceSession.playerId || 0) <= 0 || Number(targetSession.playerId || 0) <= 0) return false;
+  if (Number(sourceSession.playerId) === Number(targetSession.playerId)) return false;
+  if (!staffHasCapability(sourceSession, capability)) return false;
+  return staffRoleRank(sourceSession.staffRole) > staffRoleRank(targetSession.staffRole);
+}
+
 function profileCacheKeyForActor(incomingActor) {
   const { authId, authKey } = actorCredentials(incomingActor);
   return `${authId}:${authKey}`;
@@ -4477,6 +4550,7 @@ function fallbackPlayerProfile(incomingActor) {
     defaultWeapons: [],
     catalogWeapons: [],
     catalogWears: [],
+    staffRole: "none",
   };
 }
 
@@ -4592,6 +4666,7 @@ function applyLateProfile(session, profile, incomingActor = null) {
   session.playerId = profile.authId;
   session.playerAuthKey = profile.authKey || session.playerAuthKey || "";
   session.playerName = profile.name;
+  applySessionStaffProfile(session, profile);
   session.weaponStates = makeWeaponRuntimeState(profile);
   if (incomingActor) {
     updateActorWireData(session, incomingActor, profile, session.lastChannel || 0);
@@ -4713,6 +4788,8 @@ async function loadPlayerProfile(incomingActor, options = {}) {
     const profile = {
       authId: loadedAuthId,
       authKey,
+      // API owns role assignment and may decorate info.un. Battle never trusts
+      // actor properties for either the displayed staff name or authorization.
       name: stringOr(info.un, process.env.DEFAULT_PLAYER_NAME || "ContraCity"),
       level: numberOr(info.lvl, Number(process.env.DEFAULT_PLAYER_LEVEL || 1)),
       view: profilePayload?.view || {},
@@ -4724,6 +4801,7 @@ async function loadPlayerProfile(incomingActor, options = {}) {
       catalogWeapons: shopCatalog.weapons,
       catalogWears: shopCatalog.wears,
       clan,
+      staffRole: staffProfileFromPayload(profilePayload).role,
     };
     profileCache.set(cacheKey, { loadedAt: Date.now(), profile });
     while (profileCache.size > PROFILE_CACHE_MAX) {
@@ -9324,6 +9402,12 @@ function roomSettingsCompatible(room, mapName, mode) {
   return mapKey(room.map) === mapKey(mapName) && roomModeValue === requestedModeValue;
 }
 
+function roomPasswordMatches(room, suppliedPassword) {
+  const expected = String(room?.password || "");
+  if (!expected) return true;
+  return String(suppliedPassword || "") === expected;
+}
+
 function nextAvailableRoomName(baseName) {
   const name = stringOr(baseName, DEFAULT_ROOM);
   if (!rooms.has(name)) return name;
@@ -10395,6 +10479,245 @@ function chatRequestType(parsed) {
   return Number.isFinite(type) ? (type & 0xff) : 253;
 }
 
+function decodeStaffReason(value) {
+  const encoded = String(value || "");
+  if (!encoded || encoded.length > STAFF_REASON_MAX_LENGTH * 6) return "";
+  try {
+    return decodeURIComponent(encoded.replace(/\+/g, "%20"))
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .trim()
+      .slice(0, STAFF_REASON_MAX_LENGTH);
+  } catch {
+    return "";
+  }
+}
+
+function parseStaffChatCommand(message) {
+  const text = String(message || "").trim();
+  const prefix = "/__staff ";
+  if (!text.startsWith(prefix)) return null;
+  const tokens = text.slice(prefix.length).trim().split(/\s+/);
+  const action = String(tokens.shift() || "").toLowerCase();
+  if (action === "kick" && tokens.length === 2) {
+    const targetPlayerId = Number(tokens[0]);
+    const reason = decodeStaffReason(tokens[1]);
+    if (Number.isInteger(targetPlayerId) && targetPlayerId > 0 && reason) {
+      return { action, targetPlayerId, durationMinutes: 0, reason };
+    }
+  }
+  if (action === "ban" && tokens.length === 3) {
+    const targetPlayerId = Number(tokens[0]);
+    const durationMinutes = Number(tokens[1]);
+    const reason = decodeStaffReason(tokens[2]);
+    if (
+      Number.isInteger(targetPlayerId) &&
+      targetPlayerId > 0 &&
+      Number.isInteger(durationMinutes) &&
+      durationMinutes >= 0 &&
+      durationMinutes <= 5256000 &&
+      reason
+    ) {
+      return { action, targetPlayerId, durationMinutes, reason };
+    }
+  }
+  return { action: "invalid", targetPlayerId: 0, durationMinutes: 0, reason: "" };
+}
+
+function moderationRoleFromResult(result, side) {
+  if (!result || typeof result !== "object") return null;
+  const raw = side === "actor"
+    ? (result.actorRole ?? result.sourceRole ?? result.moderatorRole ?? result.actor?.role ?? result.source?.role)
+    : (result.targetRole ?? result.target?.role);
+  return raw == null ? null : normalizeStaffRole(raw);
+}
+
+async function requestStaffActionApproval(sourceSession, targetPlayerId, action, reason, durationMinutes = 0, targetSession = null, options = {}) {
+  if (!API_BASE_URL || !API_TOKEN) return { ok: false, error: "staff-service-unavailable" };
+  if (Number(sourceSession.playerId) === Number(targetPlayerId)) return { ok: false, error: "staff-self-target" };
+  const minimumRole = normalizeStaffRole(options.minimumRole || (action === "ban" ? "admin" : "helper"));
+  try {
+    const result = await postApiJson("/battle/admin/action", {
+      action,
+      actorPlayerId: Number(sourceSession.playerId),
+      targetPlayerId: Number(targetPlayerId),
+      durationMinutes: action === "ban" ? Number(durationMinutes) : 0,
+      reason: String(reason || "").slice(0, STAFF_REASON_MAX_LENGTH),
+      roomName: String(sourceSession.room?.name || ""),
+      mapName: String(sourceSession.room?.map || ""),
+      minimumRole,
+      source: String(options.source || "battle").slice(0, 40),
+    });
+    if (!result || result.ok !== true) return { ok: false, error: String(result?.error || "staff-action-denied") };
+
+    const actorRole = moderationRoleFromResult(result, "actor");
+    const targetRole = moderationRoleFromResult(result, "target");
+    if (actorRole) {
+      sourceSession.staffRole = actorRole;
+      sourceSession.staffRank = staffRoleRank(actorRole);
+    }
+    if (targetSession && targetRole) {
+      targetSession.staffRole = targetRole;
+      targetSession.staffRank = staffRoleRank(targetRole);
+    }
+    if (actorRole && staffRoleRank(actorRole) < staffRoleRank(minimumRole)) {
+      return { ok: false, error: "staff-role-required" };
+    }
+    if (actorRole && targetRole && staffRoleRank(actorRole) <= staffRoleRank(targetRole)) {
+      return { ok: false, error: "staff-target-protected" };
+    }
+    return { ok: true, result };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || "staff-action-failed") };
+  }
+}
+
+function makeModerationDisconnectEvent(targetSession) {
+  return rawEvent(104, [
+    { key: 254, value: rawInt(targetSession?.actorId || 0) },
+    { key: 245, value: rawHashtable([]) },
+  ]);
+}
+
+function scheduleModerationDisconnect(targetSession, action, sourceSession, reason, channel = 0) {
+  if (!targetSession || targetSession.transportDisconnected || targetSession.moderationDisconnectPending) return false;
+  targetSession.moderationDisconnectPending = true;
+  targetSession.moderationDisconnectAction = String(action || "kick");
+  targetSession.moderationDisconnectBy = Number(sourceSession?.playerId || 0);
+  targetSession.moderationDisconnectReason = String(reason || "").slice(0, STAFF_REASON_MAX_LENGTH);
+  sendReliableToSession(targetSession, makeModerationDisconnectEvent(targetSession), channel);
+  const timer = setTimeout(() => {
+    if (targetSession.transportDisconnected) return;
+    flushSessionUdpOutbox(targetSession);
+    expireTransportSession(targetSession, `staff-${targetSession.moderationDisconnectAction}`);
+  }, STAFF_DISCONNECT_GRACE_MS);
+  timer.unref?.();
+  console.log(`[staff] disconnect scheduled action=${targetSession.moderationDisconnectAction} by=${targetSession.moderationDisconnectBy} target=${targetSession.playerId || 0} actor=${targetSession.actorId || 0} role=${normalizeStaffRole(targetSession.staffRole)} grace=${STAFF_DISCONNECT_GRACE_MS}ms`);
+  return true;
+}
+
+function activeSessionsForPlayerId(playerId) {
+  const id = Number(playerId || 0);
+  if (!Number.isInteger(id) || id <= 0) return [];
+  return Array.from(new Set(sessions.values())).filter((candidate) => (
+    candidate &&
+    !candidate.transportDisconnected &&
+    Number(candidate.playerId || 0) === id
+  ));
+}
+
+async function handleStaffChatCommand(session, command, channel = 0) {
+  if (!command || command.action === "invalid") {
+    console.log(`[staff] command rejected player=${session?.playerId || 0} reason=invalid-command`);
+    return [];
+  }
+  const targetSession = roomSessionByPlayerId(session.room, command.targetPlayerId)
+    || activeSessionsForPlayerId(command.targetPlayerId)[0]
+    || null;
+  if (
+    Number(session.playerId) === Number(command.targetPlayerId) ||
+    !["kick", "ban"].includes(command.action)
+  ) {
+    console.log(`[staff] command rejected action=${command.action} by=${session.playerId || 0} target=${command.targetPlayerId} role=${normalizeStaffRole(session.staffRole)} targetRole=${normalizeStaffRole(targetSession?.staffRole)} reason=rbac`);
+    return [];
+  }
+  if (command.action === "kick" && (!targetSession || targetSession.room !== session.room)) {
+    console.log(`[staff] command rejected action=kick by=${session.playerId || 0} target=${command.targetPlayerId} reason=not-in-room`);
+    return [];
+  }
+
+  const approval = await requestStaffActionApproval(
+    session,
+    command.targetPlayerId,
+    command.action,
+    command.reason,
+    command.durationMinutes,
+    targetSession,
+    {
+      minimumRole: command.action === "ban" ? "admin" : "moderator",
+      source: "panel",
+    },
+  );
+  if (!approval.ok) {
+    console.log(`[staff] command denied action=${command.action} by=${session.playerId || 0} target=${command.targetPlayerId} reason=${approval.error}`);
+    return [];
+  }
+
+  const targets = command.action === "ban"
+    ? activeSessionsForPlayerId(command.targetPlayerId)
+    : [targetSession];
+  let disconnected = 0;
+  for (const target of targets) {
+    if (scheduleModerationDisconnect(target, command.action, session, command.reason, channel)) disconnected += 1;
+  }
+  console.log(`[staff] command accepted action=${command.action} by=${session.playerId || 0} role=${normalizeStaffRole(session.staffRole)} target=${command.targetPlayerId} duration=${command.durationMinutes || 0} disconnected=${disconnected}`);
+  return [];
+}
+
+function makeInstantKickEvent(sourceSession, targetSession, result = null) {
+  const entries = [
+    { key: rawByte(1), value: rawInt(targetSession.playerId) },
+    { key: rawByte(5), value: rawInt(targetSession.actorId) },
+    { key: rawByte(6), value: rawInt(1) },
+    { key: rawByte(7), value: rawInt(0) },
+  ];
+  if (result == null) {
+    entries.push(
+      { key: rawByte(9), value: rawByte(4) },
+      { key: rawByte(10), value: rawString(stringOr(targetSession.playerName, `Player ${targetSession.playerId}`)) },
+      { key: rawByte(11), value: rawString(stringOr(sourceSession.playerName, `Player ${sourceSession.playerId}`)) },
+    );
+  } else {
+    entries.push({ key: rawByte(2), value: rawBool(result) });
+  }
+  return rawEvent(70, [
+    { key: 254, value: rawInt(sourceSession.actorId || 0) },
+    { key: 245, value: rawHashtable(entries) },
+  ]);
+}
+
+async function handleStaffInstantKickRequest(session, parsed, channel = 0) {
+  const data = eventDataHash(parsed);
+  const targetPlayerId = Number(htGet(data, 1)?.value || 0);
+  const targetActorId = Number(htGet(data, 5)?.value || 0);
+  const reasonCode = Number(htGet(data, 9)?.value || 0);
+  if (reasonCode !== 4 || !Number.isInteger(targetPlayerId) || targetPlayerId <= 0 || !Number.isInteger(targetActorId) || targetActorId <= 0) {
+    console.log(`[staff] event70 rejected by=${session?.playerId || 0} reason=contract`);
+    return [];
+  }
+  const targetSession = session?.room?.players?.get(targetActorId);
+  if (!targetSession || Number(targetSession.playerId) !== targetPlayerId) {
+    console.log(`[staff] event70 rejected by=${session?.playerId || 0} target=${targetPlayerId}/${targetActorId} reason=identity-mismatch`);
+    return [];
+  }
+  if (Number(session.playerId) === targetPlayerId) {
+    console.log(`[staff] event70 rejected by=${session?.playerId || 0} target=${targetPlayerId} reason=self-target`);
+    return [];
+  }
+  const approval = await requestStaffActionApproval(
+    session,
+    targetPlayerId,
+    "kick",
+    "instant-kick",
+    0,
+    targetSession,
+    { minimumRole: "helper", source: "event70" },
+  );
+  if (!approval.ok) {
+    console.log(`[staff] event70 denied by=${session.playerId || 0} target=${targetPlayerId} reason=${approval.error}`);
+    return [];
+  }
+
+  const started = makeInstantKickEvent(session, targetSession);
+  const accepted = makeInstantKickEvent(session, targetSession, true);
+  for (const peer of session.room.players.values()) {
+    if (!peer || peer === session) continue;
+    sendReliablePayloadsToSession(peer, [started, accepted], channel);
+  }
+  scheduleModerationDisconnect(targetSession, "kick", session, "instant-kick", channel);
+  console.log(`[staff] event70 accepted by=${session.playerId || 0} role=${normalizeStaffRole(session.staffRole)} target=${targetPlayerId} actor=${targetActorId}`);
+  return [started, accepted];
+}
+
 function buildBattleChatEvent(session, message, type) {
   const team = Number.isFinite(Number(session?.team)) ? Number(session.team) : 0;
   return rawEvent(155, [
@@ -10424,13 +10747,16 @@ function broadcastBattleChat(session, payload, type, channel = 0) {
   return sent;
 }
 
-function handleBattleChatRequest(session, parsed, channel = 0) {
+async function handleBattleChatRequest(session, parsed, channel = 0) {
   if (!session?.room || !session.actorId) {
     console.log(`[chat] ignored op=155 reason=no-room actor=${session?.actorId || 0}`);
     return [];
   }
-  const message = chatRequestText(parsed).slice(0, 160);
-  if (!message) return [];
+  const requestedMessage = chatRequestText(parsed);
+  if (!requestedMessage) return [];
+  const staffCommand = parseStaffChatCommand(requestedMessage);
+  if (staffCommand) return handleStaffChatCommand(session, staffCommand, channel);
+  const message = requestedMessage.slice(0, 160);
   const type = chatRequestType(parsed);
   const event = buildBattleChatEvent(session, message, type);
   const peers = broadcastBattleChat(session, event, type, channel);
@@ -11243,6 +11569,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[photon] unsupported messageType=${parsed?.messageType ?? "null"}`);
     return [];
   }
+  if (session?.moderationDisconnectPending) return [];
   if (parsed.opCode !== 255 && !allowAuthenticatedOperation(session)) return [];
 
   const eventCode = photonEventCode(parsed);
@@ -11367,6 +11694,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         console.log(`[state] room join rejected reason=missing-room name=${settings.name} requested=${requestedName}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
+      if (!roomPasswordMatches(joinRoom, settings.password)) {
+        console.log(`[state] room join rejected reason=invalid-password name=${settings.name}`);
+        return [rawOperationResponse(255, [], -12, "invalid-password")];
+      }
     }
     const requestedAuthId = Number(htGet(actorParam, 241)?.value || 0);
     const requestedAuthKey = String(htGet(actorParam, 240)?.value || "").trim();
@@ -11386,6 +11717,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       console.log(`[state] room join rejected reason=profile-unavailable requested=${settings.name} player=${requestedCcid}`);
       return [rawOperationResponse(255, [], -3, "profile-unavailable")];
     }
+    if (settings.hasFullSettings !== false && settings.password && !staffHasCapability(profile.staffRole, "private_room")) {
+      console.log(`[staff] room create rejected player=${profile.authId} role=${normalizeStaffRole(profile.staffRole)} reason=private-room-role`);
+      return [rawOperationResponse(255, [], -17, "staff-role-required")];
+    }
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
       if (!joinRoom || (joinRoom.players?.size || 0) <= 0) {
@@ -11393,8 +11728,16 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         console.log(`[state] room join rejected reason=missing-room-after-profile name=${settings.name}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
+      if (!roomPasswordMatches(joinRoom, settings.password)) {
+        console.log(`[state] room join rejected reason=invalid-password-after-profile name=${settings.name} player=${profile.authId}`);
+        return [rawOperationResponse(255, [], -12, "invalid-password")];
+      }
     }
     const capacityRoom = existingRoomForJoin(settings);
+    if ((capacityRoom?.players?.size || 0) > 0 && !roomPasswordMatches(capacityRoom, settings.password)) {
+      console.log(`[state] room join rejected reason=invalid-password-existing name=${capacityRoom.name} player=${profile.authId}`);
+      return [rawOperationResponse(255, [], -12, "invalid-password")];
+    }
     if (!roomHasCapacityForJoin(capacityRoom, profile.authId, session)) {
       const users = roomOccupancyForJoin(capacityRoom, profile.authId, session);
       const maxUsers = Math.max(1, Number(capacityRoom.maxUsers || 8));
@@ -11409,6 +11752,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.playerAuthKey = profile.authKey || actorCredentials(actorParam).authKey || "";
     session.playerName = profile.name;
     session.loadedProfile = profile;
+    applySessionStaffProfile(session, profile);
     session.pendingBattleProfile = null;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
@@ -11491,6 +11835,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (eventCode === 155) {
     return handleBattleChatRequest(session, parsed, channel);
+  }
+
+  if (eventCode === 70) {
+    return handleStaffInstantKickRequest(session, parsed, channel);
   }
 
   if (eventCode === 86) {
