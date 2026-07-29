@@ -7,9 +7,16 @@ import { URL, fileURLToPath } from "node:url";
 import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
+import {
+  executeBattleStaffAction,
+  legacyPermissionPayload,
+  loadActiveStaffRole,
+  staffAjaxPayload,
+  staffProfilePayload,
+} from "./staff-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-25-telegram-pairing-clean-v63";
+const API_BUILD_ID = "railway-api-2026-07-29-staff-rbac-v64";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -335,7 +342,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -2852,6 +2859,7 @@ async function loadPostgresAccount(id) {
      ORDER BY play_time DESC, map_name`,
     [Number(row.id)]
   );
+  const staffRole = await loadActiveStaffRole(pgPool, Number(row.id));
 
   const account = accountFromPostgresRow(
     row,
@@ -2880,6 +2888,7 @@ async function loadPostgresAccount(id) {
       pt: Number(statRow.play_time || 0)
     }))
   );
+  account.staffRole = staffRole;
   account.clan = clanSummaryForPlayer(account.id);
   return normalizeAccount(account);
 }
@@ -5321,11 +5330,12 @@ async function awardClanExperience(client, playerId, amount) {
 
 function profilePayload(account, full = false) {
   const publicName = account.namePending ? "" : account.name;
+  const staff = staffProfilePayload(account.staffRole, publicName);
   const payload = {
     result: true,
     info: {
       u_id: account.id,
-      un: publicName,
+      un: staff.battleName,
       fname: account.fullName,
       lvl: account.level,
       vcur: account.money,
@@ -5338,7 +5348,9 @@ function profilePayload(account, full = false) {
     conf: {
       cst: {
         cn: 30
-      }
+      },
+      mdr: legacyPermissionPayload(staff.role),
+      staff,
     },
     name_pending: Boolean(account.namePending)
   };
@@ -9311,6 +9323,10 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   }
   if (!resolvedAccount && !isEquipmentSelectionSaveRequest(url)) account = await refreshAccountFromPostgres(account);
 
+  if (page === "staff") {
+    return staffAjaxPayload(pgPool, account, act, url.searchParams);
+  }
+
   if (page === "auth" && act === "g") {
     return ok({ user_id: String(account.id), key: account.key });
   }
@@ -10753,6 +10769,33 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (url.pathname === "/battle/admin/action") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.actorPlayerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const result = await executeBattleStaffAction(pgPool, body);
+      if (result.invalidateBanPlayerId) {
+        playerBanCache.delete(Number(result.invalidateBanPlayerId));
+      }
+      const { status, invalidateBanPlayerId, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
   if (url.pathname === "/battle/social") {
     if (req.method !== "POST") {
       sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
@@ -10845,7 +10888,7 @@ async function handleHttpRequest(req, res) {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
       schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events"
+        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_staff_roles/player_staff_chat_messages/player_staff_actions"
         : "accounts-json",
       accounts: Object.keys(store.accounts).length,
       databaseUrlConfigured: Boolean(DATABASE_URL)
