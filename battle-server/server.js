@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-29-staff-rbac-v285";
+const BUILD_ID = "battle-server-2026-07-29-staff-spectator-dev-v286";
 const STAFF_ROLE_ORDER = Object.freeze(["none", "helper", "moderator", "admin", "owner", "developer"]);
 const STAFF_ROLE_RANK = Object.freeze({
   none: 0,
@@ -36,6 +36,7 @@ const STAFF_CAPABILITY_MIN_ROLE = Object.freeze({
   kick: "helper",
   panel: "moderator",
   private_room: "moderator",
+  spectator: "moderator",
   ban: "admin",
 });
 const STAFF_DISCONNECT_GRACE_MS = boundedEnvInt("STAFF_DISCONNECT_GRACE_MS", 750, 250, 3000);
@@ -4827,6 +4828,11 @@ function makeActorDataRaw(incomingActor, profile = null, options = {}) {
     { key: rawByte(239), value: rawShort(Number.isFinite(team) ? team : -1) },
     { key: rawByte(96), value: makeActorInfoRaw(profile, options) },
   ];
+  if (options.isGuest === true) {
+    // CombatPlayer.ReadData reads actor key 4 as IsGuest. The original client
+    // uses that flag to skip team spawn and enter its TPS camera flow.
+    entries.push({ key: rawByte(4), value: rawBool(true) });
+  }
 
   if (INCLUDE_JOIN_ACTOR_ECHO_FIELDS) {
     const authKey = getRawValue(incomingActor, 240);
@@ -4928,13 +4934,15 @@ function fitActorDataRaw(incomingActor, profile, actorId, channel = 0, roomRaw =
 
 function updateActorWireData(session, incomingActor, profile, channel = 0) {
   const baseSpeed10 = PLAYER_BASE_SPEED10;
+  const isGuest = session?.isGuest === true;
   session.actorJoinParam = incomingActor;
   session.actorRaw = makeActorDataRaw(incomingActor, profile, {
     weaponSlotLimit: FULL_LOADOUT_SLOT_LIMIT,
     baseSpeed10,
+    isGuest,
   });
-  const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event", { baseSpeed10 });
-  const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join", { baseSpeed10 });
+  const peerActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "event", { baseSpeed10, isGuest });
+  const joinActor = fitActorDataRaw(incomingActor, profile, session.actorId, channel, session.roomRaw, "join", { baseSpeed10, isGuest });
   session.peerActorRaw = peerActor.raw;
   session.peerActorLoadoutSlots = peerActor.slotLimit;
   session.peerActorRawBytes = peerActor.bytes;
@@ -5941,7 +5949,7 @@ function teamScorePoints(session, team) {
   let total = 0;
   const players = session?.room?.players || new Map();
   for (const playerSession of players.values()) {
-    if (!playerSession || Number(playerSession.team) !== team) continue;
+    if (!playerSession || playerSession.isGuest || Number(playerSession.team) !== team) continue;
     total += numberOr(playerSession.points, numberOr(playerSession.kills, 0));
   }
   return total;
@@ -5956,7 +5964,7 @@ function makeScoreRaw(session) {
   const playerEntries = [];
   const players = session.room?.players || new Map();
   for (const [actorId, playerSession] of players.entries()) {
-    if (!playerSession?.actorRaw) continue;
+    if (!playerSession?.actorRaw || playerSession.isGuest) continue;
     const hasScoreState =
       playerSession.spawned ||
       playerSession.dead ||
@@ -7547,7 +7555,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
   if (isWeaponControlShot(state, launchMode)) {
     const mode = Number(launchMode ?? 0);
     if (isGatlingWeaponType(state.type) && mode === LAUNCH_MODE.LAUNCH) {
-      if (state.loadedAmmo <= 0) {
+      if (state.loadedAmmo <= 0 && !session?.developerInfiniteAmmo) {
         return { ok: false, reason: "empty", intervalMs };
       }
       if (weaponMode !== WEAPON_MODE.READY) {
@@ -7593,7 +7601,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
     return { ok: true, reason: "no-ammo-event", intervalMs };
   }
 
-  if (state.loadedAmmo <= 0) {
+  if (state.loadedAmmo <= 0 && !session?.developerInfiniteAmmo) {
     return { ok: false, reason: "empty", intervalMs };
   }
 
@@ -7615,7 +7623,9 @@ function noteWeaponShot(session, parsed) {
   }
   if (!shotConsumesAmmo(state.type, launchMode)) return;
   if (isReloadWeaponMode(refreshWeaponMode(state, now))) cancelWeaponReload(state, "interrupted-by-shot", now);
-  state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
+  if (!session?.developerInfiniteAmmo) {
+    state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
+  }
   startWeaponShooting(state, now);
   if (isProjectileLaunchShot(state, launchMode)) rememberProjectileLaunch(state, data, now);
 }
@@ -8176,6 +8186,7 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
   const chainedDeaths = [];
   for (const targetSession of Array.from(deadSession.room.players.values())) {
     if (!targetSession || targetSession === deadSession || !targetSession.spawned || targetSession.dead) continue;
+    if (targetSession.developerInfiniteHp) continue;
     // The enhancer description explicitly says "surrounding enemies", even in
     // rooms where ordinary friendly fire is enabled.
     if (sessionsAreAllies(deadSession, targetSession)) continue;
@@ -8472,6 +8483,20 @@ function impactDotRequestedDamage(effect) {
 
 function applyImpactDotDamage(effect, targetSession) {
   const targetCurrent = sessionCurrentHealthEnergy(targetSession);
+  if (targetSession?.developerInfiniteHp) {
+    targetSession.health = targetCurrent.maxHealth;
+    targetSession.energy = targetCurrent.stats.maxEnergy;
+    return {
+      targetCurrent,
+      requestedDamage: 0,
+      totalDamage: 0,
+      healthDamage: 0,
+      energyDamage: 0,
+      damageReduction: 0,
+      enhancerReduction: 0,
+      enhancerDamagePercent: 0,
+    };
+  }
   const requestedDamage = impactDotRequestedDamage(effect);
   const referenceMultiplier = Math.max(0.05, 1 - IMPACT_REFERENCE_DAMAGE_REDUCTION / 100);
   const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
@@ -8747,6 +8772,12 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   }
   result.targetSession = targetSession;
   result.hit = true;
+  if (targetSession.developerInfiniteHp) {
+    targetSession.health = targetCurrent.maxHealth;
+    targetSession.energy = targetCurrent.stats.maxEnergy;
+    result.summary = `${targetActorId}:developer-infinite-hp`;
+    return result;
+  }
 
   const origin = pointFromHashtable(htGet(data, 11));
   const actorDistance = distanceBetweenPoints(shooter.lastTransform, targetSession.lastTransform);
@@ -9328,8 +9359,17 @@ function maybeAppendQueuedSpawn(session, commands, channel) {
   broadcastSpawnToRoom(session, spawnResponse, channel);
 }
 
+function roomPlayableOccupancy(room) {
+  if (!room?.players) return 0;
+  let count = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession?.isGuest) count += 1;
+  }
+  return count;
+}
+
 function roomListData(room) {
-  const users = room?.players?.size || 0;
+  const users = roomPlayableOccupancy(room);
   return [
     stringOr(room?.map, DEFAULT_MAP),
     String(shortRoomValue(room?.lvlMin, 1, 1, 99)),
@@ -9348,7 +9388,7 @@ function makeRoomListRaw() {
   const entries = [];
   for (const room of rooms.values()) {
     if (!room?.name) continue;
-    if ((room.players?.size || 0) <= 0) continue;
+    if (roomPlayableOccupancy(room) <= 0) continue;
     entries.push({
       key: rawString(room.name),
       value: rawStringArray(roomListData(room)),
@@ -9359,8 +9399,8 @@ function makeRoomListRaw() {
 
 function roomListSummary() {
   return Array.from(rooms.values())
-    .filter((room) => room?.name && (room.players?.size || 0) > 0)
-    .map((room) => `${room.name}:${room.map}:${room.players.size}/${room.maxUsers || 8}`)
+    .filter((room) => room?.name && roomPlayableOccupancy(room) > 0)
+    .map((room) => `${room.name}:${room.map}:${roomPlayableOccupancy(room)}/${room.maxUsers || 8}`)
     .join(",") || "empty";
 }
 
@@ -9743,6 +9783,7 @@ function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round
 
 function resetSessionRoomProgress(session) {
   if (!session) return;
+  session.isGuest = false;
   session.spawned = false;
   session.dead = false;
   session.moveSeen = false;
@@ -9824,6 +9865,7 @@ function roomOccupancyForJoin(room, playerId, joiningSession) {
   for (const playerSession of room.players.values()) {
     if (playerSession === joiningSession) continue;
     if (normalizedPlayerId > 0 && Number(playerSession?.playerId || 0) === normalizedPlayerId) continue;
+    if (playerSession?.isGuest) continue;
     count += 1;
   }
   return count;
@@ -10520,6 +10562,25 @@ function parseStaffChatCommand(message) {
       return { action, targetPlayerId, durationMinutes, reason };
     }
   }
+  if (action === "dev" && tokens.length === 2) {
+    const control = String(tokens[0] || "").toLowerCase();
+    const value = Number(tokens[1]);
+    if (
+      ["infinite_ammo", "infinite_hp"].includes(control) &&
+      Number.isInteger(value) &&
+      (value === 0 || value === 1)
+    ) {
+      return { action: "developer", control, enabled: value === 1, value };
+    }
+    if (
+      control === "shotgun_recoil" &&
+      Number.isInteger(value) &&
+      value >= 0 &&
+      value <= 500
+    ) {
+      return { action: "developer", control, enabled: value > 0, value };
+    }
+  }
   return { action: "invalid", targetPlayerId: 0, durationMinutes: 0, reason: "" };
 }
 
@@ -10571,6 +10632,27 @@ async function requestStaffActionApproval(sourceSession, targetPlayerId, action,
   }
 }
 
+async function requestDeveloperControlApproval(session, command) {
+  if (!API_BASE_URL || !API_TOKEN) return { ok: false, error: "staff-service-unavailable" };
+  try {
+    const result = await postApiJson("/battle/staff/control", {
+      actorPlayerId: Number(session.playerId || 0),
+      control: String(command.control || ""),
+      enabled: command.enabled === true,
+      value: Number(command.value || 0),
+    });
+    const role = normalizeStaffRole(result?.actor?.role);
+    if (!result || result.ok !== true || role !== "developer") {
+      return { ok: false, error: String(result?.error || "developer-role-required") };
+    }
+    session.staffRole = role;
+    session.staffRank = staffRoleRank(role);
+    return { ok: true, result };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || "developer-control-failed") };
+  }
+}
+
 function makeModerationDisconnectEvent(targetSession) {
   return rawEvent(104, [
     { key: 254, value: rawInt(targetSession?.actorId || 0) },
@@ -10609,6 +10691,31 @@ async function handleStaffChatCommand(session, command, channel = 0) {
   if (!command || command.action === "invalid") {
     console.log(`[staff] command rejected player=${session?.playerId || 0} reason=invalid-command`);
     return [];
+  }
+  if (command.action === "developer") {
+    const approval = await requestDeveloperControlApproval(session, command);
+    if (!approval.ok) {
+      console.log(`[staff] developer control denied player=${session?.playerId || 0} control=${command.control || "?"} reason=${approval.error}`);
+      return [];
+    }
+    if (command.control === "infinite_ammo") {
+      session.developerInfiniteAmmo = command.enabled === true;
+    } else if (command.control === "infinite_hp") {
+      session.developerInfiniteHp = command.enabled === true;
+    } else if (command.control === "shotgun_recoil") {
+      session.developerShotgunRecoilPercent = Number(command.value || 0);
+    }
+    const responses = [];
+    if (session.developerInfiniteHp) {
+      const stats = sessionRuntimeStats(session);
+      session.health = sessionMaxHealth(session, stats);
+      session.energy = stats.maxEnergy;
+      const healthEvent = makePlayerHealthEnergyEvent(session);
+      responses.push(healthEvent);
+      broadcastReliableToRoom(session, healthEvent, channel, "developer-health");
+    }
+    console.log(`[staff] developer control accepted player=${session.playerId || 0} control=${command.control} value=${Number(command.value || 0)}`);
+    return responses;
   }
   const targetSession = roomSessionByPlayerId(session.room, command.targetPlayerId)
     || activeSessionsForPlayerId(command.targetPlayerId)[0]
@@ -11733,12 +11840,22 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         return [rawOperationResponse(255, [], -12, "invalid-password")];
       }
     }
+    const requestedStaffSpectator =
+      settings.hasFullSettings === false &&
+      Number(settings.guestMode || 0) > 0;
+    const staffSpectator =
+      requestedStaffSpectator &&
+      staffHasCapability(profile.staffRole, "spectator");
+    if (requestedStaffSpectator && !staffSpectator) {
+      console.log(`[staff] spectator join rejected player=${profile.authId} role=${normalizeStaffRole(profile.staffRole)} room=${settings.name}`);
+      return [rawOperationResponse(255, [], -17, "staff-role-required")];
+    }
     const capacityRoom = existingRoomForJoin(settings);
     if ((capacityRoom?.players?.size || 0) > 0 && !roomPasswordMatches(capacityRoom, settings.password)) {
       console.log(`[state] room join rejected reason=invalid-password-existing name=${capacityRoom.name} player=${profile.authId}`);
       return [rawOperationResponse(255, [], -12, "invalid-password")];
     }
-    if (!roomHasCapacityForJoin(capacityRoom, profile.authId, session)) {
+    if (!staffSpectator && !roomHasCapacityForJoin(capacityRoom, profile.authId, session)) {
       const users = roomOccupancyForJoin(capacityRoom, profile.authId, session);
       const maxUsers = Math.max(1, Number(capacityRoom.maxUsers || 8));
       console.log(`[state] room join rejected reason=room-full name=${capacityRoom.name} users=${users}/${maxUsers} player=${profile.authId}`);
@@ -11753,13 +11870,14 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.playerName = profile.name;
     session.loadedProfile = profile;
     applySessionStaffProfile(session, profile);
+    session.isGuest = staffSpectator;
     session.pendingBattleProfile = null;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
     session.peerWeaponConfirmKeys = new Map();
     clearSessionActiveShotLedgers(session);
     clearSessionImpactTimers(session);
-    session.dead = false;
+    session.dead = staffSpectator;
     session.kills = 0;
     session.deaths = 0;
     session.points = 0;
@@ -11783,7 +11901,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     scheduleRoomListPush("room-join", channel);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
-    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
+    console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} spectator=${session.isGuest ? "yes" : "no"} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     broadcastMasterUserState(session.playerId);
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
@@ -11864,7 +11982,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[event] game state request actor=${session.actorId} room=${session.room?.name || DEFAULT_ROOM} roomAge=${roomAgeMs(session.room)}ms`);
     postBattleEvent(session, "gamestate");
     if (MAP_PICKUPS_IN_GAMESTATE) markActiveRoomItemsVisible(session);
-    if (!isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
+    if (!session.isGuest && !isZombieRoom(session.room) && !isStandardRoundPaused(session.room)) {
       startStandardRound(session.room, channel, "pre-gamestate");
     }
     const responses = [
@@ -11874,6 +11992,11 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
         { key: 245, value: makeGameStateRaw(session) },
       ]),
     ];
+    if (session.isGuest) {
+      queuePeerActorRepair(session, channel, "post-gamestate-spectator");
+      console.log(`[staff] spectator game-state actor=${session.actorId} player=${session.playerId || 0} room=${session.room?.name || DEFAULT_ROOM}`);
+      return responses;
+    }
     if (isZombieRoom(session.room)) {
       const zombieStarted = maybeStartZombieRound(session.room, channel, "post-gamestate", session, responses);
       if (!zombieStarted) {
@@ -11896,6 +12019,13 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     queuePeerActorRepair(session, channel, "post-gamestate");
     return responses;
+  }
+
+  if (session.isGuest) {
+    // Guest actors are camera-only. Event84 above remains available so the
+    // original client can construct all remote players and TPS cameras.
+    console.log(`[staff] spectator event ignored actor=${session.actorId} code=${eventCode}`);
+    return [];
   }
 
   if (eventCode === 100) {

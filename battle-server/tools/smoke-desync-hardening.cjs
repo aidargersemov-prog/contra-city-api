@@ -719,7 +719,7 @@ function testReliableReplayLogRateLimit(battle) {
 
 async function main() {
   const battle = sandbox.__desyncSmoke;
-  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-29-staff-rbac-v285");
+  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-29-staff-spectator-dev-v286");
   assert.strictEqual(battle.UDP_OUTBOX_FLUSH_MS, 15);
   assert.strictEqual(battle.ROOM_LIST_COALESCE_MS, 150);
   const capacityRoom = {

@@ -105,6 +105,8 @@ globalThis.__staffSmoke = {
   decodeStaffReason,
   parseStaffChatCommand,
   requestStaffActionApproval,
+  requestDeveloperControlApproval,
+  roomPlayableOccupancy,
   makeModerationDisconnectEvent,
   makeInstantKickEvent,
   readTypedRaw,
@@ -115,7 +117,7 @@ vm.createContext(sandbox);
 new vm.Script(`${serverSource}\n${exportsSource}`, { filename: serverPath }).runInContext(sandbox);
 const staff = sandbox.__staffSmoke;
 
-assert.strictEqual(staff.BUILD_ID, "battle-server-2026-07-29-staff-rbac-v285");
+assert.strictEqual(staff.BUILD_ID, "battle-server-2026-07-29-staff-spectator-dev-v286");
 assert.strictEqual(staff.normalizeStaffRole("MODER"), "moderator");
 assert.strictEqual(staff.normalizeStaffRole("dev"), "developer");
 assert.strictEqual(staff.normalizeStaffRole("unknown"), "none");
@@ -129,6 +131,8 @@ assert.strictEqual(staff.staffProfileFromPayload({ conf: {} }).role, "none");
 assert.strictEqual(staff.staffHasCapability("helper", "kick"), true);
 assert.strictEqual(staff.staffHasCapability("helper", "panel"), false);
 assert.strictEqual(staff.staffHasCapability("moderator", "private_room"), true);
+assert.strictEqual(staff.staffHasCapability("moderator", "spectator"), true);
+assert.strictEqual(staff.staffHasCapability("helper", "spectator"), false);
 assert.strictEqual(staff.staffHasCapability("moderator", "ban"), false);
 assert.strictEqual(staff.staffHasCapability("admin", "ban"), true);
 
@@ -163,6 +167,24 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(staff.parseStaffChatCommand("hello"), null);
 assert.strictEqual(staff.parseStaffChatCommand("/__staff kick 20 %E0%A4%A").action, "invalid");
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(staff.parseStaffChatCommand("/__staff dev infinite_ammo 1"))),
+  { action: "developer", control: "infinite_ammo", enabled: true, value: 1 },
+);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(staff.parseStaffChatCommand("/__staff dev shotgun_recoil 100"))),
+  { action: "developer", control: "shotgun_recoil", enabled: true, value: 100 },
+);
+assert.strictEqual(
+  staff.roomPlayableOccupancy({
+    players: new Map([
+      [1, { isGuest: false }],
+      [2, { isGuest: true }],
+      [3, {}],
+    ]),
+  }),
+  2,
+);
 
 (async () => {
   const approved = await staff.requestStaffActionApproval(
@@ -226,6 +248,29 @@ assert.strictEqual(staff.parseStaffChatCommand("/__staff kick 20 %E0%A4%A").acti
   assert.strictEqual(freshApproved.ok, true);
   assert.strictEqual(freshlyGranted.staffRole, "moderator");
 
+  approvalPayload = {
+    ok: true,
+    actor: { role: "developer" },
+    control: "infinite_ammo",
+    enabled: true,
+    value: 1,
+  };
+  const developerSession = { playerId: 70, staffRole: "none" };
+  const developerApproved = await staff.requestDeveloperControlApproval(
+    developerSession,
+    { control: "infinite_ammo", enabled: true, value: 1 },
+  );
+  assert.strictEqual(developerApproved.ok, true);
+  assert.strictEqual(developerSession.staffRole, "developer");
+  const developerCall = fetchCalls[fetchCalls.length - 1];
+  assert.strictEqual(developerCall.url, "https://staff-smoke.invalid/battle/staff/control");
+  assert.deepStrictEqual(JSON.parse(developerCall.options.body), {
+    actorPlayerId: 70,
+    control: "infinite_ammo",
+    enabled: true,
+    value: 1,
+  });
+
   const disconnectEvent = staff.makeModerationDisconnectEvent({ actorId: 7 });
   assert(Buffer.isBuffer(disconnectEvent));
   assert.strictEqual(disconnectEvent[2], 104);
@@ -238,11 +283,15 @@ assert.strictEqual(staff.parseStaffChatCommand("/__staff kick 20 %E0%A4%A").acti
 
   assert(serverSource.includes('rawOperationResponse(255, [], -12, "invalid-password")'));
   assert(serverSource.includes('staffHasCapability(profile.staffRole, "private_room")'));
+  assert(serverSource.includes('staffHasCapability(profile.staffRole, "spectator")'));
+  assert(serverSource.includes("session.isGuest = staffSpectator"));
+  assert(serverSource.includes("playerSession?.isGuest"));
+  assert(serverSource.includes('postApiJson("/battle/staff/control"'));
   assert(serverSource.includes("eventCode === 70"));
   assert(serverSource.includes('postApiJson("/battle/admin/action"'));
   assert(serverSource.includes("{ key: rawByte(5), value: rawInt(targetSession.actorId) }"));
 
-  console.log(`OK build=${staff.BUILD_ID} roles=helper/moderator/admin/owner=developer privateRoom=exact-password commands=hidden kick=event70+api ban=api+disconnect`);
+  console.log(`OK build=${staff.BUILD_ID} roles=helper/moderator/admin/owner=developer spectator=guest+slot-bypass dev=api-authorized privateRoom=exact-password kick=event70+api ban=api+disconnect`);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

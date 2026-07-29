@@ -102,7 +102,7 @@ new vm.Script(source, { filename: serverPath }).runInContext(sandbox);
 
 async function main() {
   const battle = sandbox.__battleSmoke;
-  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-29-staff-rbac-v285");
+  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-29-staff-spectator-dev-v286");
 
   // Exact client Event209/ChangeArm request captured in the AWS trace:
   // user=4, clan=2, arm=3, cost=1500.
