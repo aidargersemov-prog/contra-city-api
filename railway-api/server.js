@@ -8,7 +8,6 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
 import {
-  executeBattleDeveloperControl,
   executeBattleStaffAction,
   legacyPermissionPayload,
   loadActiveStaffRole,
@@ -17,7 +16,7 @@ import {
 } from "./staff-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-29-battle-pass-store-v68";
+const API_BUILD_ID = "railway-api-2026-07-30-clan-delete-v71";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -347,7 +346,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/staff/control") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -6013,7 +6012,9 @@ function profilePayload(account, full = false) {
     payload.taun = clone(account.taun);
   }
 
-  const liveClan = clanSummaryForPlayer(account.id) || account.clan || null;
+  // Clan membership is derived from the active clan/member store. account.clan
+  // is only a cached projection and must not resurrect a deleted clan.
+  const liveClan = clanSummaryForPlayer(account.id);
   if (liveClan) {
     const clanRecord = clanById(liveClan.cid);
     payload.cl = {
@@ -6548,7 +6549,7 @@ function ratingUser(account, pos = 1, overrides = {}) {
   const stats = playerStats(account);
   const death = Number(overrides.death ?? stats.d);
   const kill = Number(overrides.kill ?? stats.k);
-  const liveClan = clanSummaryForPlayer(account.id) || account.clan || null;
+  const liveClan = clanSummaryForPlayer(account.id);
   return {
     pos,
     id: Number(overrides.id ?? account.id),
@@ -6815,6 +6816,18 @@ function normalizeStore(rawStore = {}) {
 }
 
 function ensureClanStore() {
+  // normalizeStore replaces every clan object. Re-running it while a mutation
+  // holds a clan reference makes subsequent writes land on a detached copy.
+  // The store is normalized at load and at the start of routeClan; only repair
+  // the shape here when it is actually missing.
+  if (
+    store?.clans?.byId &&
+    Number.isFinite(Number(store.clans.nextId)) &&
+    Number.isFinite(Number(store.clans.nextEventId)) &&
+    Number.isFinite(Number(store.clans.nextTreasuryEventId))
+  ) {
+    return store.clans;
+  }
   store = normalizeStore(store || { accounts: {} });
   return store.clans;
 }
@@ -7937,7 +7950,9 @@ function clanListPayload(url, account, sourceClans = activeClanRecords()) {
 }
 
 function clanExtraPayload(account, clanId) {
-  const clan = clanById(clanId, { includeDeleted: true });
+  // gextra is a live clan view. Deleted records remain available only to the
+  // event refresh path so ClanEventType.Delete can finish the client cleanup.
+  const clan = clanById(clanId);
   if (!clan) return clanBaseResponse(account, { id: 0, cinfo: {} });
   return clanBaseResponse(account, {
     id: Number(clan.id),
@@ -8681,6 +8696,7 @@ async function removeClanMember(account, url, eventType = CLAN_EVENT_TYPE.DELETE
 async function deleteClanPostgres(account, clanId) {
   return enqueuePostgresMutation(async () => {
     let client = null;
+    let committed = false;
     try {
       client = await pgPool.connect();
       await client.query("BEGIN");
@@ -8693,33 +8709,67 @@ async function deleteClanPostgres(account, clanId) {
       }
 
       const expiresAt = new Date(Date.now() + 1000).toISOString();
-      await client.query(
+      const eventResult = await client.query(
         `INSERT INTO clan_events (clan_id, event_type, creator_player_id, data, expires_at, created_at)
-         VALUES ($1, $2, $3, $4::jsonb, $5, now())`,
+         VALUES ($1, $2, $3, $4::jsonb, $5, now())
+         RETURNING id, created_at`,
         [Number(clanId), CLAN_EVENT_TYPE.DELETE, Number(account.id), JSON.stringify({}), expiresAt]
       );
       await client.query("DELETE FROM clan_invites WHERE clan_id = $1", [Number(clanId)]);
       await client.query("DELETE FROM clan_members WHERE clan_id = $1", [Number(clanId)]);
-      await client.query("UPDATE clans SET deleted_at = now(), updated_at = now() WHERE id = $1", [Number(clanId)]);
+      const deletedClanResult = await client.query(
+        "UPDATE clans SET deleted_at = now(), updated_at = now() WHERE id = $1 RETURNING deleted_at, updated_at",
+        [Number(clanId)]
+      );
       await client.query("COMMIT");
+      committed = true;
 
       const clan = clanById(clanId, { includeDeleted: true });
       if (clan) {
-        addClanEvent(clan, CLAN_EVENT_TYPE.DELETE, {}, Number(account.id));
-        clan.deletedAt = new Date().toISOString();
+        const eventRow = eventResult.rows[0];
+        const event = normalizeClanEventRecord({
+          id: Number(eventRow?.id || 0),
+          clanId: Number(clanId),
+          type: CLAN_EVENT_TYPE.DELETE,
+          creatorPlayerId: Number(account.id),
+          data: {},
+          expiresAt,
+          createdAt: postgresTimestamp(eventRow?.created_at) || new Date().toISOString()
+        });
+        if (event) {
+          clan.events = (clan.events || []).filter((current) => Number(current.id) !== Number(event.id));
+          clan.events.push(event);
+          store.clans.nextEventId = Math.max(Number(store.clans.nextEventId || 1), Number(event.id) + 1);
+        }
+        clan.deletedAt = postgresTimestamp(deletedClanResult.rows[0]?.deleted_at) || new Date().toISOString();
         clan.members = {};
         clan.invites = {};
-        clan.updatedAt = new Date().toISOString();
+        clan.updatedAt = postgresTimestamp(deletedClanResult.rows[0]?.updated_at) || new Date().toISOString();
       }
       refreshAllAccountClanSummaries(store);
       refreshAccountClan(account);
-      console.log(`[clan-delete] pg player=${account.id} clan=${clanId}`);
+      console.log(`[clan-delete] pg player=${account.id} clan=${clanId} event=${Number(eventResult.rows[0]?.id || 0)} membership=0 profileClan=${account.clan ? Number(account.clan.cid || 0) : 0}`);
       return clanBaseResponse(account, { id: 0, cinfo: {} });
     } catch (error) {
       try {
-        if (client) await client.query("ROLLBACK");
+        if (client && !committed) await client.query("ROLLBACK");
       } catch {
         // Keep the original error visible.
+      }
+      if (committed) {
+        // PostgreSQL is authoritative after COMMIT. Never tell the original
+        // client that deletion failed or leave a stale process-local clan
+        // projection alive because only the memory synchronization failed.
+        const clan = clanById(clanId, { includeDeleted: true });
+        if (clan) {
+          clan.deletedAt = clan.deletedAt || new Date().toISOString();
+          clan.members = {};
+          clan.invites = {};
+        }
+        refreshAllAccountClanSummaries(store);
+        refreshAccountClan(account);
+        console.error("[postgres] clan delete memory sync failed after commit", error);
+        return clanBaseResponse(account, { id: 0, cinfo: {} });
       }
       console.error("[postgres] clan delete failed", error);
       return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
@@ -11466,30 +11516,6 @@ async function handleHttpRequest(req, res) {
       sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
-    }
-    return;
-  }
-
-  if (url.pathname === "/battle/staff/control") {
-    if (req.method !== "POST") {
-      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
-      return;
-    }
-    try {
-      const body = await readJsonBody(req, 16 * 1024);
-      if (!hasValidBattleServiceToken(req, body)) {
-        sendJson(res, { ok: false, error: "invalid_token" }, 403);
-        return;
-      }
-      if (!allowResolvedIdentityRequest(req, { id: Number(body.actorPlayerId || 0) }, body)) {
-        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
-        return;
-      }
-      const result = await executeBattleDeveloperControl(pgPool, body);
-      const { status, ...payload } = result;
-      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
-    } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "developer_control_failed" }, serviceErrorStatus(error));
     }
     return;
   }

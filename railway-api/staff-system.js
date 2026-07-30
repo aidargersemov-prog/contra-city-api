@@ -72,7 +72,6 @@ export function staffProfilePayload(roleValue, displayName = "") {
     canCreatePrivateRooms: rank >= STAFF_ROLE_RANK.moderator,
     canBan: rank >= STAFF_ROLE_RANK.admin,
     canSpectate: rank >= STAFF_ROLE_RANK.moderator,
-    canUseDeveloperTools: role === "developer",
   };
 }
 
@@ -212,48 +211,6 @@ export async function staffAjaxPayload(db, account, act, searchParams) {
   return staffFailure("unknown_staff_action", 404);
 }
 
-export async function executeBattleDeveloperControl(db, body) {
-  if (!db?.query) return staffFailure("postgres_required", 503);
-  const actorPlayerId = positivePlayerId(body?.actorPlayerId);
-  const control = String(body?.control || "").trim().toLowerCase();
-  const enabled = body?.enabled === true || body?.enabled === 1 || String(body?.enabled || "") === "1";
-  const requestedValue = Number(body?.value || 0);
-  if (!actorPlayerId) return staffFailure("invalid_staff_actor", 400);
-  if (!["infinite_ammo", "infinite_hp", "shotgun_recoil"].includes(control)) {
-    return staffFailure("invalid_developer_control", 400);
-  }
-  if (
-    control === "shotgun_recoil" &&
-    (!Number.isInteger(requestedValue) || requestedValue < 0 || requestedValue > 500)
-  ) {
-    return staffFailure("invalid_recoil_value", 400);
-  }
-
-  const account = await db.query(
-    `SELECT p.id, p.name
-     FROM players p
-     WHERE p.id = $1
-     LIMIT 1`,
-    [actorPlayerId]
-  );
-  if (!account.rows[0]) return staffFailure("player_not_found", 404);
-  const role = await loadActiveStaffRole(db, actorPlayerId);
-  if (role !== "developer") return staffFailure("developer_role_required");
-
-  return {
-    result: true,
-    ok: true,
-    actor: {
-      playerId: actorPlayerId,
-      displayName: cleanText(account.rows[0].name, 80),
-      role,
-    },
-    control,
-    enabled: control === "shotgun_recoil" ? requestedValue > 0 : enabled,
-    value: control === "shotgun_recoil" ? requestedValue : (enabled ? 1 : 0),
-  };
-}
-
 function battleActionContract(body) {
   const action = String(body?.action || "").trim().toLowerCase();
   const source = String(body?.source || "").trim().toLowerCase();
@@ -273,6 +230,10 @@ export async function executeBattleStaffAction(db, body) {
   if (!db?.connect) return staffFailure("postgres_required", 503);
   const contract = battleActionContract(body);
   if (!contract) return staffFailure("invalid_staff_action", 400);
+  const authorizeOnly = body?.authorizeOnly === true;
+  if (authorizeOnly && (contract.action !== "kick" || contract.source !== "event70")) {
+    return staffFailure("invalid_staff_authorization", 400);
+  }
 
   const actorPlayerId = positivePlayerId(body?.actorPlayerId);
   const targetPlayerId = positivePlayerId(body?.targetPlayerId);
@@ -329,6 +290,17 @@ export async function executeBattleStaffAction(db, body) {
     if (staffRoleRank(actorRole) <= staffRoleRank(targetRole)) {
       await client.query("ROLLBACK");
       return staffFailure("staff_target_protected");
+    }
+    if (authorizeOnly) {
+      await client.query("ROLLBACK");
+      return {
+        result: true,
+        ok: true,
+        action: contract.action,
+        authorizedOnly: true,
+        actor: { playerId: actorPlayerId, role: actorRole },
+        target: { playerId: targetPlayerId, role: targetRole },
+      };
     }
 
     if (contract.action === "ban") {
