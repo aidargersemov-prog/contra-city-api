@@ -16,7 +16,7 @@ import {
 } from "./staff-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-30-clan-delete-v71";
+const API_BUILD_ID = "railway-api-2026-07-30-donate-limited-sets-v73";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -299,6 +299,7 @@ function requestGeo(req) {
 
 function isOriginGuardExempt(pathname) {
   return pathname === "/health" ||
+    pathname === "/donate/catalog" ||
     pathname.startsWith("/battle/") ||
     pathname.startsWith("/admin/promocodes") ||
     pathname.startsWith("/bot/telegram") ||
@@ -1400,6 +1401,65 @@ const restoredAssemblageDefinitions = [
   { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] },
   { id: 39, code: "gavai", items: [["Hats", "capgavaimag"], ["Masks", "gavaibandana"], ["Shirts", "gavaihoodie"], ["Pants", "shortigavai"], ["Boots", "gavaibootsmag"], ["Backpacks", "popugagavai"]] }
 ];
+
+const donateWearSetsById = new Map([
+  [25, {
+    id: 25,
+    items: [
+      ["Heads", "franky"],
+      ["Masks", "franky"],
+      ["Shirts", "franky"],
+      ["Pants", "franky"],
+      ["Boots", "franky"],
+      ["Gloves", "franky"],
+      ["Others", "franky"],
+      ["Backpacks", "frankyOctopus"]
+    ]
+  }],
+  [34, {
+    id: 34,
+    items: [
+      ["Hats", "avenger"],
+      ["Masks", "avenger"],
+      ["Shirts", "avenger"],
+      ["Pants", "avenger"],
+      ["Gloves", "avenger"],
+      ["Boots", "avenger"]
+    ]
+  }],
+  [35, {
+    id: 35,
+    items: [
+      ["Hats", "stalker"],
+      ["Masks", "stalkergasmask"],
+      ["Shirts", "stalker"],
+      ["Pants", "stalker"],
+      ["Gloves", "stalker"],
+      ["Boots", "stalker"]
+    ]
+  }],
+  [36, {
+    id: 36,
+    items: [
+      ["Hats", "business"],
+      ["Masks", "businessgoogles"],
+      ["Shirts", "business"],
+      ["Pants", "business"],
+      ["Gloves", "business"],
+      ["Boots", "business"]
+    ]
+  }]
+]);
+
+function donateWearSetItems(setIdValue) {
+  const definition = donateWearSetsById.get(Number(setIdValue));
+  if (!definition) return null;
+  return definition.items.map(([slot, sname]) => {
+    const item = clone(findWearCatalogItem(slot, sname));
+    item.eD = 0;
+    return item;
+  });
+}
 
 // Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
 // Keep them out of the shop response instead of exposing sets the battle server cannot complete.
@@ -4003,6 +4063,10 @@ function normalizeDonateOrderId(value) {
 }
 
 function donateProductPayload(row) {
+  const stockCapacity = Number(row.stock_capacity || 0);
+  const stockRemaining = stockCapacity > 0
+    ? Math.max(0, Number(row.stock_remaining || 0))
+    : null;
   return {
     id: String(row.id),
     title: String(row.title || ""),
@@ -4011,11 +4075,22 @@ function donateProductPayload(row) {
     coins: Number(row.coins),
     rubles: Number(row.rubles),
     stars: Number(row.stars),
-    active: Boolean(row.active)
+    active: Boolean(row.active),
+    stock: stockCapacity > 0
+      ? {
+          remaining: stockRemaining,
+          capacity: stockCapacity,
+          soldOut: stockRemaining <= 0
+        }
+      : null
   };
 }
 
 function donateOrderPayload(row) {
+  const stockCapacity = Number(row.stock_capacity || 0);
+  const stockRemaining = stockCapacity > 0
+    ? Math.max(0, Number(row.stock_remaining || 0))
+    : null;
   return {
     id: String(row.id),
     status: String(row.status),
@@ -4031,7 +4106,14 @@ function donateOrderPayload(row) {
       rewardAmount: Number(row.reward_amount || row.coins || 0),
       coins: Number(row.coins),
       rubles: Number(row.rubles),
-      stars: Number(row.stars)
+      stars: Number(row.stars),
+      stock: stockCapacity > 0
+        ? {
+            remaining: stockRemaining,
+            capacity: stockCapacity,
+            soldOut: stockRemaining <= 0
+          }
+        : null
     },
     expiresAt: postgresTimestamp(row.expires_at),
     paidAt: postgresTimestamp(row.paid_at)
@@ -4041,17 +4123,114 @@ function donateOrderPayload(row) {
 async function listDonateProducts() {
   if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
   const result = await pgPool.query(
-    `SELECT id, title, reward_kind, reward_amount,
-            coins, rubles, stars, active
-     FROM donate_products
-     WHERE active = TRUE
-     ORDER BY display_order ASC, id ASC`
+    `SELECT p.id, p.title, p.reward_kind, p.reward_amount,
+            p.coins, p.rubles, p.stars, p.active,
+            stock.remaining AS stock_remaining,
+            stock.capacity AS stock_capacity
+     FROM donate_products p
+     LEFT JOIN donate_limited_stock stock ON stock.product_id = p.id
+     WHERE p.active = TRUE
+     ORDER BY p.display_order ASC, p.id ASC`
   );
   return {
     ok: true,
     currency: "XTR",
     products: result.rows.map(donateProductPayload)
   };
+}
+
+async function resetDonateLimitedStock(adminTelegramIdValue, rawProductId) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  const productId = normalizeDonateProductId(rawProductId);
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  if (!productId) {
+    return { ok: false, status: 400, error: "donate_product_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const stockResult = await client.query(
+      `SELECT stock.product_id, stock.capacity, stock.remaining, product.title
+       FROM donate_limited_stock stock
+       JOIN donate_products product ON product.id = stock.product_id
+       WHERE stock.product_id = $1
+       FOR UPDATE OF stock`,
+      [productId]
+    );
+    const stock = stockResult.rows[0] || null;
+    if (!stock) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_stock_not_found" };
+    }
+    const reservations = await client.query(
+      `SELECT COUNT(*)::integer AS count
+       FROM donate_orders
+       WHERE product_id = $1
+         AND status = 'pending'
+         AND limited_stock_reserved_at IS NOT NULL
+         AND limited_stock_consumed_at IS NULL`,
+      [productId]
+    );
+    if (Number(reservations.rows[0]?.count || 0) > 0) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: "donate_stock_reservations_pending"
+      };
+    }
+    const updatedResult = await client.query(
+      `UPDATE donate_limited_stock
+       SET remaining = capacity,
+           updated_at = now()
+       WHERE product_id = $1
+       RETURNING capacity, remaining`,
+      [productId]
+    );
+    const updated = updatedResult.rows[0];
+    await writeAuditEvent(client, {
+      eventType: "donate_stock_reset",
+      category: "economy",
+      severity: "notice",
+      description:
+        `Лимит «${String(stock.title || productId)}» восстановлен ` +
+        `до ${Number(updated.remaining)}/${Number(updated.capacity)}`,
+      source: "telegram_admin",
+      oldValue: {
+        productId,
+        remaining: Number(stock.remaining),
+        capacity: Number(stock.capacity)
+      },
+      newValue: {
+        productId,
+        remaining: Number(updated.remaining),
+        capacity: Number(updated.capacity)
+      },
+      metadata: { telegramAdminId: adminTelegramId }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      product: {
+        id: productId,
+        title: String(stock.title || ""),
+        stock: {
+          remaining: Number(updated.remaining),
+          capacity: Number(updated.capacity),
+          soldOut: false
+        }
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function storeEntitlementPayload(row) {
@@ -4084,12 +4263,50 @@ async function loadStoreEntitlements(client, playerId, lock = false) {
   return result.rows[0] || null;
 }
 
+async function loadDonateLimitedStock(client, productIdValue, lock = false) {
+  const productId = normalizeDonateProductId(productIdValue);
+  if (!productId) return null;
+  const result = await client.query(
+    `SELECT product_id, capacity, remaining, updated_at
+     FROM donate_limited_stock
+     WHERE product_id = $1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [productId]
+  );
+  return result.rows[0] || null;
+}
+
+async function ownedDonateWearSetKeys(client, playerId, setItems) {
+  const itemKeys = setItems.map(inventoryItemKey);
+  if (!itemKeys.length) return [];
+  const result = await client.query(
+    `SELECT item_key
+     FROM player_inventory
+     WHERE player_id = $1
+       AND item_key = ANY($2::text[])`,
+    [Number(playerId), itemKeys]
+  );
+  return result.rows.map((row) => String(row.item_key));
+}
+
 async function validateStoreProductEligibility(client, playerId, product) {
   const rewardKind = String(product.reward_kind || "coins");
   const rewardAmount = Number(product.reward_amount || product.coins || 0);
   if (rewardKind === "coins" ||
       rewardKind === "case_tropical" ||
       rewardKind === "case_summer") {
+    return { ok: true };
+  }
+
+  if (rewardKind === "wear_set") {
+    const setItems = donateWearSetItems(rewardAmount);
+    if (!setItems?.length) {
+      return { ok: false, status: 409, error: "store_reward_unsupported" };
+    }
+    const ownedKeys = await ownedDonateWearSetKeys(client, playerId, setItems);
+    if (ownedKeys.length === setItems.length) {
+      return { ok: false, status: 409, error: "clothing_set_already_owned" };
+    }
     return { ok: true };
   }
 
@@ -4133,7 +4350,8 @@ async function createDonateOrder(telegramUserIdValue, rawProductId) {
            END,
            updated_at = now()
        WHERE telegram_user_id = $1
-         AND status = 'pending'`,
+          AND status = 'pending'
+          AND limited_stock_reserved_at IS NULL`,
       [telegramUserId]
     );
     const bindingResult = await client.query(
@@ -4150,17 +4368,44 @@ async function createDonateOrder(telegramUserIdValue, rawProductId) {
       return { ok: false, status: 409, error: "telegram_account_not_linked" };
     }
     const productResult = await client.query(
-      `SELECT id, title, reward_kind, reward_amount,
-              coins, rubles, stars, active
-       FROM donate_products
-       WHERE id = $1
-       FOR SHARE`,
+      `SELECT p.id, p.title, p.reward_kind, p.reward_amount,
+              p.coins, p.rubles, p.stars, p.active,
+              stock.remaining AS stock_remaining,
+              stock.capacity AS stock_capacity
+       FROM donate_products p
+       LEFT JOIN donate_limited_stock stock ON stock.product_id = p.id
+       WHERE p.id = $1
+       FOR SHARE OF p`,
       [productId]
     );
     const product = productResult.rows[0] || null;
     if (!product || !product.active) {
       await client.query("ROLLBACK");
       return { ok: false, status: 404, error: "donate_product_not_found" };
+    }
+    if (String(product.reward_kind) === "wear_set") {
+      if (Number(product.stock_capacity || 0) <= 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_stock_unavailable" };
+      }
+      if (Number(product.stock_remaining || 0) <= 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_product_sold_out" };
+      }
+      const reservedResult = await client.query(
+        `SELECT 1
+         FROM donate_orders
+         WHERE player_id = $1
+           AND product_id = $2
+           AND status = 'pending'
+           AND limited_stock_reserved_at IS NOT NULL
+         LIMIT 1`,
+        [Number(binding.player_id), productId]
+      );
+      if (reservedResult.rowCount > 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_checkout_pending" };
+      }
     }
     const eligibility = await validateStoreProductEligibility(
       client,
@@ -4199,10 +4444,12 @@ async function createDonateOrder(telegramUserIdValue, rawProductId) {
     await client.query("COMMIT");
     return {
       ok: true,
-      order: donateOrderPayload({
-        ...orderResult.rows[0],
-        player_name: binding.player_name
-      })
+       order: donateOrderPayload({
+         ...orderResult.rows[0],
+         player_name: binding.player_name,
+         stock_remaining: product.stock_remaining,
+         stock_capacity: product.stock_capacity
+       })
     };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
@@ -4210,6 +4457,70 @@ async function createDonateOrder(telegramUserIdValue, rawProductId) {
   } finally {
     client.release();
   }
+}
+
+async function reserveLimitedStockForOrder(client, order) {
+  if (String(order.reward_kind || "") !== "wear_set") {
+    return { ok: true, stock: null };
+  }
+
+  const stock = await loadDonateLimitedStock(
+    client,
+    String(order.product_id || ""),
+    true
+  );
+  if (!stock) {
+    return { ok: false, status: 409, error: "donate_stock_unavailable" };
+  }
+
+  if (order.limited_stock_reserved_at) {
+    return {
+      ok: true,
+      stock: {
+        remaining: Number(stock.remaining),
+        capacity: Number(stock.capacity)
+      }
+    };
+  }
+  if (Number(stock.remaining) <= 0) {
+    return { ok: false, status: 409, error: "donate_product_sold_out" };
+  }
+
+  const stockResult = await client.query(
+    `UPDATE donate_limited_stock
+     SET remaining = remaining - 1,
+         updated_at = now()
+     WHERE product_id = $1
+       AND remaining > 0
+     RETURNING remaining, capacity`,
+    [String(order.product_id)]
+  );
+  const updatedStock = stockResult.rows[0] || null;
+  if (!updatedStock) {
+    return { ok: false, status: 409, error: "donate_product_sold_out" };
+  }
+
+  const reservationResult = await client.query(
+    `UPDATE donate_orders
+     SET limited_stock_reserved_at = now(),
+         updated_at = now()
+     WHERE id = $1
+       AND limited_stock_reserved_at IS NULL
+     RETURNING limited_stock_reserved_at`,
+    [String(order.id)]
+  );
+  const reservation = reservationResult.rows[0] || null;
+  if (!reservation) {
+    throw new Error("donate_stock_reservation_conflict");
+  }
+  order.limited_stock_reserved_at = reservation.limited_stock_reserved_at;
+  return {
+    ok: true,
+    stock: {
+      remaining: Number(updatedStock.remaining),
+      capacity: Number(updatedStock.capacity)
+    }
+  };
 }
 
 async function validateDonateCheckout(orderIdValue, telegramUserIdValue, currencyValue, totalAmountValue) {
@@ -4249,7 +4560,8 @@ async function validateDonateCheckout(orderIdValue, telegramUserIdValue, currenc
         error: order.status === "paid" ? "donate_order_already_paid" : "donate_order_unavailable"
       };
     }
-    if (new Date(order.expires_at).getTime() <= Date.now()) {
+    if (!order.limited_stock_reserved_at &&
+        new Date(order.expires_at).getTime() <= Date.now()) {
       await client.query(
         `UPDATE donate_orders
          SET status = 'expired', updated_at = now()
@@ -4272,6 +4584,15 @@ async function validateDonateCheckout(orderIdValue, telegramUserIdValue, currenc
     if (!eligibility.ok) {
       await client.query("ROLLBACK");
       return eligibility;
+    }
+    const reservation = await reserveLimitedStockForOrder(client, order);
+    if (!reservation.ok) {
+      await client.query("ROLLBACK");
+      return reservation;
+    }
+    if (reservation.stock) {
+      order.stock_remaining = reservation.stock.remaining;
+      order.stock_capacity = reservation.stock.capacity;
     }
     await client.query("COMMIT");
     return { ok: true, order: donateOrderPayload(order) };
@@ -4341,6 +4662,80 @@ async function applyStoreReward(client, order, player) {
       balanceAfter,
       rewardBefore: { coins: balanceBefore },
       rewardAfter: { coins: balanceAfter }
+    };
+  }
+
+  if (rewardKind === "wear_set") {
+    const setItems = donateWearSetItems(rewardAmount);
+    if (!setItems?.length) {
+      return { ok: false, status: 409, error: "store_reward_unsupported" };
+    }
+    const ownedBefore = await ownedDonateWearSetKeys(
+      client,
+      Number(order.player_id),
+      setItems
+    );
+    const awardedItemKeys = [];
+    for (const item of setItems) {
+      const itemKey = inventoryItemKey(item);
+      awardedItemKeys.push(itemKey);
+      await client.query(
+        `INSERT INTO player_inventory (
+           player_id, item_key, item_type, item_data, updated_at
+         )
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [
+          Number(order.player_id),
+          itemKey,
+          Number(item.itype),
+          JSON.stringify(item)
+        ]
+      );
+      await client.query(
+        `INSERT INTO player_pending_inventory_deliveries (
+           player_id, order_id, item_key, item_data
+         )
+         VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (order_id, item_key) DO NOTHING`,
+        [
+          Number(order.player_id),
+          String(order.id),
+          itemKey,
+          JSON.stringify(item)
+        ]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (
+           player_id, item_key, item_type, item_id,
+           price, currency, item_data
+         )
+         VALUES ($1, $2, $3, $4, 0, 'XTR', $5::jsonb)`,
+        [
+          Number(order.player_id),
+          itemKey,
+          Number(item.itype),
+          inventoryItemId(item),
+          JSON.stringify(item)
+        ]
+      );
+    }
+    return {
+      ok: true,
+      balanceBefore,
+      balanceAfter: balanceBefore,
+      rewardBefore: {
+        wearSetId: rewardAmount,
+        ownedItemKeys: ownedBefore
+      },
+      rewardAfter: {
+        wearSetId: rewardAmount,
+        awardedItemKeys,
+        ownedItemCount: awardedItemKeys.length
+      }
     };
   }
 
@@ -4491,6 +4886,12 @@ async function settleDonatePayment(body) {
       return { ok: false, status: 409, error: "donate_payment_mismatch" };
     }
 
+    const reservation = await reserveLimitedStockForOrder(client, order);
+    if (!reservation.ok) {
+      await client.query("ROLLBACK");
+      return reservation;
+    }
+
     const playerResult = await client.query(
       "SELECT id, name, money FROM players WHERE id = $1 FOR UPDATE",
       [Number(order.player_id)]
@@ -4504,6 +4905,12 @@ async function settleDonatePayment(body) {
     if (!reward.ok) {
       await client.query("ROLLBACK");
       return reward;
+    }
+    if (reservation.stock) {
+      reward.rewardAfter = {
+        ...reward.rewardAfter,
+        stock: reservation.stock
+      };
     }
     const balanceBefore = reward.balanceBefore;
     const balanceAfter = reward.balanceAfter;
@@ -4549,9 +4956,18 @@ async function settleDonatePayment(body) {
        SET status = 'paid',
            telegram_payment_charge_id = $2,
            paid_at = $3,
+           limited_stock_consumed_at = CASE
+             WHEN $4::boolean THEN COALESCE(limited_stock_consumed_at, now())
+             ELSE limited_stock_consumed_at
+           END,
            updated_at = now()
        WHERE id = $1`,
-      [orderId, telegramPaymentChargeId, new Date(telegramPaidAtMs)]
+      [
+        orderId,
+        telegramPaymentChargeId,
+        new Date(telegramPaidAtMs),
+        String(order.reward_kind) === "wear_set"
+      ]
     );
     await writeAuditEvent(client, {
       playerId: Number(order.player_id),
@@ -4605,10 +5021,17 @@ async function settleDonatePayment(body) {
     client.release();
   }
 
-  const cached = store.accounts[String(committedPayment.player_id)];
-  if (cached) {
-    cached.money = Number(committedPayment.balance_after);
-    cached.updatedAt = new Date().toISOString();
+  if (String(committedPayment.reward_kind) === "wear_set") {
+    const fresh = await loadPostgresAccount(Number(committedPayment.player_id));
+    if (fresh) {
+      store.accounts[String(fresh.id)] = fresh;
+    }
+  } else {
+    const cached = store.accounts[String(committedPayment.player_id)];
+    if (cached) {
+      cached.money = Number(committedPayment.balance_after);
+      cached.updatedAt = new Date().toISOString();
+    }
   }
   console.log(
     `[store] player=${committedPayment.player_id} order=${orderId} ` +
@@ -5977,6 +6400,33 @@ async function awardClanExperience(client, playerId, amount) {
     clanExp: Number(clan.exp),
     memberExp: Number(member.clanExp)
   };
+}
+
+async function claimPendingInventoryDeliveries(playerId) {
+  if (!pgPool) return [];
+  const result = await pgPool.query(
+    `WITH pending AS (
+       SELECT id
+       FROM player_pending_inventory_deliveries
+       WHERE player_id = $1
+         AND delivered_at IS NULL
+       ORDER BY created_at ASC, id ASC
+       LIMIT 64
+       FOR UPDATE SKIP LOCKED
+     ),
+     delivered AS (
+       UPDATE player_pending_inventory_deliveries delivery
+       SET delivered_at = now()
+       FROM pending
+       WHERE delivery.id = pending.id
+       RETURNING delivery.id, delivery.item_data
+     )
+     SELECT id, item_data
+     FROM delivered
+     ORDER BY id ASC`,
+    [Number(playerId)]
+  );
+  return result.rows.map((row) => jsonValue(row.item_data, {}));
 }
 
 function profilePayload(account, full = false) {
@@ -7746,6 +8196,18 @@ function validateClanTag(tag, currentClanId = 0) {
   return 0;
 }
 
+function clanCreateUniqueViolationCode(error) {
+  if (String(error?.code || "") !== "23505") return 0;
+  const constraint = String(error?.constraint || "");
+  if (constraint === "clans_name_key" || constraint === "clans_name_active_lower_unique") {
+    return CLAN_ERROR.CLAN_NAME_EXIST;
+  }
+  if (constraint === "clans_tag_lower_unique" || constraint === "clans_tag_active_lower_unique") {
+    return CLAN_ERROR.CLAN_TAG_EXIST;
+  }
+  return 0;
+}
+
 function ensureClanAccount(account) {
   const normalized = normalizeAccount(account);
   store.accounts[String(normalized.id)] = normalized;
@@ -8076,6 +8538,11 @@ async function createClanPostgres(account, name, tag, armId) {
         if (client && !committed) await client.query("ROLLBACK");
       } catch {
         // Keep the original error visible.
+      }
+      const duplicateCode = clanCreateUniqueViolationCode(error);
+      if (duplicateCode) {
+        console.log(`[clan-create] rejected player=${account.id} reason=${duplicateCode === CLAN_ERROR.CLAN_NAME_EXIST ? "name-exists" : "tag-exists"} constraint=${String(error.constraint || "unknown")}`);
+        return clanError(duplicateCode);
       }
       console.error("[postgres] clan create failed", error);
       return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
@@ -10050,7 +10517,17 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   if (page === "pl") {
     if (act === "i") {
       const objectLoadout = usesProfileObjectLoadout(account, url);
-      return advancedStatsPayload(await profileAccountForView(account, url), { objectLoadout });
+      const payload = advancedStatsPayload(
+        await profileAccountForView(account, url),
+        { objectLoadout }
+      );
+      if (url.searchParams.get("ai") === "1") {
+        const deliveredItems = await claimPendingInventoryDeliveries(account.id);
+        if (deliveredItems.length) {
+          payload.addItem = deliveredItems;
+        }
+      }
+      return payload;
     }
     if (act === "inv") return inventoryPayload(account);
     if (act === "map") return mapsPayload();
@@ -11042,6 +11519,44 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (url.pathname === "/donate/catalog") {
+    if (req.method !== "GET") {
+      sendJson(
+        res,
+        { ok: false, error: "method_not_allowed" },
+        405,
+        { "access-control-allow-origin": "*" }
+      );
+      return;
+    }
+    try {
+      const result = await listDonateProducts();
+      sendJson(
+        res,
+        result,
+        result.status || (result.ok ? 200 : 503),
+        {
+          "access-control-allow-origin": "*",
+          "cache-control": "no-store"
+        }
+      );
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(
+        res,
+        {
+          ok: false,
+          error: status === 503
+            ? "service_unavailable"
+            : "donate_catalog_failed"
+        },
+        status,
+        { "access-control-allow-origin": "*" }
+      );
+    }
+    return;
+  }
+
   if (url.pathname.startsWith("/bot/telegram")) {
     if (!hasValidTelegramLinkApiToken(req)) {
       sendJson(res, { ok: false, error: "not_found" }, 404);
@@ -11106,6 +11621,11 @@ async function handleHttpRequest(req, res) {
           );
         } else if (url.pathname === "/bot/telegram/store/settle") {
           result = await settleDonatePayment(body);
+        } else if (url.pathname === "/bot/telegram/store/admin/stock/reset") {
+          result = await resetDonateLimitedStock(
+            body?.adminTelegramId,
+            body?.productId
+          );
         } else if (url.pathname === "/bot/telegram/code/message") {
           result = await attachBotTelegramPairingMessage(body);
         } else if (url.pathname === "/bot/telegram/confirmation/notified") {
