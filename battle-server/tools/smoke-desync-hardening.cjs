@@ -100,6 +100,7 @@ globalThis.__desyncSmoke = {
   findNatRebindSession,
   getCachedReliableResponse,
   logReliableReplay,
+  makeActorInfoRaw,
   profileForJoin,
   loadPlayerProfileSingleFlight,
   markPlayerProfileChanged,
@@ -208,6 +209,33 @@ function testActorWireBuild(battle) {
   assert(Buffer.isBuffer(session.actorRaw) && session.actorRaw.length > 0);
   assert(Buffer.isBuffer(session.peerActorRaw) && session.peerActorRaw.length > 0);
   assert(Buffer.isBuffer(session.joinActorRaw) && session.joinActorRaw.length > 0);
+}
+
+function actorInfoValue(battle, raw, key) {
+  const actorInfo = battle.readTypedRaw(raw, 0);
+  assert.strictEqual(actorInfo.type, 0x68);
+  return actorInfo.value.entries.find((entry) => Number(entry.key.value) === Number(key))?.value;
+}
+
+function testCompactActorClanTagContract(battle) {
+  const noClan = battle.makeActorInfoRaw(
+    { level: 1, clan: null },
+    { includeActorOptionalFields: false, weaponSlotLimit: 1 }
+  );
+  const noClanTag = actorInfoValue(battle, noClan, 6);
+  assert(noClanTag, "compact actor payload omitted mandatory ClanTag key 6");
+  assert.strictEqual(noClanTag.type, 0x73);
+  assert.strictEqual(noClanTag.value, "", "player without clan must receive string.Empty ClanTag");
+
+  const clanMember = battle.makeActorInfoRaw(
+    { level: 1, clan: { cid: 7, t: "DEV", aid: 3 } },
+    { includeActorOptionalFields: false, weaponSlotLimit: 1 }
+  );
+  const clanTag = actorInfoValue(battle, clanMember, 6);
+  assert(clanTag, "compact clan actor payload omitted mandatory ClanTag key 6");
+  assert.strictEqual(clanTag.value, "DEV", "compact actor payload lost the real clan tag");
+  assert.strictEqual(actorInfoValue(battle, clanMember, 8), undefined, "compact payload unexpectedly restored optional ClanId");
+  assert.strictEqual(actorInfoValue(battle, clanMember, 5), undefined, "compact payload unexpectedly restored optional ClanArmId");
 }
 
 function testNatRebindBeforeSpawn(battle) {
@@ -719,7 +747,7 @@ function testReliableReplayLogRateLimit(battle) {
 
 async function main() {
   const battle = sandbox.__desyncSmoke;
-  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-29-staff-spectator-dev-v286");
+  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-30-clan-delete-v292");
   assert.strictEqual(battle.UDP_OUTBOX_FLUSH_MS, 15);
   assert.strictEqual(battle.ROOM_LIST_COALESCE_MS, 150);
   const capacityRoom = {
@@ -743,6 +771,7 @@ async function main() {
   testResponseCacheWindow(battle);
   testLateProfileFreeze(battle);
   testActorWireBuild(battle);
+  testCompactActorClanTagContract(battle);
   testNatRebindBeforeSpawn(battle);
   testAtomicDuplicateSessionCleanup(battle);
   await testProfileJoinRequiresRealProfile(battle);

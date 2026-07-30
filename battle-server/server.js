@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-29-staff-spectator-dev-v286";
+const BUILD_ID = "battle-server-2026-07-30-clan-delete-v292";
 const STAFF_ROLE_ORDER = Object.freeze(["none", "helper", "moderator", "admin", "owner", "developer"]);
 const STAFF_ROLE_RANK = Object.freeze({
   none: 0,
@@ -41,6 +41,16 @@ const STAFF_CAPABILITY_MIN_ROLE = Object.freeze({
 });
 const STAFF_DISCONNECT_GRACE_MS = boundedEnvInt("STAFF_DISCONNECT_GRACE_MS", 750, 250, 3000);
 const STAFF_REASON_MAX_LENGTH = boundedEnvInt("STAFF_REASON_MAX_LENGTH", 300, 1, 1000);
+// KickManager.cs owns these two client-visible timings. The original server
+// threshold is not present in the client; this restore uses a strict majority
+// of the room's active kick-capable players.
+const KICK_VOTE_DURATION_MS = 30000;
+const KICK_VOTE_COOLDOWN_MS = 240000;
+const KICK_VOTE_REASON_NAMES = Object.freeze({
+  1: "cheating",
+  2: "threats",
+  3: "other",
+});
 const GAME_MASTER_PORT = Number(process.env.GAME_MASTER_PORT || 5058);
 const SOCIAL_MASTER_PORTS = new Set(
   String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057")
@@ -54,6 +64,7 @@ const CLAN_TREASURY_POLL_LIMIT = Math.max(1, Math.min(200, Number(process.env.CL
 const CLAN_TREASURY_EVENT_ADD = 17;
 const CLAN_TREASURY_RECORD_ADD = 1;
 const CLAN_EVENT_CHANGE_ARM = 5;
+const CLAN_EVENT_ADD_EVENT = 20;
 const FORCE_TEAM_MODE = process.env.FORCE_TEAM_MODE === "1";
 const AUTO_SPAWN_AFTER_GAMESTATE = process.env.AUTO_SPAWN_AFTER_GAMESTATE === "1";
 const PLAYER_BASE_SPEED10 = 130;
@@ -4336,6 +4347,10 @@ function makeDefaultWeaponDictionaryRaw() {
 
 function makeActorInfoRaw(profile = null, options = {}) {
   const stats = playerRuntimeStats(profile, options);
+  const clanId = numberOr(profile?.clan?.cid ?? profile?.clan?.id, 0);
+  const clanTag = clanId > 0
+    ? stringOr(profile?.clan?.t ?? profile?.clan?.tag, "")
+    : "";
   const entries = [
     { key: rawByte(100), value: rawInt(stats.maxHealth) },
     { key: rawByte(99), value: rawInt(stats.maxEnergy) },
@@ -4344,17 +4359,22 @@ function makeActorInfoRaw(profile = null, options = {}) {
     { key: rawByte(92), value: rawInt(stats.jump) },
     { key: rawByte(76), value: rawInt(numberOr(profile?.level, Number(process.env.DEFAULT_PLAYER_LEVEL || 1))) },
     { key: rawByte(36), value: rawBool(process.env.DEFAULT_PLAYER_PREMIUM === "1") },
+    // GameScore.AddUser() formats any non-empty/non-null clan tag as
+    // "[tag] name". Keep key 6 even in compact actor payloads so a player
+    // without a clan is always initialized with string.Empty, never null.
+    { key: rawByte(6), value: rawString(clanTag) },
   ];
 
+  if (options.isGuest === true) {
+    // CombatPlayer.Init() reads IsGuest from ActorInfo = actorData[96], key 4.
+    // Presence of the key is the original client contract; its value is not read.
+    entries.push({ key: rawByte(4), value: rawBool(true) });
+  }
+
   if (options.includeActorOptionalFields !== false) {
-    const clanId = numberOr(profile?.clan?.cid ?? profile?.clan?.id, 0);
     const clanArmId = numberOr(profile?.clan?.aid ?? profile?.clan?.armId, 0);
-    const clanTag = stringOr(profile?.clan?.t ?? profile?.clan?.tag, "");
     if (clanId > 0) entries.push({ key: rawByte(8), value: rawInt(clanId) });
-    entries.push(
-      { key: rawByte(6), value: rawString(clanTag) },
-      { key: rawByte(5), value: rawInt(clanArmId) },
-    );
+    entries.push({ key: rawByte(5), value: rawInt(clanArmId) });
   }
 
   if (options.includeWears !== false && INCLUDE_JOIN_WEARS) {
@@ -4498,6 +4518,18 @@ function invalidatePlayerProfileCache(playerId) {
   return removed;
 }
 
+function invalidateClanProfileCache(clanId) {
+  const id = Number(clanId || 0);
+  if (!Number.isFinite(id) || id <= 0) return 0;
+  let removed = 0;
+  for (const [cacheKey, cached] of profileCache.entries()) {
+    if (Number(cached?.profile?.clan?.cid || 0) !== id) continue;
+    profileCache.delete(cacheKey);
+    removed += 1;
+  }
+  return removed;
+}
+
 function markPlayerProfileChanged(playerId, changeType) {
   const id = Number(playerId || 0);
   if (!Number.isFinite(id) || id <= 0) return null;
@@ -4534,10 +4566,11 @@ async function settleRecentPlayerProfileChange(playerId) {
   return { ...change, waitedMs: waitMs };
 }
 
-function fallbackPlayerProfile(incomingActor) {
+function fallbackPlayerProfile(incomingActor, options = {}) {
   const { authId, authKey } = actorCredentials(incomingActor);
   return {
     isFallback: true,
+    accessDenied: options.accessDenied === true,
     authId,
     authKey,
     name: stringOr(htGet(incomingActor, 242)?.value, process.env.DEFAULT_PLAYER_NAME || "ContraCity"),
@@ -4651,6 +4684,9 @@ async function profileForJoin(incomingActor, options = {}) {
     loaded = fallbackPlayerProfile(incomingActor);
   }
   if (!isFallbackBattleProfile(loaded)) return { profile: loaded, source: forceRefresh ? "fresh" : "loaded" };
+  // A 403 from the canonical API means that these credentials are no longer
+  // allowed (including an active ban). Never revive a cached pre-ban profile.
+  if (loaded?.accessDenied === true) return { profile: loaded, source: "access-denied" };
   if (cached && !isFallbackBattleProfile(cached)) return { profile: cached, source: "cache-fallback" };
   return { profile: fallbackPlayerProfile(incomingActor), source: "fallback" };
 }
@@ -4707,7 +4743,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = API_REQUEST_TIMEO
 async function fetchApiJson(path) {
   if (!API_BASE_URL || typeof fetch !== "function") return null;
   const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, { headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`status=${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`status=${response.status}`);
+    error.status = Number(response.status || 0);
+    throw error;
+  }
   return response.json();
 }
 
@@ -4813,7 +4853,7 @@ async function loadPlayerProfile(incomingActor, options = {}) {
     return profile;
   } catch (error) {
     console.log(`[profile] failed id=${authId} ${error.message}`);
-    return fallbackPlayerProfile(incomingActor);
+    return fallbackPlayerProfile(incomingActor, { accessDenied: Number(error?.status || 0) === 403 });
   }
 }
 
@@ -4828,11 +4868,6 @@ function makeActorDataRaw(incomingActor, profile = null, options = {}) {
     { key: rawByte(239), value: rawShort(Number.isFinite(team) ? team : -1) },
     { key: rawByte(96), value: makeActorInfoRaw(profile, options) },
   ];
-  if (options.isGuest === true) {
-    // CombatPlayer.ReadData reads actor key 4 as IsGuest. The original client
-    // uses that flag to skip team spawn and enter its TPS camera flow.
-    entries.push({ key: rawByte(4), value: rawBool(true) });
-  }
 
   if (INCLUDE_JOIN_ACTOR_ECHO_FIELDS) {
     const authKey = getRawValue(incomingActor, 240);
@@ -7555,7 +7590,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
   if (isWeaponControlShot(state, launchMode)) {
     const mode = Number(launchMode ?? 0);
     if (isGatlingWeaponType(state.type) && mode === LAUNCH_MODE.LAUNCH) {
-      if (state.loadedAmmo <= 0 && !session?.developerInfiniteAmmo) {
+      if (state.loadedAmmo <= 0) {
         return { ok: false, reason: "empty", intervalMs };
       }
       if (weaponMode !== WEAPON_MODE.READY) {
@@ -7601,7 +7636,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
     return { ok: true, reason: "no-ammo-event", intervalMs };
   }
 
-  if (state.loadedAmmo <= 0 && !session?.developerInfiniteAmmo) {
+  if (state.loadedAmmo <= 0) {
     return { ok: false, reason: "empty", intervalMs };
   }
 
@@ -7623,9 +7658,7 @@ function noteWeaponShot(session, parsed) {
   }
   if (!shotConsumesAmmo(state.type, launchMode)) return;
   if (isReloadWeaponMode(refreshWeaponMode(state, now))) cancelWeaponReload(state, "interrupted-by-shot", now);
-  if (!session?.developerInfiniteAmmo) {
-    state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
-  }
+  state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
   startWeaponShooting(state, now);
   if (isProjectileLaunchShot(state, launchMode)) rememberProjectileLaunch(state, data, now);
 }
@@ -8186,7 +8219,6 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
   const chainedDeaths = [];
   for (const targetSession of Array.from(deadSession.room.players.values())) {
     if (!targetSession || targetSession === deadSession || !targetSession.spawned || targetSession.dead) continue;
-    if (targetSession.developerInfiniteHp) continue;
     // The enhancer description explicitly says "surrounding enemies", even in
     // rooms where ordinary friendly fire is enabled.
     if (sessionsAreAllies(deadSession, targetSession)) continue;
@@ -8483,20 +8515,6 @@ function impactDotRequestedDamage(effect) {
 
 function applyImpactDotDamage(effect, targetSession) {
   const targetCurrent = sessionCurrentHealthEnergy(targetSession);
-  if (targetSession?.developerInfiniteHp) {
-    targetSession.health = targetCurrent.maxHealth;
-    targetSession.energy = targetCurrent.stats.maxEnergy;
-    return {
-      targetCurrent,
-      requestedDamage: 0,
-      totalDamage: 0,
-      healthDamage: 0,
-      energyDamage: 0,
-      damageReduction: 0,
-      enhancerReduction: 0,
-      enhancerDamagePercent: 0,
-    };
-  }
   const requestedDamage = impactDotRequestedDamage(effect);
   const referenceMultiplier = Math.max(0.05, 1 - IMPACT_REFERENCE_DAMAGE_REDUCTION / 100);
   const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
@@ -8772,13 +8790,6 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   }
   result.targetSession = targetSession;
   result.hit = true;
-  if (targetSession.developerInfiniteHp) {
-    targetSession.health = targetCurrent.maxHealth;
-    targetSession.energy = targetCurrent.stats.maxEnergy;
-    result.summary = `${targetActorId}:developer-infinite-hp`;
-    return result;
-  }
-
   const origin = pointFromHashtable(htGet(data, 11));
   const actorDistance = distanceBetweenPoints(shooter.lastTransform, targetSession.lastTransform);
   const originDistance = distanceBetweenPoints(origin, targetSession.lastTransform);
@@ -9489,6 +9500,8 @@ function ensureRoom(settings) {
       guestMode: settings.guestMode || 0,
       startedAt: photonNow(),
       players: new Map(),
+      kickVote: null,
+      kickVoteAuthorization: null,
       moves: 0,
       items: makeRoomItemState(requestedMap),
       controlPoints: makeControlPointState(requestedMap),
@@ -9895,6 +9908,7 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
     { requireGameState: false },
   );
   room.players.delete(actorId);
+  cancelRoomKickVoteForDeparture(room, actorId, options.channel || 0, reason);
   forgetActorForRoom(room, actorId);
   maybeFinishZombieRound(room, `leave-${reason}`, options.channel || 0);
   if (options.postSummary !== false) postSessionBattleSummary(playerSession, reason);
@@ -10523,7 +10537,7 @@ function chatRequestType(parsed) {
 
 function decodeStaffReason(value) {
   const encoded = String(value || "");
-  if (!encoded || encoded.length > STAFF_REASON_MAX_LENGTH * 6) return "";
+  if (!encoded || encoded.length > STAFF_REASON_MAX_LENGTH * 12) return "";
   try {
     return decodeURIComponent(encoded.replace(/\+/g, "%20"))
       .replace(/[\u0000-\u001f\u007f]/g, " ")
@@ -10562,25 +10576,6 @@ function parseStaffChatCommand(message) {
       return { action, targetPlayerId, durationMinutes, reason };
     }
   }
-  if (action === "dev" && tokens.length === 2) {
-    const control = String(tokens[0] || "").toLowerCase();
-    const value = Number(tokens[1]);
-    if (
-      ["infinite_ammo", "infinite_hp"].includes(control) &&
-      Number.isInteger(value) &&
-      (value === 0 || value === 1)
-    ) {
-      return { action: "developer", control, enabled: value === 1, value };
-    }
-    if (
-      control === "shotgun_recoil" &&
-      Number.isInteger(value) &&
-      value >= 0 &&
-      value <= 500
-    ) {
-      return { action: "developer", control, enabled: value > 0, value };
-    }
-  }
   return { action: "invalid", targetPlayerId: 0, durationMinutes: 0, reason: "" };
 }
 
@@ -10596,6 +10591,7 @@ async function requestStaffActionApproval(sourceSession, targetPlayerId, action,
   if (!API_BASE_URL || !API_TOKEN) return { ok: false, error: "staff-service-unavailable" };
   if (Number(sourceSession.playerId) === Number(targetPlayerId)) return { ok: false, error: "staff-self-target" };
   const minimumRole = normalizeStaffRole(options.minimumRole || (action === "ban" ? "admin" : "helper"));
+  const authorizeOnly = options.authorizeOnly === true;
   try {
     const result = await postApiJson("/battle/admin/action", {
       action,
@@ -10607,6 +10603,7 @@ async function requestStaffActionApproval(sourceSession, targetPlayerId, action,
       mapName: String(sourceSession.room?.map || ""),
       minimumRole,
       source: String(options.source || "battle").slice(0, 40),
+      ...(authorizeOnly ? { authorizeOnly: true } : {}),
     });
     if (!result || result.ok !== true) return { ok: false, error: String(result?.error || "staff-action-denied") };
 
@@ -10632,31 +10629,13 @@ async function requestStaffActionApproval(sourceSession, targetPlayerId, action,
   }
 }
 
-async function requestDeveloperControlApproval(session, command) {
-  if (!API_BASE_URL || !API_TOKEN) return { ok: false, error: "staff-service-unavailable" };
-  try {
-    const result = await postApiJson("/battle/staff/control", {
-      actorPlayerId: Number(session.playerId || 0),
-      control: String(command.control || ""),
-      enabled: command.enabled === true,
-      value: Number(command.value || 0),
-    });
-    const role = normalizeStaffRole(result?.actor?.role);
-    if (!result || result.ok !== true || role !== "developer") {
-      return { ok: false, error: String(result?.error || "developer-role-required") };
-    }
-    session.staffRole = role;
-    session.staffRank = staffRoleRank(role);
-    return { ok: true, result };
-  } catch (error) {
-    return { ok: false, error: String(error?.message || "developer-control-failed") };
-  }
-}
-
-function makeModerationDisconnectEvent(targetSession) {
+function makeModerationDisconnectEvent(targetSession, action = "kick") {
+  const disconnectData = String(action || "kick").toLowerCase() === "ban"
+    ? [{ key: rawByte(1), value: rawByte(1) }]
+    : [];
   return rawEvent(104, [
     { key: 254, value: rawInt(targetSession?.actorId || 0) },
-    { key: 245, value: rawHashtable([]) },
+    { key: 245, value: rawHashtable(disconnectData) },
   ]);
 }
 
@@ -10666,7 +10645,11 @@ function scheduleModerationDisconnect(targetSession, action, sourceSession, reas
   targetSession.moderationDisconnectAction = String(action || "kick");
   targetSession.moderationDisconnectBy = Number(sourceSession?.playerId || 0);
   targetSession.moderationDisconnectReason = String(reason || "").slice(0, STAFF_REASON_MAX_LENGTH);
-  sendReliableToSession(targetSession, makeModerationDisconnectEvent(targetSession), channel);
+  sendReliableToSession(
+    targetSession,
+    makeModerationDisconnectEvent(targetSession, targetSession.moderationDisconnectAction),
+    channel,
+  );
   const timer = setTimeout(() => {
     if (targetSession.transportDisconnected) return;
     flushSessionUdpOutbox(targetSession);
@@ -10691,31 +10674,6 @@ async function handleStaffChatCommand(session, command, channel = 0) {
   if (!command || command.action === "invalid") {
     console.log(`[staff] command rejected player=${session?.playerId || 0} reason=invalid-command`);
     return [];
-  }
-  if (command.action === "developer") {
-    const approval = await requestDeveloperControlApproval(session, command);
-    if (!approval.ok) {
-      console.log(`[staff] developer control denied player=${session?.playerId || 0} control=${command.control || "?"} reason=${approval.error}`);
-      return [];
-    }
-    if (command.control === "infinite_ammo") {
-      session.developerInfiniteAmmo = command.enabled === true;
-    } else if (command.control === "infinite_hp") {
-      session.developerInfiniteHp = command.enabled === true;
-    } else if (command.control === "shotgun_recoil") {
-      session.developerShotgunRecoilPercent = Number(command.value || 0);
-    }
-    const responses = [];
-    if (session.developerInfiniteHp) {
-      const stats = sessionRuntimeStats(session);
-      session.health = sessionMaxHealth(session, stats);
-      session.energy = stats.maxEnergy;
-      const healthEvent = makePlayerHealthEnergyEvent(session);
-      responses.push(healthEvent);
-      broadcastReliableToRoom(session, healthEvent, channel, "developer-health");
-    }
-    console.log(`[staff] developer control accepted player=${session.playerId || 0} control=${command.control} value=${Number(command.value || 0)}`);
-    return responses;
   }
   const targetSession = roomSessionByPlayerId(session.room, command.targetPlayerId)
     || activeSessionsForPlayerId(command.targetPlayerId)[0]
@@ -10748,6 +10706,9 @@ async function handleStaffChatCommand(session, command, channel = 0) {
     console.log(`[staff] command denied action=${command.action} by=${session.playerId || 0} target=${command.targetPlayerId} reason=${approval.error}`);
     return [];
   }
+  if (command.action === "ban") {
+    invalidatePlayerProfileCache(command.targetPlayerId);
+  }
 
   const targets = command.action === "ban"
     ? activeSessionsForPlayerId(command.targetPlayerId)
@@ -10760,26 +10721,318 @@ async function handleStaffChatCommand(session, command, channel = 0) {
   return [];
 }
 
-function makeInstantKickEvent(sourceSession, targetSession, result = null) {
+function kickVoteReasonName(reasonCode) {
+  return KICK_VOTE_REASON_NAMES[Number(reasonCode)] || "unknown";
+}
+
+function makeKickVoteEvent(sourceSession, targetSession, options = {}) {
+  const yes = Math.max(0, Number(options.yes || 0));
+  const no = Math.max(0, Number(options.no || 0));
   const entries = [
     { key: rawByte(1), value: rawInt(targetSession.playerId) },
     { key: rawByte(5), value: rawInt(targetSession.actorId) },
-    { key: rawByte(6), value: rawInt(1) },
-    { key: rawByte(7), value: rawInt(0) },
+    { key: rawByte(6), value: rawInt(yes) },
+    { key: rawByte(7), value: rawInt(no) },
   ];
-  if (result == null) {
+  if (options.reasonCode != null) {
     entries.push(
-      { key: rawByte(9), value: rawByte(4) },
+      { key: rawByte(9), value: rawByte(options.reasonCode) },
       { key: rawByte(10), value: rawString(stringOr(targetSession.playerName, `Player ${targetSession.playerId}`)) },
       { key: rawByte(11), value: rawString(stringOr(sourceSession.playerName, `Player ${sourceSession.playerId}`)) },
     );
-  } else {
-    entries.push({ key: rawByte(2), value: rawBool(result) });
+  } else if (options.result != null) {
+    entries.push({ key: rawByte(2), value: rawBool(options.result) });
   }
   return rawEvent(70, [
     { key: 254, value: rawInt(sourceSession.actorId || 0) },
     { key: 245, value: rawHashtable(entries) },
   ]);
+}
+
+function makeInstantKickEvent(sourceSession, targetSession, result = null) {
+  return makeKickVoteEvent(sourceSession, targetSession, result == null
+    ? { yes: 1, no: 0, reasonCode: 4 }
+    : { yes: 1, no: 0, result });
+}
+
+function kickVoteCounts(vote) {
+  let yes = 0;
+  let no = 0;
+  for (const ballot of vote.votes.values()) {
+    if (ballot === true) yes += 1;
+    else no += 1;
+  }
+  return { yes, no };
+}
+
+function kickVoteEligibleActors(room, targetActorId) {
+  const eligible = new Set();
+  for (const [actorId, candidate] of room?.players?.entries?.() || []) {
+    const normalizedActorId = Number(actorId || 0);
+    if (
+      normalizedActorId <= 0 ||
+      normalizedActorId === Number(targetActorId) ||
+      !candidate ||
+      candidate.isGuest ||
+      candidate.transportDisconnected ||
+      candidate.moderationDisconnectPending ||
+      !staffHasCapability(candidate, "kick")
+    ) {
+      continue;
+    }
+    eligible.add(normalizedActorId);
+  }
+  return eligible;
+}
+
+function broadcastKickVoteToPeers(sourceSession, payload, channel = 0, room = sourceSession?.room) {
+  let sent = 0;
+  for (const peer of room?.players?.values?.() || []) {
+    if (!peer || peer === sourceSession) continue;
+    if (sendReliableToSession(peer, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function broadcastKickVoteToRoom(room, payload, channel = 0) {
+  let sent = 0;
+  for (const peer of room?.players?.values?.() || []) {
+    if (!peer) continue;
+    if (sendReliableToSession(peer, payload, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function clearRoomKickVoteTimer(vote) {
+  if (!vote?.timer) return;
+  clearTimeout(vote.timer);
+  vote.timer = null;
+}
+
+async function finishRoomKickVote(vote, requestedAccepted, channel = 0, reason = "threshold") {
+  const room = vote?.room;
+  if (!room || room.kickVote !== vote || vote.resolving) return null;
+  vote.resolving = true;
+
+  const sourceSession = room.players.get(vote.starterActorId);
+  const targetSession = room.players.get(vote.targetActorId);
+  let accepted = requestedAccepted === true;
+  let denialReason = "";
+  if (
+    accepted &&
+    sourceSession === vote.sourceSession &&
+    targetSession === vote.targetSession &&
+    sourceSession.room === room &&
+    targetSession.room === room
+  ) {
+    const actionReason = `vote-${kickVoteReasonName(vote.reasonCode)}`;
+    const approval = await requestStaffActionApproval(
+      sourceSession,
+      vote.targetPlayerId,
+      "kick",
+      actionReason,
+      0,
+      targetSession,
+      { minimumRole: "helper", source: "event70" },
+    );
+    accepted = approval.ok === true;
+    denialReason = approval.ok ? "" : approval.error;
+  } else if (accepted) {
+    accepted = false;
+    denialReason = "participant-left";
+  }
+
+  clearRoomKickVoteTimer(vote);
+  if (room.kickVote === vote) room.kickVote = null;
+  const counts = kickVoteCounts(vote);
+  const resultEvent = makeKickVoteEvent(
+    sourceSession || vote.sourceSession,
+    targetSession || vote.targetSession,
+    { ...counts, result: accepted },
+  );
+  if (accepted) {
+    scheduleModerationDisconnect(
+      targetSession,
+      "kick",
+      sourceSession,
+      `vote-${kickVoteReasonName(vote.reasonCode)}`,
+      channel,
+    );
+  }
+  console.log(`[staff] event70 vote result room=${room.name} by=${vote.starterPlayerId} target=${vote.targetPlayerId}/${vote.targetActorId} reason=${kickVoteReasonName(vote.reasonCode)} yes=${counts.yes} no=${counts.no} threshold=${vote.threshold} accepted=${accepted ? "yes" : "no"} finish=${reason}${denialReason ? ` denial=${denialReason}` : ""}`);
+  return resultEvent;
+}
+
+function scheduleRoomKickVoteExpiry(vote, channel = 0) {
+  vote.timer = setTimeout(() => {
+    const counts = kickVoteCounts(vote);
+    finishRoomKickVote(vote, counts.yes >= vote.threshold, channel, "timeout")
+      .then((payload) => {
+        if (payload) broadcastKickVoteToRoom(vote.room, payload, channel);
+      })
+      .catch((error) => {
+        console.log(`[staff] event70 vote timeout failed room=${vote.room?.name || "unknown"} ${error.message}`);
+      });
+  }, KICK_VOTE_DURATION_MS);
+  vote.timer.unref?.();
+}
+
+function cancelRoomKickVoteForDeparture(room, actorId, channel = 0, reason = "leave") {
+  const vote = room?.kickVote;
+  const normalizedActorId = Number(actorId || 0);
+  if (
+    !vote ||
+    vote.resolving ||
+    (normalizedActorId !== vote.starterActorId && normalizedActorId !== vote.targetActorId)
+  ) {
+    return false;
+  }
+  vote.resolving = true;
+  clearRoomKickVoteTimer(vote);
+  room.kickVote = null;
+  const counts = kickVoteCounts(vote);
+  const resultEvent = makeKickVoteEvent(vote.sourceSession, vote.targetSession, { ...counts, result: false });
+  broadcastKickVoteToRoom(room, resultEvent, channel);
+  console.log(`[staff] event70 vote cancelled room=${room.name} target=${vote.targetPlayerId}/${vote.targetActorId} actor=${normalizedActorId} reason=${reason}`);
+  return true;
+}
+
+async function handleRoomKickVoteStartRequest(session, data, channel = 0) {
+  const targetPlayerId = Number(htGet(data, 1)?.value || 0);
+  const targetActorId = Number(htGet(data, 5)?.value || 0);
+  const reasonCode = Number(htGet(data, 9)?.value || 0);
+  const room = session?.room;
+  if (
+    !KICK_VOTE_REASON_NAMES[reasonCode] ||
+    !Number.isInteger(targetPlayerId) ||
+    targetPlayerId <= 0 ||
+    !Number.isInteger(targetActorId) ||
+    targetActorId <= 0 ||
+    !Number.isInteger(Number(session?.actorId || 0)) ||
+    Number(session.actorId) <= 0
+  ) {
+    console.log(`[staff] event70 vote rejected by=${session?.playerId || 0} reason=contract`);
+    return [];
+  }
+  const targetSession = room?.players?.get(targetActorId);
+  if (!targetSession || Number(targetSession.playerId) !== targetPlayerId) {
+    console.log(`[staff] event70 vote rejected by=${session?.playerId || 0} target=${targetPlayerId}/${targetActorId} reason=identity-mismatch`);
+    return [];
+  }
+  if (!cachedStaffCanModerate(session, targetSession, "kick")) {
+    console.log(`[staff] event70 vote rejected by=${session?.playerId || 0} target=${targetPlayerId} reason=rbac`);
+    return [];
+  }
+  if (room.kickVote || room.kickVoteAuthorization) {
+    console.log(`[staff] event70 vote rejected by=${session.playerId || 0} target=${targetPlayerId} reason=vote-active`);
+    return [];
+  }
+  const now = Date.now();
+  if (now < Number(session.kickVoteStartedAt || 0) + KICK_VOTE_COOLDOWN_MS) {
+    console.log(`[staff] event70 vote rejected by=${session.playerId || 0} target=${targetPlayerId} reason=cooldown`);
+    return [];
+  }
+
+  const authorizationToken = {};
+  room.kickVoteAuthorization = authorizationToken;
+  try {
+    const actionReason = `vote-${kickVoteReasonName(reasonCode)}`;
+    const approval = await requestStaffActionApproval(
+      session,
+      targetPlayerId,
+      "kick",
+      actionReason,
+      0,
+      targetSession,
+      { minimumRole: "helper", source: "event70", authorizeOnly: true },
+    );
+    if (!approval.ok) {
+      console.log(`[staff] event70 vote denied by=${session.playerId || 0} target=${targetPlayerId} reason=${approval.error}`);
+      return [];
+    }
+    if (
+      room.kickVote ||
+      session.room !== room ||
+      targetSession.room !== room ||
+      room.players.get(Number(session.actorId)) !== session ||
+      room.players.get(targetActorId) !== targetSession ||
+      !cachedStaffCanModerate(session, targetSession, "kick")
+    ) {
+      console.log(`[staff] event70 vote rejected by=${session.playerId || 0} target=${targetPlayerId} reason=state-changed`);
+      return [];
+    }
+
+    const eligibleActorIds = kickVoteEligibleActors(room, targetActorId);
+    const starterActorId = Number(session.actorId);
+    if (!eligibleActorIds.has(starterActorId)) {
+      console.log(`[staff] event70 vote rejected by=${session.playerId || 0} target=${targetPlayerId} reason=not-eligible`);
+      return [];
+    }
+    const startedAt = Date.now();
+    const vote = {
+      room,
+      sourceSession: session,
+      targetSession,
+      starterPlayerId: Number(session.playerId),
+      starterActorId,
+      targetPlayerId,
+      targetActorId,
+      reasonCode,
+      startedAt,
+      eligibleActorIds,
+      threshold: Math.floor(eligibleActorIds.size / 2) + 1,
+      votes: new Map([[starterActorId, true]]),
+      resolving: false,
+      timer: null,
+    };
+    session.kickVoteStartedAt = startedAt;
+    room.kickVote = vote;
+    const started = makeKickVoteEvent(session, targetSession, { yes: 1, no: 0, reasonCode });
+    broadcastKickVoteToPeers(session, started, channel);
+    scheduleRoomKickVoteExpiry(vote, channel);
+    console.log(`[staff] event70 vote started room=${room.name} by=${session.playerId} target=${targetPlayerId}/${targetActorId} reason=${kickVoteReasonName(reasonCode)} eligible=${eligibleActorIds.size} threshold=${vote.threshold} period=${KICK_VOTE_DURATION_MS}ms`);
+    return [started];
+  } finally {
+    if (room.kickVoteAuthorization === authorizationToken) room.kickVoteAuthorization = null;
+  }
+}
+
+async function handleRoomKickVoteBallotRequest(session, data, channel = 0) {
+  const targetPlayerId = Number(htGet(data, 1)?.value || 0);
+  const targetActorId = Number(htGet(data, 5)?.value || 0);
+  const ballot = htGet(data, 2)?.value;
+  const vote = session?.room?.kickVote;
+  const actorId = Number(session?.actorId || 0);
+  if (
+    !vote ||
+    vote.resolving ||
+    targetPlayerId !== vote.targetPlayerId ||
+    targetActorId !== vote.targetActorId ||
+    typeof ballot !== "boolean" ||
+    !vote.eligibleActorIds.has(actorId) ||
+    session.room.players.get(actorId) !== session ||
+    vote.votes.has(actorId)
+  ) {
+    console.log(`[staff] event70 ballot rejected by=${session?.playerId || 0} target=${targetPlayerId}/${targetActorId} reason=contract-or-state`);
+    return [];
+  }
+
+  vote.votes.set(actorId, ballot);
+  const counts = kickVoteCounts(vote);
+  const update = makeKickVoteEvent(session, vote.targetSession, counts);
+  broadcastKickVoteToPeers(session, update, channel);
+  console.log(`[staff] event70 ballot room=${vote.room.name} by=${session.playerId || 0} target=${vote.targetPlayerId} vote=${ballot ? "yes" : "no"} yes=${counts.yes} no=${counts.no} threshold=${vote.threshold}`);
+
+  const remaining = vote.eligibleActorIds.size - vote.votes.size;
+  let decision = null;
+  if (counts.yes >= vote.threshold) decision = true;
+  else if (counts.yes + remaining < vote.threshold) decision = false;
+  if (decision == null) return [update];
+
+  const result = await finishRoomKickVote(vote, decision, channel, "threshold");
+  if (!result) return [update];
+  broadcastKickVoteToPeers(session, result, channel, vote.room);
+  return [update, result];
 }
 
 async function handleStaffInstantKickRequest(session, parsed, channel = 0) {
@@ -10823,6 +11076,22 @@ async function handleStaffInstantKickRequest(session, parsed, channel = 0) {
   scheduleModerationDisconnect(targetSession, "kick", session, "instant-kick", channel);
   console.log(`[staff] event70 accepted by=${session.playerId || 0} role=${normalizeStaffRole(session.staffRole)} target=${targetPlayerId} actor=${targetActorId}`);
   return [started, accepted];
+}
+
+async function handleKickRequest(session, parsed, channel = 0) {
+  const data = eventDataHash(parsed);
+  const reasonEntry = htGet(data, 9);
+  const ballotEntry = htGet(data, 2);
+  if ((reasonEntry == null) === (ballotEntry == null)) {
+    console.log(`[staff] event70 rejected by=${session?.playerId || 0} reason=request-shape`);
+    return [];
+  }
+  if (reasonEntry != null) {
+    const reasonCode = Number(reasonEntry.value || 0);
+    if (reasonCode === 4) return handleStaffInstantKickRequest(session, parsed, channel);
+    return handleRoomKickVoteStartRequest(session, data, channel);
+  }
+  return handleRoomKickVoteBallotRequest(session, data, channel);
 }
 
 function buildBattleChatEvent(session, message, type) {
@@ -11627,6 +11896,24 @@ async function handleMasterEvent(session, parsed) {
       rawClanEventEnvelopeForClient(clanEventCode, clanId, clanEventData?.raw)
     );
 
+    if (clanEventCode === CLAN_EVENT_ADD_EVENT) {
+      // Delete/leave/remove are applied by ClanManager only after this Event209
+      // makes it back to the sender and triggers act=gevnt. Return the sender
+      // echo through the reliable operation response so retries cache Event209
+      // instead of an empty response; peers still receive their direct push.
+      const invalidatedProfiles = invalidateClanProfileCache(clanId);
+      let peerSent = 0;
+      let subjectSent = 0;
+      for (const targetSession of activeMasterSessionList()) {
+        if (targetSession === session) continue;
+        if (!sendReliableToSession(targetSession, event, targetSession.lastChannel || 0)) continue;
+        peerSent += 1;
+        if (subjectUserId > 0 && Number(targetSession.playerId || 0) === subjectUserId) subjectSent += 1;
+      }
+      console.log(`[master-social] clan-event user=${userId} clan=${clanId} code=${clanEventCode} subject=${subjectUserId || 0} sessions=${peerSent + 1} sender=1 subjectSessions=${subjectSent + (subjectUserId === userId ? 1 : 0)} response=1 peers=${peerSent} profileCache=${invalidatedProfiles}`);
+      return [event];
+    }
+
     if (clanEventCode === CLAN_EVENT_CHANGE_ARM) {
       // The owner applies a changed crest only from the incoming Event209. Return
       // that echo from the same reliable operation so retries reuse the cached
@@ -11819,6 +12106,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       console.log(`[state] room join rejected reason=join-superseded requested=${settings.name} player=${session.playerId || "unknown"}`);
       return [rawOperationResponse(255, [], -3, "join-superseded")];
     }
+    if (profile?.accessDenied === true) {
+      const requestedCcid = actorCredentials(actorParam).authId;
+      invalidatePlayerProfileCache(requestedCcid);
+      console.log(`[state] room join rejected reason=access-denied requested=${settings.name} player=${requestedCcid}`);
+      return [rawOperationResponse(255, [], -3, "access-denied")];
+    }
     if (isFallbackBattleProfile(profile)) {
       const requestedCcid = actorCredentials(actorParam).authId;
       console.log(`[state] room join rejected reason=profile-unavailable requested=${settings.name} player=${requestedCcid}`);
@@ -11956,7 +12249,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === 70) {
-    return handleStaffInstantKickRequest(session, parsed, channel);
+    return handleKickRequest(session, parsed, channel);
   }
 
   if (eventCode === 86) {
@@ -12484,6 +12777,7 @@ console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RE
 console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT_QUEUE_MAX}/timeout${BATTLE_EVENT_TIMEOUT_MS}ms moveFlush=${BATTLE_MOVE_FLUSH_MS}ms profileQueue=${PROFILE_LOAD_CONCURRENCY}/${PROFILE_LOAD_QUEUE_MAX} profileCache=${PROFILE_CACHE_MAX}/${PROFILE_CACHE_TTL_MS}ms profileChangeSettle=${PROFILE_CHANGE_SETTLE_MS}ms/track${PROFILE_CHANGE_TRACK_MS}ms catalogCache=${CATALOG_CACHE_TTL_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
+console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);

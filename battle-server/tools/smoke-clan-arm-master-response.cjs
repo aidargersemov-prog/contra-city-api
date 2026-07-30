@@ -94,6 +94,7 @@ globalThis.__battleSmoke = {
   handleMasterEvent,
   makeReliableCommandsForPayload,
   parsePhotonRequest,
+  profileCache,
 };
 `;
 const source = `${fs.readFileSync(serverPath, "utf8")}\n${exportsSource}`;
@@ -102,7 +103,7 @@ new vm.Script(source, { filename: serverPath }).runInContext(sandbox);
 
 async function main() {
   const battle = sandbox.__battleSmoke;
-  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-29-staff-spectator-dev-v286");
+  assert.strictEqual(battle.BUILD_ID, "battle-server-2026-07-30-clan-delete-v292");
 
   // Exact client Event209/ChangeArm request captured in the AWS trace:
   // user=4, clan=2, arm=3, cost=1500.
@@ -136,9 +137,40 @@ async function main() {
   assert(eventLog.includes("response=1"), "ChangeArm must report sender reliable response");
   assert(eventLog.includes("peers=0"), "single-session smoke must not direct-send a duplicate sender echo");
 
-  console.log(`OK build=${battle.BUILD_ID} responses=${responses.length} commands=${commands.length} cache=${session.reliableResponses.get("0:0:77").length}`);
+  // DeleteClanLazy sends ClanEventCode.AddEvent=20 after the HTTP commit.
+  // Reuse the exact client request shape above, changing only event code and
+  // nested subject id; the extra arm-cost field is ignored by AddEvent.
+  const deleteRequest = Buffer.from(request);
+  const codeOffset = deleteRequest.indexOf(Buffer.from("62006900000005", "hex"));
+  assert(codeOffset >= 0, "cannot locate clan event code in captured request");
+  deleteRequest.writeInt32BE(20, codeOffset + 3);
+  const subjectOffset = deleteRequest.indexOf(Buffer.from("69000000006900000003", "hex"));
+  assert(subjectOffset >= 0, "cannot locate nested subject id in captured request");
+  deleteRequest.writeInt32BE(4, subjectOffset + 6);
+
+  battle.profileCache.set("4:key", {
+    loadedAt: Date.now(),
+    profile: { authId: 4, clan: { cid: 2, aid: 3, t: "OLD" } },
+  });
+  const deleteResponses = await battle.handleMasterEvent(session, battle.parsePhotonRequest(deleteRequest));
+  assert.strictEqual(deleteResponses.length, 1, "AddEvent must return one Event209 to its sender");
+  assert.strictEqual(deleteResponses[0][2], 209, "AddEvent sender response must retain Event209");
+  assert.strictEqual(battle.profileCache.has("4:key"), false, "deleted clan profile cache must be invalidated");
+
+  const deleteCommands = deleteResponses.flatMap((payload) => battle.makeReliableCommandsForPayload(session, payload, 0));
+  assert.strictEqual(deleteCommands.length, 1, "AddEvent sender Event209 must produce one reliable command");
+  battle.cacheReliableResponse(session, "0:0:78", deleteCommands);
+  assert.strictEqual(session.reliableResponses.get("0:0:78").length, 1, "AddEvent replay cache must retain Event209");
+
+  const deleteLog = logs.find((line) => line.includes("[master-social] clan-event") && line.includes("code=20"));
+  assert(deleteLog, "AddEvent master log is missing");
+  assert(deleteLog.includes("response=1"), "AddEvent must report sender reliable response");
+  assert(deleteLog.includes("profileCache=1"), "AddEvent must report clan profile invalidation");
+
+  console.log(`OK build=${battle.BUILD_ID} armResponses=${responses.length} deleteResponses=${deleteResponses.length} armCache=${session.reliableResponses.get("0:0:77").length} deleteCache=${session.reliableResponses.get("0:0:78").length}`);
   console.log(`RESPONSE_HEX=${responses[0].toString("hex")}`);
   console.log(eventLog);
+  console.log(deleteLog);
 }
 
 main().catch((error) => {
