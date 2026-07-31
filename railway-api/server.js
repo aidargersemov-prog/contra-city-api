@@ -16,7 +16,7 @@ import {
 } from "./staff-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-30-donate-limited-sets-v73";
+const API_BUILD_ID = "railway-api-2026-07-31-battle-pass-level-one-v74";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1237,7 +1237,7 @@ function wearTextFor(slot, sname) {
 const shopWearCatalog = {
   Hats: ["hat01", "hat02", "hat03", "helm02", "cap01", "cap02", "helm01", "vietnam", "pilothelm", "budenka", "ushmil", "ushanka", "party02", "party01", "english", "indiana02", "indiana01", "indiana03", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag"],
   Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos", "gavaibandana"],
-  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022"],
+  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022" "gavaigloves"],
   Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl02", "singl03", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2", "gavaihoodie"],
   Pants: ["jeans01", "jeans02", "pant01", "pant02", "pant03", "sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai"],
   Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag"],
@@ -1399,7 +1399,7 @@ const restoredAssemblageDefinitions = [
   { id: 36, code: "spy", items: [["Hats", "business"], ["Masks", "businessgoogles"], ["Shirts", "business"], ["Pants", "business"], ["Gloves", "business"], ["Boots", "business"]] },
   { id: 37, code: "contranos", items: [["Heads", "thanos"], ["Masks", "thanos"], ["Shirts", "thanos"], ["Pants", "thanos"], ["Gloves", "thanos"], ["Boots", "thanos"], ["Backpacks", "thanos"]] },
   { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] },
-  { id: 39, code: "gavai", items: [["Hats", "capgavaimag"], ["Masks", "gavaibandana"], ["Shirts", "gavaihoodie"], ["Pants", "shortigavai"], ["Boots", "gavaibootsmag"], ["Backpacks", "popugagavai"]] }
+  { id: 39, code: "gavai", items: [["Hats", "capgavaimag"], ["Masks", "gavaibandana"], ["Shirts", "gavaihoodie"], ["Pants", "shortigavai"], ["Gloves", "gavaigloves"], ["Boots", "gavaibootsmag"], ["Backpacks", "popugagavai"]] }
 ];
 
 const donateWearSetsById = new Map([
@@ -4247,7 +4247,7 @@ function storeEntitlementPayload(row) {
 async function loadStoreEntitlements(client, playerId, lock = false) {
   await client.query(
     `INSERT INTO player_store_entitlements (player_id, battle_pass_level)
-     SELECT id, LEAST(100, GREATEST(1, level))
+     SELECT id, 1
      FROM players
      WHERE id = $1
      ON CONFLICT (player_id) DO NOTHING`,
