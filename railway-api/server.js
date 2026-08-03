@@ -787,9 +787,9 @@ const rebuiltShopWeaponCatalog = [
   { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35 },
   { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
   { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 50, slots: 7, sname: "sr_Arctic", name: "Писец", price: 880, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11 },
-  { id: 23, slots: 7, sname: "sr_steyr", name: "Серп", price: 220, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9 },
-  { id: 70, slots: 7, sname: "sr_arcticb01", name: "Крик", price: 1300, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12 }
+  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 880, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11 },
+  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 220, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9 },
+  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1300, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12 }
 ];
 
 const originalReloadTimeMs = {
