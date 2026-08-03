@@ -22,7 +22,30 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-07-30-clan-delete-v292";
+const BUILD_ID = "battle-server-2026-08-02-voice-opus-reports-v294";
+// Private voice protocol. It is intentionally outside the recovered original
+// contract: original Contra City has no voice client or server events.
+const VOICE_FRAME_EVENT = 68;
+const VOICE_CAPABILITY_EVENT = 69;
+const PLAYER_REPORT_EVENT = 66;
+const VOICE_PROTOCOL_LEGACY = 1;
+const VOICE_PROTOCOL_OPUS = 2;
+const VOICE_PROTOCOL_VERSION = VOICE_PROTOCOL_OPUS;
+const VOICE_CHANNEL = 1;
+const VOICE_FRAME_BYTES = 160; // Legacy v1: 20 ms, 8 kHz, mono, G.711 mu-law.
+const VOICE_OPUS_MAX_FRAME_BYTES = 400; // v2: 20 ms, 16 kHz mono Opus, FEC included.
+const VOICE_RATE_WINDOW_MS = 1000;
+const VOICE_RATE_MAX_FRAMES = 55;
+const VOICE_RATE_MAX_BYTES = VOICE_OPUS_MAX_FRAME_BYTES * VOICE_RATE_MAX_FRAMES;
+const PLAYER_REPORT_COOLDOWN_MS = 90 * 1000;
+const PLAYER_REPORT_TEXT_MAX = 700;
+const PLAYER_REPORT_REASON = Object.freeze({
+  1: "cheats",
+  2: "abuse",
+  3: "voice_abuse",
+  4: "griefing",
+  5: "other",
+});
 const STAFF_ROLE_ORDER = Object.freeze(["none", "helper", "moderator", "admin", "owner", "developer"]);
 const STAFF_ROLE_RANK = Object.freeze({
   none: 0,
@@ -2329,8 +2352,14 @@ function readTypedRaw(buf, offset, forcedType = null) {
   }
   if (type === 0x78) {
     const len = readI32(buf, offset);
-    offset += 4 + len;
-    return { type, value: null, raw: buf.subarray(start, offset), offset };
+    const dataOffset = offset + 4;
+    const dataEnd = dataOffset + len;
+    if (!Number.isInteger(len) || len < 0 || dataEnd > buf.length) {
+      throw new Error(`invalid photon byte-array length=${len} at ${start}`);
+    }
+    value = buf.subarray(dataOffset, dataEnd);
+    offset = dataEnd;
+    return { type, value, raw: buf.subarray(start, offset), offset };
   }
   if (type === 0x61) {
     const count = readU16(buf, offset);
@@ -2839,9 +2868,10 @@ const IMPACT_DOT_DEFINITIONS = [
   { type: IMPACT_TYPE.FROST, min: 2, max: 5, ids: [71], keys: ["ohca_candy2"] },
   { type: IMPACT_TYPE.BLOOD, min: 6, max: 10, ids: [59], keys: ["rl_rpg7b02"] },
   { type: IMPACT_TYPE.BLOOD, min: 3, max: 6, ids: [79, 109], keys: ["mg_aug4_o", "sg_remington"] },
-  { type: IMPACT_TYPE.POISON, min: 3, max: 5, ids: [76], keys: ["mg_aug1_o"] },
+  { type: IMPACT_TYPE.POISON, min: 1, max: 3, ids: [76], keys: ["mg_aug1_o"] },
   { type: IMPACT_TYPE.POISON, min: 4, max: 7, ids: [45], keys: ["gl_milkor_a"] },
   { type: IMPACT_TYPE.POISON, min: 3, max: 6, ids: [75], keys: ["sr_wildcat2"] },
+  { type: IMPACT_TYPE.BLOOD, min: 2, max: 4, ids: [42], keys: ["THCA_Scythe_B"] },
 ].map((definition) => ({
   ...definition,
   ticks: Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS)),
@@ -5847,6 +5877,209 @@ function roomMode(session) {
 
 function isTeamMode(mode) {
   return mode >= 2 && mode !== 16 && mode !== 64;
+}
+
+function isVoiceEvent(parsed) {
+  const eventCode = photonEventCode(parsed);
+  return eventCode === VOICE_FRAME_EVENT || eventCode === VOICE_CAPABILITY_EVENT;
+}
+
+function isSupportedVoiceProtocol(version) {
+  return version === VOICE_PROTOCOL_LEGACY || version === VOICE_PROTOCOL_OPUS;
+}
+
+function voiceMaxFrameBytes(version) {
+  return version === VOICE_PROTOCOL_LEGACY
+    ? VOICE_FRAME_BYTES
+    : VOICE_OPUS_MAX_FRAME_BYTES;
+}
+
+function setVoiceCapability(session, parsed) {
+  const data = eventDataHash(parsed);
+  const version = Number(htGet(data, 1)?.value);
+  const codec = Number(htGet(data, 2)?.value || 0);
+  const valid =
+    version === VOICE_PROTOCOL_LEGACY ||
+    (version === VOICE_PROTOCOL_OPUS && codec === 1);
+  if (!session || !valid) {
+    return false;
+  }
+  if (session.voiceProtocolVersion !== version || session.voiceCodec !== codec) {
+    console.log(`[voice] capable actor=${session.actorId || 0} player=${session.playerId || 0} protocol=${version} codec=${version === VOICE_PROTOCOL_OPUS ? "opus" : "mulaw"}`);
+  }
+  session.voiceProtocolVersion = version;
+  session.voiceCodec = codec;
+  session.voiceCapabilityAt = Date.now();
+  return true;
+}
+
+function readVoiceFrame(parsed) {
+  const data = eventDataHash(parsed);
+  const version = Number(htGet(data, 1)?.value);
+  const sequence = Number(htGet(data, 2)?.value);
+  const frame = htGet(data, 3);
+  if (!isSupportedVoiceProtocol(version) || !Number.isInteger(sequence) || !frame ||
+      frame.type !== 0x78 || !Buffer.isBuffer(frame.value)) {
+    return null;
+  }
+  const frameLength = frame.value.length;
+  const validLength = version === VOICE_PROTOCOL_LEGACY
+    ? frameLength === VOICE_FRAME_BYTES
+    : frameLength > 0 && frameLength <= VOICE_OPUS_MAX_FRAME_BYTES;
+  if (!validLength) return null;
+  return { data, version, sequence, frame: frame.value };
+}
+
+function voiceRateAllows(session, byteLength) {
+  const now = Date.now();
+  let rate = session.voiceRate;
+  if (!rate || now - Number(rate.startedAt || 0) >= VOICE_RATE_WINDOW_MS) {
+    rate = { startedAt: now, frames: 0, bytes: 0, lastDropLogAt: 0 };
+    session.voiceRate = rate;
+  }
+  if (
+    rate.frames >= VOICE_RATE_MAX_FRAMES ||
+    rate.bytes + byteLength > VOICE_RATE_MAX_BYTES
+  ) {
+    if (now - Number(rate.lastDropLogAt || 0) >= VOICE_RATE_WINDOW_MS) {
+      rate.lastDropLogAt = now;
+      console.log(`[voice] rate-drop actor=${session.actorId || 0} frames=${rate.frames} bytes=${rate.bytes}`);
+    }
+    return false;
+  }
+  rate.frames += 1;
+  rate.bytes += byteLength;
+  return true;
+}
+
+function voiceTeamOnly(session) {
+  return !isZombieRoom(session?.room) && isTeamMode(roomMode(session));
+}
+
+function canReceiveVoice(playerSession, sourceProtocolVersion, sourceCodec) {
+  return Boolean(
+    playerSession &&
+    !playerSession.isGuest &&
+    playerSession.gameStateRequested &&
+    Number(playerSession.voiceProtocolVersion) === Number(sourceProtocolVersion) &&
+    Number(playerSession.voiceCodec || 0) === Number(sourceCodec || 0)
+  );
+}
+
+function buildVoiceFrameEvent(session, data) {
+  return rawEvent(VOICE_FRAME_EVENT, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: data.raw },
+  ]);
+}
+
+function broadcastVoiceFrame(session, payload) {
+  const room = session?.room;
+  if (!room?.players?.size || !payload) return 0;
+  const sourceProtocolVersion = Number(session.voiceProtocolVersion);
+  const sourceCodec = Number(session.voiceCodec || 0);
+  const teamOnly = voiceTeamOnly(session);
+  if (teamOnly && ![1, 2].includes(Number(session.team))) return 0;
+  let sent = 0;
+  for (const playerSession of room.players.values()) {
+    if (!canReceiveVoice(playerSession, sourceProtocolVersion, sourceCodec) || playerSession === session) continue;
+    if (teamOnly && Number(playerSession.team) !== Number(session.team)) continue;
+    if (sendUnreliableToSession(playerSession, payload, VOICE_CHANNEL, { forceChannel: true })) {
+      sent += 1;
+    }
+  }
+  return sent;
+}
+
+function handleVoiceCapability(session, parsed) {
+  if (!setVoiceCapability(session, parsed)) {
+    console.log(`[voice] capability ignored actor=${session?.actorId || 0} reason=protocol`);
+  }
+  return [];
+}
+
+function handleVoiceFrame(session, parsed) {
+  if (!session?.room || session.isGuest || !session.gameStateRequested) return [];
+  if (!isSupportedVoiceProtocol(Number(session.voiceProtocolVersion))) return [];
+  const voice = readVoiceFrame(parsed);
+  if (!voice || Number(session.voiceProtocolVersion) !== voice.version) return [];
+  if (!voiceRateAllows(session, voice.frame.length)) return [];
+  const event = buildVoiceFrameEvent(session, voice.data);
+  broadcastVoiceFrame(session, event);
+  return [];
+}
+
+function cleanPlayerReportText(value) {
+  return String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+    .slice(0, PLAYER_REPORT_TEXT_MAX);
+}
+
+function makePlayerReportStatusEvent(session, accepted, status) {
+  return rawEvent(PLAYER_REPORT_EVENT, [
+    { key: 254, value: rawInt(session.actorId) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawInt(1), value: rawByte(accepted ? 1 : 0) },
+        { key: rawInt(2), value: rawString(String(status || "error").slice(0, 48)) },
+      ]),
+    },
+  ]);
+}
+
+function sendPlayerReportStatus(session, accepted, status) {
+  if (!session?.socket || !session?.rinfo) return false;
+  const channel = reliableChannelForSession(session, session.lastChannel || 0);
+  return sendReliableToSession(session, makePlayerReportStatusEvent(session, accepted, status), channel);
+}
+
+function handlePlayerReport(session, parsed) {
+  if (!session?.room || session.isGuest || !session.gameStateRequested) return [];
+  const data = eventDataHash(parsed);
+  const targetActorId = Number(htGet(data, 1)?.value || 0);
+  const reasonCode = Number(htGet(data, 2)?.value || 0);
+  const details = cleanPlayerReportText(htGet(data, 3)?.value);
+  const target = session.room.players.get(targetActorId);
+  const now = Date.now();
+  if (!Number.isInteger(targetActorId) || !target || target === session ||
+      !Number.isInteger(Number(target.playerId)) || Number(target.playerId) <= 0) {
+    sendPlayerReportStatus(session, false, "invalid_target");
+    return [];
+  }
+  if (!PLAYER_REPORT_REASON[reasonCode]) {
+    sendPlayerReportStatus(session, false, "invalid_reason");
+    return [];
+  }
+  if (reasonCode === 5 && details.length < 3) {
+    sendPlayerReportStatus(session, false, "details_required");
+    return [];
+  }
+  if (now - Number(session.playerReportLastAt || 0) < PLAYER_REPORT_COOLDOWN_MS) {
+    sendPlayerReportStatus(session, false, "cooldown");
+    return [];
+  }
+  session.playerReportLastAt = now;
+  postBattleEvent(session, "player_report", {
+    targetPlayerId: Number(target.playerId),
+    targetPlayerName: String(target.playerName || "").slice(0, 80),
+    targetActorId,
+    reportReason: PLAYER_REPORT_REASON[reasonCode],
+    reportDetails: details,
+    eventData: {
+      targetActorId,
+      targetPlayerId: Number(target.playerId),
+      targetPlayerName: String(target.playerName || "").slice(0, 80),
+      reason: PLAYER_REPORT_REASON[reasonCode],
+      details,
+    },
+  }).then((stored) => {
+    sendPlayerReportStatus(session, stored === true, stored === true ? "accepted" : "storage_unavailable");
+  }).catch(() => {
+    sendPlayerReportStatus(session, false, "storage_unavailable");
+  });
+  return [];
 }
 
 function hasTeamScoreMode(mode) {
@@ -11218,7 +11451,7 @@ function emitAchievementEvents(sourceSession, achievements) {
 }
 
 function battleEventPriority(type) {
-  return ["join", "death", "exp", "summary", "matchend", "match-end", "leave"].includes(String(type || "").toLowerCase())
+  return ["join", "death", "exp", "summary", "matchend", "match-end", "leave", "player_report"].includes(String(type || "").toLowerCase())
     ? "high"
     : "normal";
 }
@@ -12249,6 +12482,18 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     return handleBattleChatRequest(session, parsed, channel);
   }
 
+  if (eventCode === VOICE_CAPABILITY_EVENT) {
+    return handleVoiceCapability(session, parsed);
+  }
+
+  if (eventCode === VOICE_FRAME_EVENT) {
+    return handleVoiceFrame(session, parsed);
+  }
+
+  if (eventCode === PLAYER_REPORT_EVENT) {
+    return handlePlayerReport(session, parsed);
+  }
+
   if (eventCode === 70) {
     return handleKickRequest(session, parsed, channel);
   }
@@ -12561,7 +12806,7 @@ async function handleUdp(port, socket, msg, rinfo) {
 
   const commands = [];
   let peerIdOverride = null;
-  let lastChannel = 0;
+  let lastChannel = Number.isInteger(Number(session.lastChannel)) ? Number(session.lastChannel) : 0;
   let transportDisconnected = false;
   const commandCount = msg[3] || 0;
   if (commandCount > MAX_ENET_COMMANDS_PER_PACKET) return;
@@ -12573,8 +12818,6 @@ async function handleUdp(port, socket, msg, rinfo) {
   for (let i = 0; i < commandCount && offset + 12 <= msg.length; i++) {
     const commandType = msg[offset];
     const channel = msg[offset + 1];
-    lastChannel = channel;
-    session.lastChannel = channel;
     const commandLength = readU32(msg, offset + 4);
     const reliableSeq = readU32(msg, offset + 8);
     const commandEnd = offset + commandLength;
@@ -12681,6 +12924,12 @@ async function handleUdp(port, socket, msg, rinfo) {
 
       try {
         const parsed = parsePhotonRequest(payload);
+        // Voice uses its own unreliable channel. Do not let its 50 packets/s
+        // replace the gameplay channel used by delayed reliable repairs.
+        if (!isVoiceEvent(parsed)) {
+          lastChannel = channel;
+          session.lastChannel = channel;
+        }
         if (commandType === 0x08 && ENET_FRAGMENT_TRACE) {
           const eventCode = photonEventCode(parsed);
           console.log(`[fragment] complete actor=${session.actorId} start=${fragment.startSeq} event=${eventCode ?? "init"}${eventCode === 97 ? ` ${describeShotRequest(parsed)}` : ""} bytes=${payload.length} channel=${channel}`);
@@ -12779,6 +13028,7 @@ console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
+console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} frame=${VOICE_FRAME_BYTES}B@${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
