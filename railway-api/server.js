@@ -16,7 +16,7 @@ import {
 } from "./staff-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-31-battle-pass-level-one-v74";
+const API_BUILD_ID = "railway-api-2026-08-02-voice-reports-v75";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -752,9 +752,12 @@ const defaultWeapons = [
 ];
 
 const rebuiltShopWeaponCatalog = [
-  { id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0 },
+  //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0 },
   { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0 },
   { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
+  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
+  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 890, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0 },
+
 
   { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38 },
   { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45 },
@@ -783,7 +786,10 @@ const rebuiltShopWeaponCatalog = [
   { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100 },
   { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35 },
   { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 }
+  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
+  { id: 50, slots: 7, sname: "sr_Arctic", name: "Писец", price: 880, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11 },
+  { id: 23, slots: 7, sname: "sr_steyr", name: "Серп", price: 220, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9 },
+  { id: 70, slots: 7, sname: "sr_arcticb01", name: "Крик", price: 1300, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12 }
 ];
 
 const originalReloadTimeMs = {
@@ -812,15 +818,21 @@ const originalReloadTimeMs = {
   sr_vintorez: 3167,
   sr_sniperrifle03: 3667,
   sr_wildcat1: 2333,
-  sr_wildcat2: 2333
+  sr_wildcat2: 2333,
+  sr_arcticb01: 2650,
+  sr_steyr: 2333,
+  sr_arctic: 2333,
+  thca_scythe_b: 0
 };
 
 // Manual restore balance: no original damage table is available, so these
 // values follow the recovered client formulas plus the gameplay hierarchy.
 const canonicalShopWeaponStats = {
-  ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
-  ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
-
+  ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 35, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
+  ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 35, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
+  ohca_crowbar: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 5, ammo: 0, ammo_tot: 0, smindam: 15, smaxdam: 22, mmindam: 10, mmaxdam: 19, lmindam: 5, lmaxdam: 8 },
+  thca_scythe_b: { rap: 1111, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 12, ammo: 0, ammo_tot: 0, smindam: 34, smaxdam: 48, mmindam: 24, mmaxdam: 36, lmindam: 14, lmaxdam: 24 },
+  
   hg_taurus: { rap: 460, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
   hg_usp: { rap: 240, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
   hg_desertb01: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
@@ -891,7 +903,10 @@ const canonicalShopWeaponStats = {
   sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
   sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
   sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
-  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 }
+  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
+  sr_arcticb01: { rap: 1120, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
+  sr_steyr: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 7, ammo: 1, ammo_tot: 9, smindam: 45, smaxdam: 55, mmindam: 60, mmaxdam: 70, lmindam: 77, lmaxdam: 98 },
+  sr_arctic: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 1, ammo_tot: 11, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
 };
 
 function withCanonicalShopWeaponStats(item) {
@@ -10930,11 +10945,13 @@ function battleEventPlayerName(event, details, playerId, fallbackName = "") {
   const currentId = Number(event?.playerId || 0);
   const killerId = Number(event?.killerPlayerId || details?.killerPlayerId || 0);
   const victimId = Number(event?.victimPlayerId || details?.victimPlayerId || 0);
+  const targetId = Number(event?.targetPlayerId || details?.targetPlayerId || 0);
   const playerData = asBattleJson(event?.playerData);
   const candidates = [
     id === currentId ? event?.playerName : "",
     id === killerId ? (event?.killerPlayerName || details?.killerPlayerName) : "",
     id === victimId ? (event?.victimPlayerName || details?.victimPlayerName) : "",
+    id === targetId ? (event?.targetPlayerName || details?.targetPlayerName) : "",
     id === currentId ? (playerData.name || playerData.n || playerData.un) : "",
     fallbackName
   ];
@@ -11227,6 +11244,9 @@ async function recordBattleEvent(event) {
       await upsertBattleEventPlayer(client, event, details, Number(event.killerPlayerId || details.killerPlayerId || 0));
       await upsertBattleEventPlayer(client, event, details, Number(event.victimPlayerId || details.victimPlayerId || 0));
     }
+    if (type === "player_report") {
+      await upsertBattleEventPlayer(client, event, details, Number(event.targetPlayerId || details.targetPlayerId || 0));
+    }
 
     const room = await client.query(
       `INSERT INTO battle_rooms (
@@ -11278,6 +11298,28 @@ async function recordBattleEvent(event) {
         `INSERT INTO battle_chat_events (room_id, player_id, actor_id, channel, message)
          VALUES ($1, $2, $3, $4, $5)`,
         [roomId, playerId, actorId, Number(event.channel || 0), String(event.message).slice(0, 500)]
+      );
+    } else if (type === "player_report") {
+      const targetPlayerId = Number(event.targetPlayerId || details.targetPlayerId || 0);
+      const targetActorId = Number(event.targetActorId || details.targetActorId || 0);
+      const reportReason = String(event.reportReason || details.reason || "").trim().toLowerCase();
+      const reportDetails = String(event.reportDetails || details.details || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 700);
+      if (!Number.isInteger(targetPlayerId) || targetPlayerId <= 0 || targetPlayerId === playerId) {
+        throw new Error("invalid_player_report_target");
+      }
+      if (!["cheats", "abuse", "voice_abuse", "griefing", "other"].includes(reportReason)) {
+        throw new Error("invalid_player_report_reason");
+      }
+      if (reportReason === "other" && reportDetails.length < 3) {
+        throw new Error("player_report_details_required");
+      }
+      await client.query(
+        `INSERT INTO player_reports (
+           room_id, reporter_player_id, target_player_id, reporter_actor_id, target_actor_id,
+           room_name, map_name, mode, reason, details
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [roomId, playerId, targetPlayerId, actorId, targetActorId, roomName, mapName, mode, reportReason, reportDetails]
       );
     }
 
@@ -12132,7 +12174,7 @@ async function handleHttpRequest(req, res) {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
       schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_staff_roles/player_staff_chat_messages/player_staff_actions"
+        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_reports/player_staff_roles/player_staff_chat_messages/player_staff_actions"
         : "accounts-json",
       accounts: Object.keys(store.accounts).length,
       databaseUrlConfigured: Boolean(DATABASE_URL)
