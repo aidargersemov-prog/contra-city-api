@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-02-voice-opus-reports-v294";
+const BUILD_ID = "battle-server-2026-08-04-map-start-v295";
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
@@ -10687,16 +10687,20 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
 
   if (!options.waitForProfile) {
     queueJoinSettingsPushes(port, socket, rinfo, session, channel);
-    queueJoinStartFallback(port, socket, rinfo, session, channel);
-    queueJoinLateStartPulses(port, socket, rinfo, session, channel);
   } else {
     clearJoinSettingsTimers(session);
     clearJoinStartTimer(session);
     clearJoinLateStartTimers(session);
   }
 
+  // MainNetworkController starts the map only on Photon Event 103.  Event 255
+  // makes the client immediately request GameState (84), which cancels the
+  // old delayed fallback.  Send 103 in the accepted join batch before Event
+  // 255 so the map download always begins exactly once.
+  const startEvent = makeJoinStartEvent(session);
+
   if (selfDelayMs <= 0) {
-    return [response, makeJoinSelfEvent(session)];
+    return [response, startEvent, makeJoinSelfEvent(session)];
   }
 
   if (session.joinSelfEventTimer) {
@@ -10734,8 +10738,6 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
       console.log(`[event] delayed join-self actor=${actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} profileWait=${options.waitForProfile ? "on" : "off"}`);
       sendReliablePayload(socket, rinfo, session, makeJoinSelfEvent(session), channel);
       queueJoinSettingsPushes(port, socket, rinfo, session, channel);
-      queueJoinStartFallback(port, socket, rinfo, session, channel);
-      queueJoinLateStartPulses(port, socket, rinfo, session, channel);
     }, delayMs);
     if (typeof session.joinSelfEventTimer.unref === "function") {
       session.joinSelfEventTimer.unref();
@@ -10743,7 +10745,7 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
   };
   scheduleSelfJoin(selfDelayMs);
 
-  return [response];
+  return [response, startEvent];
 }
 
 function eventDataHash(parsed) {
