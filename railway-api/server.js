@@ -30,8 +30,8 @@ const ASSET_BUNDLE_NAMES = new Set([
   "arenaring.unity3d",
   "bit_map.unity3d",
   "legoturnament.unity3d",
-  "inferno.unity3d",
-  "dashguard.unity3d"
+  "inferno.unity3d"
+  //"dashguard.unity3d"
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
@@ -756,7 +756,7 @@ const rebuiltShopWeaponCatalog = [
   { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0 },
   { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
   { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
-  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 890, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0 },
+  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0 },
 
 
   { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38 },
@@ -787,9 +787,9 @@ const rebuiltShopWeaponCatalog = [
   { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35 },
   { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
   { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 880, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11 },
-  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 220, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9 },
-  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1300, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12 }
+  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11 },
+  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9 },
+  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12 }
 ];
 
 const originalReloadTimeMs = {
@@ -1260,9 +1260,28 @@ const shopWearCatalog = {
   Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka"],
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
-
+const wearPrices = {
+  "Hats:hat01": 129,
+  "Hats:hat02": 139,
+  "Hats:hat03": 139,
+  "Shirts:shirtB09": 400,
+  "Pants:shortB12": 350,
+  "Masks:googB01": 180,
+  "Boots:sneakV2B07": 220,
+  "Gloves:gavaigloves": 22000
+};
 const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
-  names.map((sname, index) => wear(10000 + wearSlotIds[slot] * 1000 + index + 1, wearSlotIds[slot], sname, SHOP_PRICE, slot))
+  names.map((sname, index) => {
+    const price = wearPrices[`${slot}:${sname}`] ?? SHOP_PRICE;
+
+    return wear(
+      10000 + wearSlotIds[slot] * 1000 + index + 1,
+      wearSlotIds[slot],
+      sname,
+      price,
+      slot
+    );
+  })
 );
 
 const wearSlotNamesById = new Map(Object.entries(wearSlotIds).map(([slot, id]) => [Number(id), slot]));
@@ -1548,15 +1567,34 @@ const abilityValueDefinitions = {
   11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] }
 };
 
+// Пять цен: для 1, 2, 3, 4 и 5 уровня способности.
+const abilityPrices = {
+  1: [100, 150, 200, 400, 1200],
+  2: [100, 150, 200, 400, 1200],
+  3: [180, 200, 300, 600, 1800],
+  4: [180, 250, 350, 700, 2100],
+  5: [180, 200, 300, 600, 1800],
+  6: [130, 160, 210, 420, 1260],
+  7: [180, 250, 350, 700, 2100], // Барахольщик
+  8: [130, 160, 210, 420, 1260], // Немаленький
+  9: [130, 160, 210, 420, 1260], // Максималист
+  10: [180, 200, 300, 600, 1800], // Точность по ГОСТу
+  11: [130, 160, 210, 420, 1260] // Охотник за головами
+};
 const abilityCatalog = [];
+
 for (const [abilityIdText, definition] of Object.entries(abilityValueDefinitions)) {
   const abilityId = Number(abilityIdText);
+
   for (let level = 1; level <= definition.values.length; level += 1) {
     abilityCatalog.push({
       i: abilityId,
       l: level,
       v: JSON.stringify([{ t: definition.type, [definition.key]: String(definition.values[level - 1]) }]),
-      sc: cost(5000 + abilityId * 10 + level, 100 * level)
+      sc: cost(
+        5000 + abilityId * 10 + level,
+        abilityPrices[abilityId]?.[level - 1] ?? 100 * level
+      )
     });
   }
 }
@@ -1568,7 +1606,7 @@ const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
 // Client mode 16 initializes the Campaign NPC container. For Dashguard it is
 // presented as the dedicated Event mode rather than the legacy tower UI.
-const MAP_MODE_DASHGUARD_EVENT = 16;
+//const MAP_MODE_DASHGUARD_EVENT = 16;
 const MAP_MODE_ZOMBIE = 64;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
 const DOSSIER_GAME_MODE_STATS = [
@@ -1598,7 +1636,7 @@ const maps = [
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
+  //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
