@@ -5953,6 +5953,24 @@ function setVoiceCapability(session, parsed) {
   return true;
 }
 
+function sendRealtimeUnreliableToSession(targetSession, payload, channel = 0, options = {}) {
+  if (!targetSession?.socket || !targetSession?.rinfo || !payload || targetSession.transportDisconnected) return false;
+  const command = makeSessionUnreliableCommand(targetSession, payload, channel, options);
+  try {
+    // Voice is real-time data. Bypass the shared 15 ms outbox so a stalled
+    // event loop cannot accumulate old audio and burst it ahead of gameplay.
+    return sendPacketNow(
+      targetSession.socket,
+      targetSession.rinfo,
+      targetSession,
+      [command.command],
+    );
+  } catch (error) {
+    console.log(`[warn] peer-send-realtime failed actor=${targetSession.actorId || "?"} seq=${command.seq ?? "?"} reason=${error.message}`);
+    return false;
+  }
+}
+
 function readVoiceFrame(parsed) {
   const data = eventDataHash(parsed);
   const version = Number(htGet(data, 1)?.value);
@@ -6030,7 +6048,7 @@ function broadcastVoiceFrame(session, payload) {
   for (const playerSession of room.players.values()) {
     if (!canReceiveVoice(playerSession, sourceProtocolVersion, sourceCodec) || playerSession === session) continue;
     if (teamOnly && Number(playerSession.team) !== Number(session.team)) continue;
-    if (sendUnreliableToSession(playerSession, payload, VOICE_CHANNEL, { forceChannel: true })) {
+    if (sendRealtimeUnreliableToSession(playerSession, payload, VOICE_CHANNEL, { forceChannel: true })) {
       sent += 1;
     }
   }
