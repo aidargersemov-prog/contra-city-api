@@ -690,14 +690,15 @@ function weapon(id, wt, slot, sname, price, extra = {}) {
     sn: sname,
     name: weaponTitleById[id] || `Оружие ${id}`,
     nlvl: 1,
-    iS: 1,
+    iS: 0,
     sc: cost(1000 + id, price),
     ...extra
   };
 }
 
-function wear(id, wt, sname, price = 50, slot = null) {
+function wear(id, wt, sname, price = 50, slot = null, extra = {}) {
   const text = wearTextFor(slot, sname);
+
   return {
     itype: 3,
     id,
@@ -706,9 +707,10 @@ function wear(id, wt, sname, price = 50, slot = null) {
     sname,
     sn: sname,
     nlvl: 1,
-    iS: 1,
+    iS: 0,
     sc: cost(2000 + id, price),
-    ...text
+    ...text,
+    ...extra
   };
 }
 
@@ -753,43 +755,43 @@ const defaultWeapons = [
 
 const rebuiltShopWeaponCatalog = [
   //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0 },
-  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0 },
-  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
-  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
-  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0 },
+  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0, iS: 0 },
+  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0 },
+  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0 },
+  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0 },
 
 
-  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38 },
-  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45 },
-  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42 },
-  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42 },
-  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108 },
+  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38, iS: 0 },
+  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45, iS: 0 },
+  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42, iS: 0 },
+  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42, iS: 0 },
+  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108, iS: 0 },
 
-  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175 },
-  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210 },
-  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180 },
-  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132 },
-  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168 },
+  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175, iS: 0 },
+  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210, iS: 0 },
+  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180, iS: 0 },
+  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132, iS: 0 },
+  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168, iS: 0 },
 
-  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270 },
-  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300 },
+  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270, iS: 0 },
+  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300, iS: 0 },
 
-  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11 },
-  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 36 },
+  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11, iS: 0 },
+  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 36, iS: 0, nlvl: 101 },
 
-  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16 },
-  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30 },
-  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18 },
-  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9 },
-  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36 },
+  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16, iS: 0 },
+  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30, iS: 0 },
+  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18, iS: 0 },
+  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9, iS: 0 },
+  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36, iS: 0 },
 
-  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100 },
-  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35 },
-  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11 },
-  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9 },
-  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12 }
+  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100, iS: 0 },
+  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35, iS: 0 },
+  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0 },
+  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0 },
+  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11, iS: 0 },
+  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9, iS: 0 },
+  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12, iS: 0 }
 ];
 
 const originalReloadTimeMs = {
@@ -969,7 +971,9 @@ function shopWeaponExtra(item) {
     "sp",
     "speed",
     "launch",
-    "shake"
+    "shake",
+    "nlvl",
+    "iS"
   ]) {
     if (item[key] !== undefined) extra[key] = item[key];
   }
@@ -1261,25 +1265,31 @@ const shopWearCatalog = {
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
 const wearPrices = {
-  "Hats:hat01": 129,
-  "Hats:hat02": 139,
-  "Hats:hat03": 139,
-  "Shirts:shirtB09": 400,
-  "Pants:shortB12": 350,
-  "Masks:googB01": 180,
-  "Boots:sneakV2B07": 220,
-  "Gloves:gavaigloves": 22000
+  "Hats:hat01": { price: 129, nlvl: 1 },
+  "Hats:hat02": { price: 139, nlvl: 3 },
+  "Hats:hat03": { price: 139, nlvl: 5 },
+  "Shirts:shirtB09": { price: 400, nlvl: 5 },
+  "Pants:shortB12": { price: 350, nlvl: 5 },
+  "Masks:googB01": { price: 180, nlvl: 5 },
+  "Boots:sneakV2B07": { price: 220, nlvl: 5 },
+
+  "Gloves:gavaigloves": { price: 22000, nlvl: 299, iS: 0 }
 };
 const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
   names.map((sname, index) => {
-    const price = wearPrices[`${slot}:${sname}`] ?? SHOP_PRICE;
+    const key = `${slot}:${sname}`;
+    const config = wearPrices[key] ?? {};
 
     return wear(
       10000 + wearSlotIds[slot] * 1000 + index + 1,
       wearSlotIds[slot],
       sname,
-      price,
-      slot
+      config.price ?? SHOP_PRICE,
+      slot,
+      {
+        nlvl: config.nlvl ?? 1,
+        iS: config.iS ?? 0
+      }
     );
   })
 );
