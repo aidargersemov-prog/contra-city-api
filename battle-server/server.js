@@ -22,21 +22,26 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-04-voice-safe-dispatch-v296";
+const BUILD_ID = "battle-server-2026-08-04-voice-opus40-v297";
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
 const VOICE_CAPABILITY_EVENT = 69;
 const PLAYER_REPORT_EVENT = 66;
 const VOICE_PROTOCOL_LEGACY = 1;
-const VOICE_PROTOCOL_OPUS = 2;
+const VOICE_PROTOCOL_OPUS_V2 = 2;
+const VOICE_PROTOCOL_OPUS = 3;
 const VOICE_PROTOCOL_VERSION = VOICE_PROTOCOL_OPUS;
-const VOICE_PROTOCOL_SIGNATURE = "cc-voice-v2";
+const VOICE_PROTOCOL_SIGNATURE_V2 = "cc-voice-v2";
+const VOICE_PROTOCOL_SIGNATURE = "cc-voice-v3";
 const VOICE_CHANNEL = 1;
 const VOICE_FRAME_BYTES = 160; // Legacy v1: 20 ms, 8 kHz, mono, G.711 mu-law.
-const VOICE_OPUS_MAX_FRAME_BYTES = 400; // v2: 20 ms, 16 kHz mono Opus, FEC included.
+const VOICE_OPUS_MAX_FRAME_BYTES = 400; // v2/v3: 16 kHz mono Opus, FEC included.
+const VOICE_OPUS_V2_FRAME_MS = 20;
+const VOICE_OPUS_FRAME_MS = 40;
 const VOICE_RATE_WINDOW_MS = 1000;
-const VOICE_RATE_MAX_FRAMES = 55;
+const VOICE_RATE_MAX_FRAMES_V2 = 55;
+const VOICE_RATE_MAX_FRAMES = 30;
 const VOICE_RATE_MAX_BYTES = VOICE_OPUS_MAX_FRAME_BYTES * VOICE_RATE_MAX_FRAMES;
 const PLAYER_REPORT_COOLDOWN_MS = 90 * 1000;
 const PLAYER_REPORT_TEXT_MAX = 700;
@@ -5889,7 +5894,9 @@ function isVoiceEvent(parsed) {
 }
 
 function isSupportedVoiceProtocol(version) {
-  return version === VOICE_PROTOCOL_LEGACY || version === VOICE_PROTOCOL_OPUS;
+  return version === VOICE_PROTOCOL_LEGACY ||
+    version === VOICE_PROTOCOL_OPUS_V2 ||
+    version === VOICE_PROTOCOL_OPUS;
 }
 
 function voiceMaxFrameBytes(version) {
@@ -5898,27 +5905,50 @@ function voiceMaxFrameBytes(version) {
     : VOICE_OPUS_MAX_FRAME_BYTES;
 }
 
+function voiceFrameMilliseconds(version) {
+  if (version === VOICE_PROTOCOL_OPUS) return VOICE_OPUS_FRAME_MS;
+  return VOICE_OPUS_V2_FRAME_MS;
+}
+
+function voiceSignatureForVersion(version) {
+  if (version === VOICE_PROTOCOL_OPUS) return VOICE_PROTOCOL_SIGNATURE;
+  if (version === VOICE_PROTOCOL_OPUS_V2) return VOICE_PROTOCOL_SIGNATURE_V2;
+  return "";
+}
+
 function hasVoiceProtocolSignature(data, version) {
   if (version === VOICE_PROTOCOL_LEGACY) return true;
-  return version === VOICE_PROTOCOL_OPUS &&
-    String(htGet(data, 4)?.value || "") === VOICE_PROTOCOL_SIGNATURE;
+  const expected = voiceSignatureForVersion(version);
+  return Boolean(expected) && String(htGet(data, 4)?.value || "") === expected;
+}
+
+function hasKnownVoiceSignature(data) {
+  const signature = String(htGet(data, 4)?.value || "");
+  return signature === VOICE_PROTOCOL_SIGNATURE || signature === VOICE_PROTOCOL_SIGNATURE_V2;
 }
 
 function setVoiceCapability(session, parsed) {
   const data = eventDataHash(parsed);
   const version = Number(htGet(data, 1)?.value);
   const codec = Number(htGet(data, 2)?.value || 0);
+  const frameMillisecondsField = htGet(data, 5);
+  const frameMilliseconds = Number(frameMillisecondsField?.value || voiceFrameMilliseconds(version));
   const valid =
     version === VOICE_PROTOCOL_LEGACY ||
-    (version === VOICE_PROTOCOL_OPUS && codec === 1 && hasVoiceProtocolSignature(data, version));
+    ((version === VOICE_PROTOCOL_OPUS_V2 || version === VOICE_PROTOCOL_OPUS) &&
+      codec === 1 && hasVoiceProtocolSignature(data, version) &&
+      frameMilliseconds === voiceFrameMilliseconds(version) &&
+      (version !== VOICE_PROTOCOL_OPUS || Boolean(frameMillisecondsField)));
   if (!session || !valid) {
     return false;
   }
   if (session.voiceProtocolVersion !== version || session.voiceCodec !== codec) {
-    console.log(`[voice] capable actor=${session.actorId || 0} player=${session.playerId || 0} protocol=${version} codec=${version === VOICE_PROTOCOL_OPUS ? "opus" : "mulaw"}`);
+    const codecName = version === VOICE_PROTOCOL_LEGACY ? "mulaw" : `opus${frameMilliseconds}`;
+    console.log(`[voice] capable actor=${session.actorId || 0} player=${session.playerId || 0} protocol=${version} codec=${codecName}`);
   }
   session.voiceProtocolVersion = version;
   session.voiceCodec = codec;
+  session.voiceFrameMilliseconds = frameMilliseconds;
   session.voiceCapabilityAt = Date.now();
   return true;
 }
@@ -5928,7 +5958,11 @@ function readVoiceFrame(parsed) {
   const version = Number(htGet(data, 1)?.value);
   const sequence = Number(htGet(data, 2)?.value);
   const frame = htGet(data, 3);
+  const frameMillisecondsField = htGet(data, 5);
+  const frameMilliseconds = Number(frameMillisecondsField?.value || voiceFrameMilliseconds(version));
   if (!isSupportedVoiceProtocol(version) || !hasVoiceProtocolSignature(data, version) ||
+      frameMilliseconds !== voiceFrameMilliseconds(version) ||
+      (version === VOICE_PROTOCOL_OPUS && !frameMillisecondsField) ||
       !Number.isInteger(sequence) || !frame ||
       frame.type !== 0x78 || !Buffer.isBuffer(frame.value)) {
     return null;
@@ -5938,20 +5972,21 @@ function readVoiceFrame(parsed) {
     ? frameLength === VOICE_FRAME_BYTES
     : frameLength > 0 && frameLength <= VOICE_OPUS_MAX_FRAME_BYTES;
   if (!validLength) return null;
-  return { data, version, sequence, frame: frame.value };
+  return { data, version, sequence, frameMilliseconds, frame: frame.value };
 }
 
-function voiceRateAllows(session, byteLength) {
+function voiceRateAllows(session, byteLength, version) {
   const now = Date.now();
   let rate = session.voiceRate;
   if (!rate || now - Number(rate.startedAt || 0) >= VOICE_RATE_WINDOW_MS) {
     rate = { startedAt: now, frames: 0, bytes: 0, lastDropLogAt: 0 };
     session.voiceRate = rate;
   }
-  if (
-    rate.frames >= VOICE_RATE_MAX_FRAMES ||
-    rate.bytes + byteLength > VOICE_RATE_MAX_BYTES
-  ) {
+  const maxFrames = version === VOICE_PROTOCOL_OPUS ? VOICE_RATE_MAX_FRAMES : VOICE_RATE_MAX_FRAMES_V2;
+  const maxBytes = version === VOICE_PROTOCOL_OPUS
+    ? VOICE_RATE_MAX_BYTES
+    : VOICE_OPUS_MAX_FRAME_BYTES * VOICE_RATE_MAX_FRAMES_V2;
+  if (rate.frames >= maxFrames || rate.bytes + byteLength > maxBytes) {
     if (now - Number(rate.lastDropLogAt || 0) >= VOICE_RATE_WINDOW_MS) {
       rate.lastDropLogAt = now;
       console.log(`[voice] rate-drop actor=${session.actorId || 0} frames=${rate.frames} bytes=${rate.bytes}`);
@@ -6014,7 +6049,7 @@ function handleVoiceFrame(session, parsed) {
   if (!isSupportedVoiceProtocol(Number(session.voiceProtocolVersion))) return [];
   const voice = readVoiceFrame(parsed);
   if (!voice || Number(session.voiceProtocolVersion) !== voice.version) return [];
-  if (!voiceRateAllows(session, voice.frame.length)) return [];
+  if (!voiceRateAllows(session, voice.frame.length, voice.version)) return [];
   const event = buildVoiceFrameEvent(session, voice.data);
   broadcastVoiceFrame(session, event);
   return [];
@@ -6028,6 +6063,7 @@ function cleanPlayerReportText(value) {
 }
 
 function makePlayerReportStatusEvent(session, accepted, status) {
+  const signature = voiceSignatureForVersion(Number(session?.voiceProtocolVersion)) || VOICE_PROTOCOL_SIGNATURE;
   return rawEvent(PLAYER_REPORT_EVENT, [
     { key: 254, value: rawInt(session.actorId) },
     {
@@ -6035,7 +6071,7 @@ function makePlayerReportStatusEvent(session, accepted, status) {
       value: rawHashtable([
         { key: rawInt(1), value: rawByte(accepted ? 1 : 0) },
         { key: rawInt(2), value: rawString(String(status || "error").slice(0, 48)) },
-        { key: rawInt(4), value: rawString(VOICE_PROTOCOL_SIGNATURE) },
+        { key: rawInt(4), value: rawString(signature) },
       ]),
     },
   ]);
@@ -6050,7 +6086,7 @@ function sendPlayerReportStatus(session, accepted, status) {
 function handlePlayerReport(session, parsed) {
   if (!session?.room || session.isGuest || !session.gameStateRequested) return [];
   const data = eventDataHash(parsed);
-  if (!hasVoiceProtocolSignature(data, VOICE_PROTOCOL_OPUS)) return [];
+  if (!hasKnownVoiceSignature(data)) return [];
   const targetActorId = Number(htGet(data, 1)?.value || 0);
   const reasonCode = Number(htGet(data, 2)?.value || 0);
   const details = cleanPlayerReportText(htGet(data, 3)?.value);
@@ -13041,7 +13077,7 @@ console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
-console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} frame=${VOICE_FRAME_BYTES}B@${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
+console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} packet=${VOICE_OPUS_FRAME_MS}ms max=${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
