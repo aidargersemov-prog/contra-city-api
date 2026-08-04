@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-04-map-start-v295";
+const BUILD_ID = "battle-server-2026-08-04-voice-safe-dispatch-v296";
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
@@ -31,6 +31,7 @@ const PLAYER_REPORT_EVENT = 66;
 const VOICE_PROTOCOL_LEGACY = 1;
 const VOICE_PROTOCOL_OPUS = 2;
 const VOICE_PROTOCOL_VERSION = VOICE_PROTOCOL_OPUS;
+const VOICE_PROTOCOL_SIGNATURE = "cc-voice-v2";
 const VOICE_CHANNEL = 1;
 const VOICE_FRAME_BYTES = 160; // Legacy v1: 20 ms, 8 kHz, mono, G.711 mu-law.
 const VOICE_OPUS_MAX_FRAME_BYTES = 400; // v2: 20 ms, 16 kHz mono Opus, FEC included.
@@ -5881,7 +5882,10 @@ function isTeamMode(mode) {
 
 function isVoiceEvent(parsed) {
   const eventCode = photonEventCode(parsed);
-  return eventCode === VOICE_FRAME_EVENT || eventCode === VOICE_CAPABILITY_EVENT;
+  if (eventCode !== VOICE_FRAME_EVENT && eventCode !== VOICE_CAPABILITY_EVENT) return false;
+  const data = eventDataHash(parsed);
+  const version = Number(htGet(data, 1)?.value);
+  return hasVoiceProtocolSignature(data, version);
 }
 
 function isSupportedVoiceProtocol(version) {
@@ -5894,13 +5898,19 @@ function voiceMaxFrameBytes(version) {
     : VOICE_OPUS_MAX_FRAME_BYTES;
 }
 
+function hasVoiceProtocolSignature(data, version) {
+  if (version === VOICE_PROTOCOL_LEGACY) return true;
+  return version === VOICE_PROTOCOL_OPUS &&
+    String(htGet(data, 4)?.value || "") === VOICE_PROTOCOL_SIGNATURE;
+}
+
 function setVoiceCapability(session, parsed) {
   const data = eventDataHash(parsed);
   const version = Number(htGet(data, 1)?.value);
   const codec = Number(htGet(data, 2)?.value || 0);
   const valid =
     version === VOICE_PROTOCOL_LEGACY ||
-    (version === VOICE_PROTOCOL_OPUS && codec === 1);
+    (version === VOICE_PROTOCOL_OPUS && codec === 1 && hasVoiceProtocolSignature(data, version));
   if (!session || !valid) {
     return false;
   }
@@ -5918,7 +5928,8 @@ function readVoiceFrame(parsed) {
   const version = Number(htGet(data, 1)?.value);
   const sequence = Number(htGet(data, 2)?.value);
   const frame = htGet(data, 3);
-  if (!isSupportedVoiceProtocol(version) || !Number.isInteger(sequence) || !frame ||
+  if (!isSupportedVoiceProtocol(version) || !hasVoiceProtocolSignature(data, version) ||
+      !Number.isInteger(sequence) || !frame ||
       frame.type !== 0x78 || !Buffer.isBuffer(frame.value)) {
     return null;
   }
@@ -6024,6 +6035,7 @@ function makePlayerReportStatusEvent(session, accepted, status) {
       value: rawHashtable([
         { key: rawInt(1), value: rawByte(accepted ? 1 : 0) },
         { key: rawInt(2), value: rawString(String(status || "error").slice(0, 48)) },
+        { key: rawInt(4), value: rawString(VOICE_PROTOCOL_SIGNATURE) },
       ]),
     },
   ]);
@@ -6038,6 +6050,7 @@ function sendPlayerReportStatus(session, accepted, status) {
 function handlePlayerReport(session, parsed) {
   if (!session?.room || session.isGuest || !session.gameStateRequested) return [];
   const data = eventDataHash(parsed);
+  if (!hasVoiceProtocolSignature(data, VOICE_PROTOCOL_OPUS)) return [];
   const targetActorId = Number(htGet(data, 1)?.value || 0);
   const reasonCode = Number(htGet(data, 2)?.value || 0);
   const details = cleanPlayerReportText(htGet(data, 3)?.value);
@@ -10687,20 +10700,16 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
 
   if (!options.waitForProfile) {
     queueJoinSettingsPushes(port, socket, rinfo, session, channel);
+    queueJoinStartFallback(port, socket, rinfo, session, channel);
+    queueJoinLateStartPulses(port, socket, rinfo, session, channel);
   } else {
     clearJoinSettingsTimers(session);
     clearJoinStartTimer(session);
     clearJoinLateStartTimers(session);
   }
 
-  // MainNetworkController starts the map only on Photon Event 103.  Event 255
-  // makes the client immediately request GameState (84), which cancels the
-  // old delayed fallback.  Send 103 in the accepted join batch before Event
-  // 255 so the map download always begins exactly once.
-  const startEvent = makeJoinStartEvent(session);
-
   if (selfDelayMs <= 0) {
-    return [response, startEvent, makeJoinSelfEvent(session)];
+    return [response, makeJoinSelfEvent(session)];
   }
 
   if (session.joinSelfEventTimer) {
@@ -10738,6 +10747,8 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
       console.log(`[event] delayed join-self actor=${actorId} delay=${delayMs}ms actorRaw=${session.actorRaw?.length || 0} profileWait=${options.waitForProfile ? "on" : "off"}`);
       sendReliablePayload(socket, rinfo, session, makeJoinSelfEvent(session), channel);
       queueJoinSettingsPushes(port, socket, rinfo, session, channel);
+      queueJoinStartFallback(port, socket, rinfo, session, channel);
+      queueJoinLateStartPulses(port, socket, rinfo, session, channel);
     }, delayMs);
     if (typeof session.joinSelfEventTimer.unref === "function") {
       session.joinSelfEventTimer.unref();
@@ -10745,7 +10756,7 @@ function buildJoinAccepted(port, socket, rinfo, session, channel = 0, actorListR
   };
   scheduleSelfJoin(selfDelayMs);
 
-  return [response, startEvent];
+  return [response];
 }
 
 function eventDataHash(parsed) {
@@ -13030,7 +13041,7 @@ console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
-console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} frame=${VOICE_FRAME_BYTES}B@${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
+console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} frame=${VOICE_FRAME_BYTES}B@${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
