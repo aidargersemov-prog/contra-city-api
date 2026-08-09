@@ -14,9 +14,15 @@ import {
   staffAjaxPayload,
   staffProfilePayload,
 } from "./staff-system.js";
+import {
+  SUMMER_CASE_REWARDS,
+  TROPICAL_CASE_REWARDS,
+  rollSummerCaseReward,
+  rollTropicalCaseReward,
+} from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-02-voice-reports-v75";
+const API_BUILD_ID = "railway-api-2026-08-09-case-choice-v78";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -37,6 +43,7 @@ const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://dii1ba1dxl2lq.cloudfront.net").replace(/\/+$/, "");
 const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
+const SUMMER_CASE_ACCESS_TTL_MS = 10 * 60 * 1000;
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);
@@ -329,6 +336,9 @@ function allowPlayerFacingOrigin(req, pathname) {
 
 function requestRatePolicy(pathname) {
   if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
+  if (pathname === "/battle-pass/case/open" || pathname === "/battle-pass/case/resolve") {
+    return { windowMs: 60000, limit: 120 };
+  }
   if (pathname === "/admin/logs/auth/login") return { windowMs: 15 * 60 * 1000, limit: 20 };
   if (pathname.startsWith("/admin/promocodes")) return { windowMs: 60000, limit: 120 };
   if (pathname.startsWith("/bot/telegram")) {
@@ -3023,13 +3033,13 @@ async function accountFromRequestUnchecked(url) {
   return resolved;
 }
 
-async function activePlayerBan(playerId) {
+async function activePlayerBan(playerId, executor = pgPool) {
   const id = Number(playerId || 0);
-  if (!pgPool || !Number.isInteger(id) || id <= 0) return null;
+  if (!executor?.query || !Number.isInteger(id) || id <= 0) return null;
   const now = Date.now();
   const cached = playerBanCache.get(id);
   if (cached && now - cached.loadedAt < PLAYER_BAN_CACHE_TTL_MS) return cached.ban;
-  const result = await pgPool.query(
+  const result = await executor.query(
     `SELECT id, reason, expires_at
      FROM admin_punishments
      WHERE player_id = $1
@@ -4443,7 +4453,10 @@ function storeEntitlementPayload(row) {
     battlePassPremium: Boolean(row.battle_pass_premium),
     battlePassPremiumPlus: Boolean(row.battle_pass_premium_plus),
     tropicalCases: Number(row.tropical_cases || 0),
-    summerCases: Number(row.summer_cases || 0)
+    summerCases: Number(row.summer_cases || 0),
+    specialCaseFragments: Number(row.special_case_fragments || 0),
+    summerCaseProgress: Number(row.special_case_fragments || row.summer_case_progress || 0),
+    tropicalCaseProgress: Number(row.special_case_fragments || row.tropical_case_progress || 0)
   };
 }
 
@@ -4464,6 +4477,665 @@ async function loadStoreEntitlements(client, playerId, lock = false) {
     [playerId]
   );
   return result.rows[0] || null;
+}
+
+function summerCaseAccessSignature(payload, accountKey) {
+  return crypto
+    .createHmac("sha256", `${DEFAULT_KEY}\0${String(accountKey || "")}`)
+    .update(payload, "utf8")
+    .digest("base64url");
+}
+
+function issueSummerCaseAccessToken(account, now = Date.now()) {
+  const expiresAt = now + SUMMER_CASE_ACCESS_TTL_MS;
+  const payload = `v1:${Number(account.id)}:${expiresAt}`;
+  const encoded = Buffer.from(payload, "utf8").toString("base64url");
+  const signature = summerCaseAccessSignature(payload, account.key);
+  return { token: `${encoded}.${signature}`, expiresAt };
+}
+
+function parseSummerCaseAccessToken(value, now = Date.now()) {
+  const token = String(value || "").trim();
+  const parts = token.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  let payload;
+  try {
+    payload = Buffer.from(parts[0], "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+  const match = /^v1:(\d+):(\d+)$/.exec(payload);
+  if (!match) return null;
+  const playerId = Number(match[1]);
+  const expiresAt = Number(match[2]);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0 ||
+      !Number.isSafeInteger(expiresAt) || expiresAt <= now) {
+    return null;
+  }
+  return { token, payload, signature: parts[1], playerId, expiresAt };
+}
+
+function verifyParsedSummerCaseAccessToken(parsed, accountKey) {
+  return Boolean(parsed) && safeTokenEquals(
+    parsed.signature,
+    summerCaseAccessSignature(parsed.payload, accountKey)
+  );
+}
+
+function battlePassCaseAccessPayload(account, requestOrigin = null) {
+  const access = issueSummerCaseAccessToken(account);
+  const origin = String(requestOrigin || PUBLIC_BASE_URL).replace(/\/+$/, "");
+  return {
+    url: `${origin}/battle-pass/case/open`,
+    resolveUrl: `${origin}/battle-pass/case/resolve`,
+    token: access.token,
+    expiresAt: new Date(access.expiresAt).toISOString()
+  };
+}
+
+function normalizeSummerCaseRequestId(value) {
+  const requestId = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
+    ? requestId
+    : "";
+}
+
+function caseOpenConfig(caseKind) {
+  if (caseKind === "summer") {
+    return {
+      kind: "summer",
+      title: "кейс лета",
+      rewards: SUMMER_CASE_REWARDS,
+      roll: rollSummerCaseReward,
+      stockColumn: "summer_cases",
+      stockPayloadKey: "summerCases"
+    };
+  }
+  if (caseKind === "tropical") {
+    return {
+      kind: "tropical",
+      title: "тропический кейс",
+      rewards: TROPICAL_CASE_REWARDS,
+      roll: rollTropicalCaseReward,
+      stockColumn: "tropical_cases",
+      stockPayloadKey: "tropicalCases"
+    };
+  }
+  return null;
+}
+
+function caseGrantCatalogItem(grant) {
+  if (grant?.kind === "wear") {
+    return clone(findWearCatalogItem(grant.slot, grant.sname));
+  }
+  if (grant?.kind === "weapon") {
+    const item = canonicalWeaponsById.get(Number(grant.id));
+    if (!item) throw new Error(`Case weapon not found: ${grant.id}`);
+    return clone(item);
+  }
+  return null;
+}
+
+function caseRewardCatalogItems(reward) {
+  const grants = reward?.grant?.kind === "bundle"
+    ? reward.grant.items
+    : [reward?.grant];
+  return (grants || [])
+    .map(caseGrantCatalogItem)
+    .filter(Boolean);
+}
+
+function caseDismantleYield(rarity) {
+  const ranges = rarity === "common"
+    ? { coins: [150, 300], experience: [150, 300], fragments: [10, 20] }
+    : (rarity === "epic"
+      ? { coins: [750, 1500], experience: [750, 1500], fragments: [50, 100] }
+      : { coins: [2000, 4000], experience: [2000, 4000], fragments: [200, 400] });
+  return {
+    coins: crypto.randomInt(ranges.coins[0], ranges.coins[1] + 1),
+    experience: crypto.randomInt(ranges.experience[0], ranges.experience[1] + 1),
+    fragments: crypto.randomInt(ranges.fragments[0], ranges.fragments[1] + 1)
+  };
+}
+
+function caseDropPayload(reward, awardedItems = [], chanceBasisPoints = 0) {
+  const itemKeys = awardedItems.map(inventoryItemKey);
+  const payload = {
+    key: reward.key,
+    name: reward.name,
+    rarity: reward.rarity,
+    kind: reward.grant.kind,
+    chanceBasisPoints: Number(chanceBasisPoints),
+    itemKeys,
+    dismantle: caseDismantleYield(reward.rarity),
+    resolution: null
+  };
+  if (itemKeys.length === 1) payload.itemKey = itemKeys[0];
+  if (["coins", "experience", "special_fragments", "case_stock"].includes(reward.grant.kind)) {
+    payload.amount = Number(reward.grant.amount);
+  }
+  if (reward.grant.kind === "case_stock") payload.caseKind = reward.grant.caseKind;
+  return payload;
+}
+
+function caseOpeningResolutionData(value) {
+  const parsed = jsonValue(value, {});
+  const decisions = parsed.decisions && typeof parsed.decisions === "object"
+    ? parsed.decisions
+    : {};
+  return { ...parsed, decisions };
+}
+
+function caseOpeningPayload(resultData, resolutionData) {
+  const result = jsonValue(resultData, {});
+  const opening = result.caseOpening && typeof result.caseOpening === "object"
+    ? result.caseOpening
+    : null;
+  if (!opening || !Array.isArray(opening.drops)) return null;
+  const resolution = caseOpeningResolutionData(resolutionData);
+  const legacyDecision = resolution.legacyGranted
+    ? { action: "claim", legacyGranted: true, resolvedAt: resolution.legacyGrantedAt || null }
+    : null;
+  const drops = opening.drops.map((drop, index) => ({
+    ...drop,
+    resolution: resolution.decisions[String(index)] || legacyDecision
+  }));
+  const resolvedCount = drops.filter((drop) => drop.resolution).length;
+  return {
+    ...opening,
+    drops,
+    resolvedCount,
+    pendingCount: drops.length - resolvedCount,
+    completed: resolvedCount === drops.length
+  };
+}
+
+async function pendingCaseOpeningForPlayer(client, playerId) {
+  const result = await client.query(
+    `SELECT result_data, resolution_data
+     FROM player_case_openings
+     WHERE player_id = $1 AND resolved_at IS NULL
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [Number(playerId)]
+  );
+  const row = result.rows[0] || null;
+  return row ? caseOpeningPayload(row.result_data, row.resolution_data) : null;
+}
+
+async function openBattlePassCase(body = {}) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const parsedAccess = parseSummerCaseAccessToken(body.token);
+  const requestId = normalizeSummerCaseRequestId(body.requestId);
+  const caseKind = String(body.caseKind || "summer");
+  const config = caseOpenConfig(caseKind);
+  const amount = Number(body.amount || 1);
+  if (!parsedAccess) return { ok: false, status: 403, error: "case_access_invalid" };
+  if (!requestId || !config || ![1, 10].includes(amount)) {
+    return { ok: false, status: 400, error: "case_open_request_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      `SELECT id, name, cckey, money, level, exp
+       FROM players
+       WHERE id = $1
+       FOR UPDATE`,
+      [parsedAccess.playerId]
+    );
+    const player = playerResult.rows[0] || null;
+    if (!player || !verifyParsedSummerCaseAccessToken(parsedAccess, player.cckey)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "case_access_invalid" };
+    }
+    if (await activePlayerBan(parsedAccess.playerId, client)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "account_banned" };
+    }
+
+    const state = await loadStoreEntitlements(client, parsedAccess.playerId, true);
+    if (!state) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 500, error: "store_entitlement_unavailable" };
+    }
+
+    const previousResult = await client.query(
+      `SELECT case_kind, case_amount, result_data, resolution_data
+       FROM player_case_openings
+       WHERE player_id = $1 AND request_id = $2`,
+      [parsedAccess.playerId, requestId]
+    );
+    const previous = previousResult.rows[0] || null;
+    if (previous) {
+      if (String(previous.case_kind) !== caseKind || Number(previous.case_amount) !== amount) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "case_request_conflict" };
+      }
+      const caseOpening = caseOpeningPayload(previous.result_data, previous.resolution_data);
+      await client.query("COMMIT");
+      return {
+        ...jsonValue(previous.result_data, {}),
+        caseOpening,
+        battlePass: storeEntitlementPayload(state),
+        replayed: true
+      };
+    }
+
+    const pendingOpening = await pendingCaseOpeningForPlayer(client, parsedAccess.playerId);
+    if (pendingOpening) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: "case_opening_pending",
+        battlePass: storeEntitlementPayload(state),
+        caseOpening: pendingOpening
+      };
+    }
+
+    const stockBefore = Number(state[config.stockColumn] || 0);
+    if (stockBefore < amount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: `${caseKind}_case_stock_insufficient` };
+    }
+
+    const openingResult = await client.query(
+      `INSERT INTO player_case_openings (
+         player_id, request_id, case_kind, case_amount, result_data
+       )
+       VALUES ($1, $2, $3, $4, '{}'::jsonb)
+       RETURNING id`,
+      [parsedAccess.playerId, requestId, caseKind, amount]
+    );
+    const openingId = Number(openingResult.rows[0].id);
+
+    const rewardItems = new Map();
+    for (const reward of config.rewards) {
+      const items = caseRewardCatalogItems(reward);
+      if (items.length) rewardItems.set(reward.key, items);
+    }
+    const uniqueItemKeys = [...new Set(
+      [...rewardItems.values()].flat().map(inventoryItemKey)
+    )];
+    const ownedResult = await client.query(
+      `SELECT item_key
+       FROM player_inventory
+       WHERE player_id = $1 AND item_key = ANY($2::text[])`,
+      [parsedAccess.playerId, uniqueItemKeys]
+    );
+    const unavailableItemKeys = new Set(
+      ownedResult.rows.map((row) => String(row.item_key))
+    );
+
+    const drops = [];
+    const chanceBasisPoints = [];
+    for (let index = 0; index < amount; index += 1) {
+      const rolled = config.roll({
+        isAvailable: (reward) => {
+          const items = rewardItems.get(reward.key) || [];
+          return !items.length || items.some(
+            item => !unavailableItemKeys.has(inventoryItemKey(item))
+          );
+        }
+      });
+      const reward = rolled.reward;
+      const selectedItems = (rewardItems.get(reward.key) || []).filter(
+        item => !unavailableItemKeys.has(inventoryItemKey(item))
+      );
+      const rolledChanceBasisPoints = Number(
+        rolled.selectedTierChanceBasisPoints ??
+        rolled.legendaryChanceBasisPoints ??
+        rolled.bundleChanceBasisPoints ??
+        0
+      );
+      chanceBasisPoints.push(rolledChanceBasisPoints);
+      drops.push(caseDropPayload(reward, selectedItems, rolledChanceBasisPoints));
+      if (selectedItems.length) {
+        for (const item of selectedItems) {
+          const itemKey = inventoryItemKey(item);
+          unavailableItemKeys.add(itemKey);
+        }
+      }
+    }
+
+    const stateResult = await client.query(
+      `UPDATE player_store_entitlements
+       SET ${config.stockColumn} = ${config.stockColumn} - $2,
+           updated_at = now()
+       WHERE player_id = $1
+       RETURNING *`,
+      [parsedAccess.playerId, amount]
+    );
+    const battlePass = storeEntitlementPayload(stateResult.rows[0]);
+    const response = {
+      ok: true,
+      battlePass,
+      caseOpening: {
+        requestId,
+        caseKind,
+        amount,
+        drops,
+        chanceBasisPoints,
+        resolvedCount: 0,
+        pendingCount: drops.length,
+        completed: false
+      }
+    };
+    await client.query(
+      `UPDATE player_case_openings
+       SET result_data = $2::jsonb
+       WHERE id = $1`,
+      [openingId, JSON.stringify(response)]
+    );
+    await auditGameEvent(client, {
+      playerId: parsedAccess.playerId,
+      playerName: String(player.name || ""),
+      eventType: `${caseKind}_case_opened`,
+      category: "economy",
+      severity: drops.some((drop) => ["bundle", "legendary"].includes(drop.rarity)) ? "notice" : "info",
+      description: `Открыт ${config.title} x${amount}`,
+      oldValue: {
+        [config.stockPayloadKey]: stockBefore
+      },
+      newValue: {
+        [config.stockPayloadKey]: battlePass[config.stockPayloadKey],
+        drops
+      },
+      metadata: { requestId, openingId, caseKind, chanceBasisPoints }
+    });
+    await client.query("COMMIT");
+
+    const fresh = await loadPostgresAccount(parsedAccess.playerId);
+    if (fresh) store.accounts[String(fresh.id)] = fresh;
+    console.log(
+      `[case-open] player=${parsedAccess.playerId} request=${requestId} kind=${caseKind} amount=${amount} ` +
+      `drops=${drops.map((drop) => drop.key).join(",")} cases=${stockBefore}->${battlePass[config.stockPayloadKey]} ` +
+      "resolution=pending"
+    );
+    return response;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(`[case-open] failed player=${parsedAccess.playerId} request=${requestId} kind=${caseKind}`, error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resolveBattlePassCaseReward(body = {}) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const parsedAccess = parseSummerCaseAccessToken(body.token);
+  const requestId = normalizeSummerCaseRequestId(body.requestId);
+  const dropIndex = Number(body.dropIndex);
+  const action = String(body.action || "");
+  if (!parsedAccess) return { ok: false, status: 403, error: "case_access_invalid" };
+  if (!requestId || !Number.isInteger(dropIndex) || dropIndex < 0 ||
+      !["claim", "dismantle"].includes(action)) {
+    return { ok: false, status: 400, error: "case_resolution_request_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      `SELECT id, name, cckey, money, level, exp
+       FROM players
+       WHERE id = $1
+       FOR UPDATE`,
+      [parsedAccess.playerId]
+    );
+    const player = playerResult.rows[0] || null;
+    if (!player || !verifyParsedSummerCaseAccessToken(parsedAccess, player.cckey)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "case_access_invalid" };
+    }
+    if (await activePlayerBan(parsedAccess.playerId, client)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "account_banned" };
+    }
+
+    const state = await loadStoreEntitlements(client, parsedAccess.playerId, true);
+    const openingResult = await client.query(
+      `SELECT id, case_kind, case_amount, result_data, resolution_data, resolved_at
+       FROM player_case_openings
+       WHERE player_id = $1 AND request_id = $2
+       FOR UPDATE`,
+      [parsedAccess.playerId, requestId]
+    );
+    const openingRow = openingResult.rows[0] || null;
+    if (!state || !openingRow) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "case_opening_not_found" };
+    }
+
+    const config = caseOpenConfig(String(openingRow.case_kind));
+    const resultData = jsonValue(openingRow.result_data, {});
+    const opening = resultData.caseOpening;
+    const drops = Array.isArray(opening?.drops) ? opening.drops : [];
+    if (!config || dropIndex >= drops.length || drops.length !== Number(openingRow.case_amount)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "case_opening_data_invalid" };
+    }
+
+    const resolutionData = caseOpeningResolutionData(openingRow.resolution_data);
+    const decisionKey = String(dropIndex);
+    const existingDecision = resolutionData.decisions[decisionKey] || null;
+    if (existingDecision) {
+      const caseOpening = caseOpeningPayload(resultData, resolutionData);
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        replayed: true,
+        battlePass: storeEntitlementPayload(state),
+        caseOpening,
+        caseResolution: existingDecision
+      };
+    }
+
+    const drop = drops[dropIndex];
+    const reward = config.rewards.find((entry) => entry.key === String(drop.key || ""));
+    if (!reward || reward.grant.kind !== String(drop.kind || "")) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "case_reward_contract_invalid" };
+    }
+
+    let coinsAdded = 0;
+    let experienceAdded = 0;
+    let fragmentsRequested = 0;
+    let summerCasesAdded = 0;
+    let tropicalCasesAdded = 0;
+    const itemGrants = [];
+    if (action === "dismantle") {
+      coinsAdded = Math.max(0, Math.trunc(Number(drop.dismantle?.coins || 0)));
+      experienceAdded = Math.max(0, Math.trunc(Number(drop.dismantle?.experience || 0)));
+      fragmentsRequested = Math.max(0, Math.trunc(Number(drop.dismantle?.fragments || 0)));
+      if (coinsAdded > 4000 || experienceAdded > 4000 || fragmentsRequested > 400) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "case_dismantle_contract_invalid" };
+      }
+    } else if (["wear", "weapon", "bundle"].includes(reward.grant.kind)) {
+      const allowedItemKeys = new Set((drop.itemKeys || []).map(String));
+      for (const item of caseRewardCatalogItems(reward)) {
+        const itemKey = inventoryItemKey(item);
+        if (allowedItemKeys.has(itemKey)) itemGrants.push({ item, itemKey });
+      }
+    } else if (reward.grant.kind === "coins") {
+      coinsAdded = Number(reward.grant.amount);
+    } else if (reward.grant.kind === "experience") {
+      experienceAdded = Number(reward.grant.amount);
+    } else if (reward.grant.kind === "special_fragments") {
+      fragmentsRequested = Number(reward.grant.amount);
+    } else if (reward.grant.kind === "case_stock") {
+      if (reward.grant.caseKind === "summer") summerCasesAdded = Number(reward.grant.amount);
+      if (reward.grant.caseKind === "tropical") tropicalCasesAdded = Number(reward.grant.amount);
+    } else {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "case_reward_grant_unsupported" };
+    }
+
+    const balanceBefore = Number(player.money || 0);
+    const balanceAfter = balanceBefore + coinsAdded;
+    const expBefore = Number(player.exp || 0);
+    const summerCasesAfter = Number(state.summer_cases || 0) + summerCasesAdded;
+    const tropicalCasesAfter = Number(state.tropical_cases || 0) + tropicalCasesAdded;
+    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > 2_147_483_647 ||
+        !Number.isSafeInteger(expBefore + experienceAdded) || expBefore + experienceAdded > 2_147_483_647 ||
+        !Number.isSafeInteger(summerCasesAfter) || summerCasesAfter > 2_147_483_647 ||
+        !Number.isSafeInteger(tropicalCasesAfter) || tropicalCasesAfter > 2_147_483_647) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "account_progress_limit_reached" };
+    }
+
+    for (const grant of itemGrants) {
+      await client.query(
+        `INSERT INTO player_inventory (
+           player_id, item_key, item_type, item_data, updated_at
+         )
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [parsedAccess.playerId, grant.itemKey, Number(grant.item.itype), JSON.stringify(grant.item)]
+      );
+      await client.query(
+        `INSERT INTO player_pending_inventory_deliveries (
+           player_id, order_id, case_opening_id, item_key, item_data
+         )
+         VALUES ($1, NULL, $2, $3, $4::jsonb)
+         ON CONFLICT (case_opening_id, item_key)
+           WHERE case_opening_id IS NOT NULL
+         DO NOTHING`,
+        [parsedAccess.playerId, Number(openingRow.id), grant.itemKey, JSON.stringify(grant.item)]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (
+           player_id, item_key, item_type, item_id, price, currency, item_data
+         )
+         VALUES ($1, $2, $3, $4, 0, 'case', $5::jsonb)`,
+        [
+          parsedAccess.playerId,
+          grant.itemKey,
+          Number(grant.item.itype),
+          inventoryItemId(grant.item),
+          JSON.stringify(grant.item)
+        ]
+      );
+    }
+
+    if (coinsAdded > 0) {
+      await client.query(
+        "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+        [parsedAccess.playerId, balanceAfter]
+      );
+    }
+    const experienceState = experienceAdded > 0
+      ? await awardPlayerExperience(
+        client,
+        parsedAccess.playerId,
+        experienceAdded,
+        action === "dismantle" ? "case_dismantle" : `${config.kind}_case_claim`
+      )
+      : null;
+
+    const fragmentsBefore = Number(state.special_case_fragments || 0);
+    const fragmentsAfter = Math.min(2000, fragmentsBefore + fragmentsRequested);
+    const fragmentsAdded = fragmentsAfter - fragmentsBefore;
+    const stateResult = await client.query(
+      `UPDATE player_store_entitlements
+       SET summer_cases = summer_cases + $2,
+           tropical_cases = tropical_cases + $3,
+           special_case_fragments = $4,
+           updated_at = now()
+       WHERE player_id = $1
+       RETURNING *`,
+      [
+        parsedAccess.playerId,
+        summerCasesAdded,
+        tropicalCasesAdded,
+        fragmentsAfter
+      ]
+    );
+    const battlePass = storeEntitlementPayload(stateResult.rows[0]);
+    const decision = {
+      dropIndex,
+      action,
+      rewardKey: reward.key,
+      rewardName: reward.name,
+      resolvedAt: new Date().toISOString(),
+      award: {
+        itemKeys: itemGrants.map((grant) => grant.itemKey),
+        coins: coinsAdded,
+        experience: experienceAdded,
+        fragments: fragmentsAdded,
+        cases: summerCasesAdded > 0
+          ? { caseKind: "summer", amount: summerCasesAdded }
+          : (tropicalCasesAdded > 0
+            ? { caseKind: "tropical", amount: tropicalCasesAdded }
+            : null)
+      }
+    };
+    resolutionData.decisions[decisionKey] = decision;
+    const resolvedCount = Object.keys(resolutionData.decisions).length;
+    const completed = resolvedCount === drops.length;
+    await client.query(
+      `UPDATE player_case_openings
+       SET resolution_data = $2::jsonb,
+           resolved_at = CASE WHEN $3 THEN now() ELSE NULL END
+       WHERE id = $1`,
+      [Number(openingRow.id), JSON.stringify(resolutionData), completed]
+    );
+
+    const caseOpening = caseOpeningPayload(resultData, resolutionData);
+    await auditGameEvent(client, {
+      playerId: parsedAccess.playerId,
+      playerName: String(player.name || ""),
+      eventType: action === "dismantle" ? "case_reward_dismantled" : "case_reward_claimed",
+      category: "economy",
+      severity: ["bundle", "legendary"].includes(reward.rarity) ? "notice" : "info",
+      description: action === "dismantle"
+        ? `Разобрана награда ${reward.name}`
+        : `Получена награда ${reward.name}`,
+      oldValue: {
+        balance: balanceBefore,
+        exp: expBefore,
+        specialCaseFragments: fragmentsBefore
+      },
+      newValue: {
+        balance: balanceAfter,
+        exp: experienceState?.exp ?? expBefore,
+        specialCaseFragments: fragmentsAfter,
+        award: decision.award
+      },
+      metadata: { requestId, openingId: Number(openingRow.id), dropIndex, action }
+    });
+    await client.query("COMMIT");
+
+    const fresh = await loadPostgresAccount(parsedAccess.playerId);
+    if (fresh) store.accounts[String(fresh.id)] = fresh;
+    console.log(
+      `[case-resolve] player=${parsedAccess.playerId} request=${requestId} index=${dropIndex} ` +
+      `action=${action} reward=${reward.key} coins=${coinsAdded} xp=${experienceAdded} ` +
+      `fragments=${fragmentsAdded} completed=${completed}`
+    );
+    return {
+      ok: true,
+      battlePass,
+      caseOpening,
+      caseResolution: decision
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(
+      `[case-resolve] failed player=${parsedAccess.playerId} request=${requestId} index=${dropIndex}`,
+      error
+    );
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function loadDonateLimitedStock(client, productIdValue, lock = false) {
@@ -10714,7 +11386,12 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
       return { result: false, error: "postgres_required" };
     }
     const state = await loadStoreEntitlements(pgPool, Number(account.id), false);
-    return ok({ battlePass: storeEntitlementPayload(state) });
+    const casePending = await pendingCaseOpeningForPlayer(pgPool, Number(account.id));
+    return ok({
+      battlePass: storeEntitlementPayload(state),
+      caseOpen: battlePassCaseAccessPayload(account, requestOrigin),
+      casePending
+    });
   }
 
   if (page === "pl") {
@@ -12203,6 +12880,82 @@ async function handleHttpRequest(req, res) {
   if (url.pathname === "/create") {
     const result = await createAccountPage(url, requestOrigin);
     sendHtml(res, result.html, result.status);
+    return;
+  }
+
+  if (url.pathname === "/battle-pass/case/open") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 8 * 1024);
+      const parsedAccess = parseSummerCaseAccessToken(body.token);
+      if (!parsedAccess) {
+        sendJson(res, { ok: false, error: "case_access_invalid" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: parsedAccess.playerId }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const auditContext = {
+        ipAddress: requestClientIp(req),
+        device: String(req.headers["user-agent"] || "").slice(0, 300),
+        geo: requestGeo(req),
+        source: "battle_pass_case"
+      };
+      const result = await requestAuditContext.run(
+        auditContext,
+        () => openBattlePassCase(body)
+      );
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(
+        res,
+        { ok: false, error: error.message || "case_open_failed" },
+        serviceErrorStatus(error)
+      );
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle-pass/case/resolve") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 8 * 1024);
+      const parsedAccess = parseSummerCaseAccessToken(body.token);
+      if (!parsedAccess) {
+        sendJson(res, { ok: false, error: "case_access_invalid" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: parsedAccess.playerId }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const auditContext = {
+        ipAddress: requestClientIp(req),
+        device: String(req.headers["user-agent"] || "").slice(0, 300),
+        geo: requestGeo(req),
+        source: "battle_pass_case_resolution"
+      };
+      const result = await requestAuditContext.run(
+        auditContext,
+        () => resolveBattlePassCaseReward(body)
+      );
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(
+        res,
+        { ok: false, error: error.message || "case_resolution_failed" },
+        serviceErrorStatus(error)
+      );
+    }
     return;
   }
 

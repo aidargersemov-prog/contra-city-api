@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS player_store_entitlements (
 );
 
 INSERT INTO player_store_entitlements (player_id, battle_pass_level)
-SELECT id, LEAST(100, GREATEST(1, level))
+SELECT id, 1
 FROM players
 ON CONFLICT (player_id) DO NOTHING;
 
