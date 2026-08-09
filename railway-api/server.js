@@ -754,44 +754,44 @@ const defaultWeapons = [
 ];
 
 const rebuiltShopWeaponCatalog = [
-  //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0 },
-  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0, iS: 0 },
-  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0 },
-  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0 },
-  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0 },
+  //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0, iS: 0 },
+  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
+  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
+  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 6 },
+  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 8 },
 
 
-  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38, iS: 0 },
+  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38, iS: 0, nlvl: 40 },
   { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45, iS: 0 },
-  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42, iS: 0 },
-  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42, iS: 0 },
-  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108, iS: 0 },
+  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 45 },
+  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 30 },
+  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108, iS: 0, nlvl: 22 },
 
-  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175, iS: 0 },
+  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175, iS: 0, nlvl: 50 },
   { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210, iS: 0 },
-  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180, iS: 0 },
+  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180, iS: 0, nlvl: 40 },
   { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132, iS: 0 },
-  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168, iS: 0 },
+  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168, iS: 0, nlvl: 28 },
 
   { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270, iS: 0 },
-  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300, iS: 0 },
+  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300, iS: 0, nlvl: 32 },
 
   { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11, iS: 0 },
-  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 36, iS: 0, nlvl: 101 },
+  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 5, ammo_tot: 24, iS: 0, nlvl: 38 },
 
-  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16, iS: 0 },
-  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30, iS: 0 },
-  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18, iS: 0 },
-  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9, iS: 0 },
-  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36, iS: 0 },
+  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16, iS: 0, nlvl: 24 },
+  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30, iS: 0, nlvl: 20 },
+  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18, iS: 0, nlvl: 45},
+  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9, iS: 0, nlvl: 15 },
+  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36, iS: 0, nlvl: 30 },
 
-  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100, iS: 0 },
-  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35, iS: 0 },
-  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0 },
-  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0 },
-  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 11, iS: 0 },
-  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 9, iS: 0 },
-  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12, iS: 0 }
+  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100, iS: 0, nlvl: 28 },
+  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35, iS: 0, nlvl: 40 },
+  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 30 },
+  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 35 },
+  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 6, ammo_tot: 9, iS: 0, nlvl: 11},
+  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 4, iS: 0, nlvl: 4 },
+  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12, iS: 0, nlvl: 14 }
 ];
 
 const originalReloadTimeMs = {
@@ -906,9 +906,9 @@ const canonicalShopWeaponStats = {
   sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
   sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
   sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
-  sr_arcticb01: { rap: 1120, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
-  sr_steyr: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 7, ammo: 1, ammo_tot: 9, smindam: 45, smaxdam: 55, mmindam: 60, mmaxdam: 70, lmindam: 77, lmaxdam: 98 },
-  sr_arctic: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 1, ammo_tot: 11, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
+  sr_arcticb01: { rap: 1120, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 4, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
+  sr_steyr: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 7, ammo: 1, ammo_tot: 4, smindam: 45, smaxdam: 55, mmindam: 60, mmaxdam: 70, lmindam: 77, lmaxdam: 98 },
+  sr_arctic: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 6, ammo_tot: 9, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
 };
 
 function withCanonicalShopWeaponStats(item) {
@@ -1254,26 +1254,166 @@ function wearTextFor(slot, sname) {
 }
 
 const shopWearCatalog = {
-  Hats: ["hat01", "hat02", "hat03", "helm02", "cap01", "cap02", "helm01", "vietnam", "pilothelm", "budenka", "ushmil", "ushanka", "party02", "party01", "english", "indiana02", "indiana01", "indiana03", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag"],
+  Hats: ["hat01", "hat02", "hat03", "cap01", "cap02", "vietnam", "indiana02", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag"],
   Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos", "gavaibandana"],
   Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022", "gavaigloves"],
-  Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl02", "singl03", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2", "gavaihoodie"],
-  Pants: ["jeans01", "jeans02", "pant01", "pant02", "pant03", "sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai"],
+  Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2", "gavaihoodie"],
+  Pants: ["sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai"],
   Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag"],
   Backpacks: ["parr01", "back01", "back02", "guit01", "guit02", "turt01", "octopus", "arrows", "darts", "rocket01", "rocket02", "rec", "shield", "extinguisher", "sarcophagus", "tomb", "Morte", "Raven", "Scarecrow", "santa", "santa2", "Snowboard", "VampireBat", "infernalRaven", "frankyOctopus", "snake01", "thanos", "rec2", "popugagavai"],
   Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka"],
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
 const wearPrices = {
-  "Hats:hat01": { price: 129, nlvl: 1 },
-  "Hats:hat02": { price: 139, nlvl: 3 },
-  "Hats:hat03": { price: 139, nlvl: 5 },
-  "Shirts:shirtB09": { price: 400, nlvl: 5 },
-  "Pants:shortB12": { price: 350, nlvl: 5 },
-  "Masks:googB01": { price: 180, nlvl: 5 },
-  "Boots:sneakV2B07": { price: 220, nlvl: 5 },
-
-  "Gloves:gavaigloves": { price: 22000, nlvl: 299, iS: 0 }
+  //biker
+  "Shirts:biker": { price: 1200, nlvl: 25, iS: 0 },
+  "Pants:jeansB02": { price: 550, nlvl: 25, iS: 0 }, 
+  "Hats:biker": { price: 250, nlvl: 25, iS: 0 },
+  "Gloves:biker": { price: 900, nlvl: 25, iS: 0 },
+  "Boots:sneakV201": { price: 600, nlvl: 25, iS: 0 },
+  //mummy
+  "Hats:pharaoh": { price: 300, nlvl: 20, iS: 0 },
+  "Shirts:mummy": { price: 300, nlvl: 20, iS: 0 },
+  "Backpacks:sarcophagus": { price: 99999, nlvl: 999, iS: 0 },
+  "Gloves:mummy": { price: 150, nlvl: 20, iS: 0 },
+  "Pants:mummy": { price: 275, nlvl: 20, iS: 0 },
+  "Boots:mummy": { price: 150, nlvl: 20, iS: 0 },
+  "Masks:mummy_H": { price: 300, nlvl: 20, iS: 0 },
+  "Others:skrab": { price: 99999, nlvl: 999, iS: 0 },
+  //dead moroz
+  "Hats:santa": { price: 300, nlvl: 14, iS: 0 },
+  "Masks:santa": { price: 300, nlvl: 14, iS: 0 },
+  "Shirts:santa": { price: 200, nlvl: 14, iS: 0 },
+  "Backpacks:santa": { price: 400, nlvl: 14, iS: 0 },
+  "Gloves:santa": { price: 350, nlvl: 14, iS: 0 },
+  "Pants:santa": { price: 200, nlvl: 14, iS: 0 },
+  "Boots:santa": { price: 350, nlvl: 14, iS: 0 },
+  "Others:santa": { price: 300, nlvl: 14, iS: 0 },
+  //zaxvatchik
+  "Shirts:tactic03": { price: 950, nlvl: 31, iS: 0 },
+  "Pants:tactic03": { price: 780, nlvl: 31, iS: 0 },
+  "Boots:boot02": { price: 390, nlvl: 31, iS: 0 },
+  "Masks:googB02": { price: 690, nlvl: 31, iS: 0 },
+  "Hats:beret01": { price: 720, nlvl: 31, iS: 0 },
+  //delta
+  "Hats:tacticalB01": { price: 600, nlvl: 40, iS: 0 },
+  "Shirts:tacticB01": { price: 925, nlvl: 40, iS: 0 },
+  "Pants:tacticB01": { price: 700, nlvl: 40, iS: 0 },
+  "Gloves:tacticalB01": { price: 400, nlvl: 40, iS: 0 },
+  "Boots:tacticalB01": { price: 500, nlvl: 40, iS: 0 },
+  "Others:smertik": { price: 550, nlvl: 40, iS: 0 },
+  //lych
+  "Shirts:hoodB08": { price: 450, nlvl: 27, iS: 0 },
+  "Pants:sportB08": { price: 300, nlvl: 27, iS: 0 },
+  "Boots:sneakV2B02": { price: 150, nlvl: 27, iS: 0 },
+  "Hats:capB08": { price: 150, nlvl: 27, iS: 0 },
+  "Masks:bandB07": { price: 525, nlvl: 27, iS: 0 },
+  //ploxish
+  "Shirts:hoodB03": { price: 925, nlvl: 35, iS: 0 },
+  "Pants:sportB03": { price: 700, nlvl: 35, iS: 0 },
+  "Others:badboy": { price: 550, nlvl: 35, iS: 0 },
+  "Boots:sneakV2B05": { price: 500, nlvl: 35, iS: 0 },
+  "Masks:maskB01": { price: 500, nlvl: 35, iS: 0 },
+  "Hats:capB04": { price: 550, nlvl: 35, iS: 0 },
+  //kislotniy voin
+  "Hats:hatB08": { price: 550, nlvl: 35, iS: 0 },
+  "Shirts:hoodB10": { price: 950, nlvl: 35, iS: 0 },
+  "Pants:sportB10": { price: 700, nlvl: 35, iS: 0 },
+  "Boots:sneakV2B06": { price: 500, nlvl: 35, iS: 0 },
+  "Masks:bandB03": { price: 525, nlvl: 35, iS: 0 },
+  //stuzha
+  "Hats:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Masks:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Shirts:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Backpacks:santa": { price: 600, nlvl: 33, iS: 0 },
+  "Gloves:santa2": { price: 350, nlvl: 33, iS: 0 },
+  "Pants:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Boots:santa2": { price: 500, nlvl: 33, iS: 0 },
+  "Others:santa2": { price: 450, nlvl: 33, iS: 0 },
+  //nekrovoin
+  "Heads:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Masks:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Shirts:franky": { price: 1000, nlvl: 35, iS: 0 },
+  "Pants:franky": { price: 500, nlvl: 35, iS: 0 },
+  "Boots:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Gloves:franky": { price: 400, nlvl: 35, iS: 0 },
+  "Others:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Backpacks:frankyOctopus": { price: 700, nlvl: 35, iS: 0 },
+  //infernal
+  "Hats:infernal": { price: 500, nlvl: 42, iS: 0 },
+  "Shirts:infernal": { price: 800, nlvl: 42, iS: 0 },
+  "Pants:infernal": { price: 500, nlvl: 42, iS: 0 },
+  "Boots:infernal": { price: 500, nlvl: 42, iS: 0 },
+  "Gloves:infernal": { price: 400, nlvl: 42, iS: 0 },
+  "Masks:infernal_H": { price: 600, nlvl: 42, iS: 0 },
+  "Others:infernal": { price: 600, nlvl: 42, iS: 0 },
+  "Backpacks:infernalRaven": { price: 600, nlvl: 42, iS: 0 },
+  //kiborg
+  "Masks:maskB02": { price: 99999, nlvl: 999, iS: 0 },
+  "Shirts:hoodB05": { price: 99999, nlvl: 999, iS: 0 },
+  "Pants:sportB05": { price: 9999, nlvl: 999, iS: 0 },
+  "Boots:sneakV2B04": { price: 9999, nlvl: 999, iS: 0 },
+  //strannik
+  "Hats:hatB01": { price: 340, nlvl: 21, iS: 0 },
+  "Masks:bandB05": { price: 245, nlvl: 21, iS: 0 },
+  "Shirts:hoodB01": { price: 550, nlvl: 21, iS: 0 },
+  "Pants:sportB01": { price: 350, nlvl: 21, iS: 0 },
+  "Boots:sneakV2B10": { price: 325, nlvl: 21, iS: 0 },
+  //zmeelov
+  "Masks:bandB01": { price: 525, nlvl: 27, iS: 0 },
+  "Shirts:hoodB04": { price: 600, nlvl: 27, iS: 0 },
+  "Pants:sportB04": { price: 400, nlvl: 27, iS: 0 },
+  "Hats:capB07": { price: 575, nlvl: 27, iS: 0 },
+  "Backpacks:snake01": { price: 400, nlvl: 27, iS: 0 },
+  //prizrak
+  "Masks:klavaB01": { price: 600, nlvl: 21, iS: 0 },
+  "Shirts:prizrak": { price: 700, nlvl: 21, iS: 0 },
+  "Pants:prizrak": { price: 500, nlvl: 21, iS: 0 },
+  "Gloves:prizrak": { price: 300, nlvl: 21, iS: 0 },
+  "Boots:prizrak": { price: 400, nlvl: 21, iS: 0 },
+  //anarchist
+  "Hats:capB01": { price: 600, nlvl: 34, iS: 0 },
+  "Shirts:anarch": { price: 850, nlvl: 34, iS: 0 },
+  "Pants:jeansB03": { price: 600, nlvl: 34, iS: 0 },
+  "Gloves:wristwrapB03": { price: 600, nlvl: 34, iS: 0 },
+  "Boots:anarch": { price: 450, nlvl: 34, iS: 0 },
+  "Others:spinyellow": { price: 750, nlvl: 34, iS: 0 },
+  //zadira
+  "Hats:hatB06": { price: 800, nlvl: 30, iS: 0 },
+  "Masks:bandB04": { price: 9999, nlvl: 30, iS: 0 }, // za donat
+  "Shirts:hoodB60": { price: 1000, nlvl: 30, iS: 0 },
+  "Pants:sportB06": { price: 800, nlvl: 30, iS: 0 },
+  "Boots:zadira": { price: 800, nlvl: 30, iS: 0 },
+  "Others:burger": { price: 500, nlvl: 30, iS: 0 },
+  //thanos
+  "Heads:thanos": { price: 300, nlvl: 30, iS: 0 }, // za donat
+  "Masks:thanos": { price: 300, nlvl: 30, iS: 0 },
+  "Shirts:thanos": { price: 700, nlvl: 30, iS: 0 },
+  "Pants:thanos": { price: 500, nlvl: 30, iS: 0 },
+  "Gloves:thanos": { price: 1200, nlvl: 30, iS: 0 }, // za donat
+  "Boots:thanos": { price: 200, nlvl: 30, iS: 0 },
+  "Backpacks:thanos": { price: 300, nlvl: 30, iS: 0 },
+  //barhan
+  "Hats:milcap03": { price: 550, nlvl: 30, iS: 0 },
+  "Shirts:tactic04": { price: 825, nlvl: 30, iS: 0 },
+  "Gloves:tactical02": { price: 375, nlvl: 30, iS: 0 },
+  "Pants:tactic04": { price: 650, nlvl: 30, iS: 0 },
+  //custom
+  "Hats:capgavaimag": { price: 220000, nlvl: 299, iS: 0 },
+  "Masks:gavaibandana": { price: 220000, nlvl: 299, iS: 0 },
+  "Shirts:gavaihoodie": { price: 220000, nlvl: 299, iS: 0 },
+  "Pants:shortigavai": { price: 220000, nlvl: 299, iS: 0 },
+  "Boots:gavaibootsmag": { price: 220000, nlvl: 299, iS: 0 },
+  "Backpacks:popugagavai": { price: 220000, nlvl: 299, iS: 0 },  
+  "Gloves:gavaigloves": { price: 220000, nlvl: 299, iS: 0 },
+  //default shirts
+  "Shirts:hood05": { price: 325, nlvl: 3, iS: 0 },
+  "Shirts:hood01": { price: 210, nlvl: 3, iS: 0 },
+  "Shirts:hood02": { price: 255, nlvl: 3, iS: 0 },
+  "Shirts:shirtB08": { price: 3999, nlvl: 42, iS: 0 },
+  //default pants
+  "Pants:sport04": { price: 325, nlvl: 3, iS: 0 },
+  "Pants:sport01": { price: 310, nlvl: 3, iS: 0 }
 };
 const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
   names.map((sname, index) => {
