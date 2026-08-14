@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-09-case-fragment-dismantle-v79";
+const API_BUILD_ID = "railway-api-2026-08-15-battle-pass-season-1-v80";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -44,6 +44,8 @@ const DATABASE_URL = process.env.DATABASE_URL || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://dii1ba1dxl2lq.cloudfront.net").replace(/\/+$/, "");
 const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
 const SUMMER_CASE_ACCESS_TTL_MS = 10 * 60 * 1000;
+const BATTLE_PASS_XP_PER_LEVEL = 1000;
+const BATTLE_PASS_TASK_CYCLE_MS = 24 * 60 * 60 * 1000;
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);
@@ -4446,10 +4448,50 @@ async function resetDonateLimitedStock(adminTelegramIdValue, rawProductId) {
   }
 }
 
-function storeEntitlementPayload(row) {
-  return {
-    battlePassSeason: Number(row.battle_pass_season || 7),
+let battlePassSeasonCache = null;
+let battlePassSeasonCacheUntil = 0;
+
+async function loadActiveBattlePassSeason(client, now = Date.now()) {
+  if (battlePassSeasonCache && now < battlePassSeasonCacheUntil) {
+    return battlePassSeasonCache;
+  }
+  const result = await client.query(
+    `SELECT season_id, title, starts_at, ends_at, task_cycle_anchor_at
+     FROM battle_pass_seasons
+     WHERE active = TRUE
+     ORDER BY season_id DESC
+     LIMIT 1`
+  );
+  battlePassSeasonCache = result.rows[0] || null;
+  battlePassSeasonCacheUntil = now + 60 * 1000;
+  return battlePassSeasonCache;
+}
+
+function timestampIso(value, fallbackMs) {
+  const parsed = Date.parse(String(value || ""));
+  return new Date(Number.isFinite(parsed) ? parsed : fallbackMs).toISOString();
+}
+
+function nextBattlePassTaskResetAt(season, now = Date.now()) {
+  const anchor = Date.parse(String(season?.task_cycle_anchor_at || ""));
+  const safeAnchor = Number.isFinite(anchor) ? anchor : now;
+  const cycle = now < safeAnchor
+    ? 0
+    : Math.floor((now - safeAnchor) / BATTLE_PASS_TASK_CYCLE_MS) + 1;
+  let resetAt = safeAnchor + cycle * BATTLE_PASS_TASK_CYCLE_MS;
+  const seasonEndsAt = Date.parse(String(season?.ends_at || ""));
+  if (Number.isFinite(seasonEndsAt)) {
+    resetAt = Math.min(resetAt, seasonEndsAt);
+  }
+  return new Date(resetAt).toISOString();
+}
+
+function storeEntitlementPayload(row, season = null, now = Date.now()) {
+  const payload = {
+    battlePassSeason: Number(row.battle_pass_season || 1),
     battlePassLevel: Number(row.battle_pass_level || 1),
+    battlePassXp: Number(row.battle_pass_xp || 0),
+    battlePassXpMax: BATTLE_PASS_XP_PER_LEVEL,
     battlePassPremium: Boolean(row.battle_pass_premium),
     battlePassPremiumPlus: Boolean(row.battle_pass_premium_plus),
     tropicalCases: Number(row.tropical_cases || 0),
@@ -4458,16 +4500,40 @@ function storeEntitlementPayload(row) {
     summerCaseProgress: Number(row.special_case_fragments || row.summer_case_progress || 0),
     tropicalCaseProgress: Number(row.special_case_fragments || row.tropical_case_progress || 0)
   };
+  if (season) {
+    payload.seasonTitle = String(season.title || "Летний сезон 1");
+    payload.seasonStartsAt = timestampIso(season.starts_at, now);
+    payload.seasonEndsAt = timestampIso(season.ends_at, now);
+    payload.tasksResetAt = nextBattlePassTaskResetAt(season, now);
+    payload.serverTime = new Date(now).toISOString();
+  }
+  return payload;
 }
 
 async function loadStoreEntitlements(client, playerId, lock = false) {
+  const season = await loadActiveBattlePassSeason(client);
+  const seasonId = Number(season?.season_id || 1);
   await client.query(
-    `INSERT INTO player_store_entitlements (player_id, battle_pass_level)
-     SELECT id, 1
+    `INSERT INTO player_store_entitlements (
+       player_id, battle_pass_season, battle_pass_level, battle_pass_xp
+     )
+     SELECT id, $2, 1, 0
      FROM players
      WHERE id = $1
      ON CONFLICT (player_id) DO NOTHING`,
-    [playerId]
+    [playerId, seasonId]
+  );
+  await client.query(
+    `UPDATE player_store_entitlements
+     SET battle_pass_season = $2,
+         battle_pass_level = 1,
+         battle_pass_xp = 0,
+         battle_pass_premium = FALSE,
+         battle_pass_premium_plus = FALSE,
+         updated_at = now()
+     WHERE player_id = $1
+       AND battle_pass_season <> $2`,
+    [playerId, seasonId]
   );
   const result = await client.query(
     `SELECT *
@@ -11411,9 +11477,10 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
       return { result: false, error: "postgres_required" };
     }
     const state = await loadStoreEntitlements(pgPool, Number(account.id), false);
+    const season = await loadActiveBattlePassSeason(pgPool);
     const casePending = await pendingCaseOpeningForPlayer(pgPool, Number(account.id));
     return ok({
-      battlePass: storeEntitlementPayload(state),
+      battlePass: storeEntitlementPayload(state, season),
       caseOpen: battlePassCaseAccessPayload(account, requestOrigin),
       casePending
     });
