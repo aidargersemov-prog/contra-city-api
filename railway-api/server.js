@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-09-case-choice-v78";
+const API_BUILD_ID = "railway-api-2026-08-09-case-fragment-dismantle-v79";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -4600,6 +4600,13 @@ function caseDismantleYield(rarity) {
 
 function caseDropPayload(reward, awardedItems = [], chanceBasisPoints = 0) {
   const itemKeys = awardedItems.map(inventoryItemKey);
+  const dismantle = caseDismantleYield(reward.rarity);
+  if (reward?.grant?.kind === "special_fragments") {
+    dismantle.fragments = Math.min(
+      dismantle.fragments,
+      Math.max(0, Math.trunc(Number(reward.grant.amount || 0)))
+    );
+  }
   const payload = {
     key: reward.key,
     name: reward.name,
@@ -4607,7 +4614,7 @@ function caseDropPayload(reward, awardedItems = [], chanceBasisPoints = 0) {
     kind: reward.grant.kind,
     chanceBasisPoints: Number(chanceBasisPoints),
     itemKeys,
-    dismantle: caseDismantleYield(reward.rarity),
+    dismantle,
     resolution: null
   };
   if (itemKeys.length === 1) payload.itemKey = itemKeys[0];
@@ -4636,10 +4643,22 @@ function caseOpeningPayload(resultData, resolutionData) {
   const legacyDecision = resolution.legacyGranted
     ? { action: "claim", legacyGranted: true, resolvedAt: resolution.legacyGrantedAt || null }
     : null;
-  const drops = opening.drops.map((drop, index) => ({
-    ...drop,
-    resolution: resolution.decisions[String(index)] || legacyDecision
-  }));
+  const drops = opening.drops.map((drop, index) => {
+    const dismantle = drop?.dismantle && typeof drop.dismantle === "object"
+      ? { ...drop.dismantle }
+      : {};
+    if (String(drop?.kind || "") === "special_fragments") {
+      dismantle.fragments = Math.min(
+        Math.max(0, Math.trunc(Number(dismantle.fragments || 0))),
+        Math.max(0, Math.trunc(Number(drop.amount || 0)))
+      );
+    }
+    return {
+      ...drop,
+      dismantle,
+      resolution: resolution.decisions[String(index)] || legacyDecision
+    };
+  });
   const resolvedCount = drops.filter((drop) => drop.resolution).length;
   return {
     ...opening,
@@ -4951,6 +4970,12 @@ async function resolveBattlePassCaseReward(body = {}) {
       coinsAdded = Math.max(0, Math.trunc(Number(drop.dismantle?.coins || 0)));
       experienceAdded = Math.max(0, Math.trunc(Number(drop.dismantle?.experience || 0)));
       fragmentsRequested = Math.max(0, Math.trunc(Number(drop.dismantle?.fragments || 0)));
+      if (reward.grant.kind === "special_fragments") {
+        fragmentsRequested = Math.min(
+          fragmentsRequested,
+          Math.max(0, Math.trunc(Number(reward.grant.amount || 0)))
+        );
+      }
       if (coinsAdded > 4000 || experienceAdded > 4000 || fragmentsRequested > 400) {
         await client.query("ROLLBACK");
         return { ok: false, status: 409, error: "case_dismantle_contract_invalid" };
