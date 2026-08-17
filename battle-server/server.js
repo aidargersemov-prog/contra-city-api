@@ -28,6 +28,9 @@ const BUILD_ID = "battle-server-2026-08-04-voice-opus40-v297";
 const VOICE_FRAME_EVENT = 68;
 const VOICE_CAPABILITY_EVENT = 69;
 const PLAYER_REPORT_EVENT = 66;
+// Private staff protocol. Event99 keeps its recovered original payload; this
+// event only authorizes the restored staff flight state on the battle server.
+const STAFF_FLIGHT_EVENT = 218;
 const VOICE_PROTOCOL_LEGACY = 1;
 const VOICE_PROTOCOL_OPUS_V2 = 2;
 const VOICE_PROTOCOL_OPUS = 3;
@@ -62,7 +65,8 @@ const STAFF_ROLE_RANK = Object.freeze({
   developer: 4,
 });
 const STAFF_CAPABILITY_MIN_ROLE = Object.freeze({
-  kick: "helper",
+	flight: "helper",
+	kick: "helper",
   panel: "moderator",
   private_room: "moderator",
   spectator: "moderator",
@@ -1287,6 +1291,9 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     staffRole: "none",
     staffRank: 0,
     staffProfileLoadedAt: 0,
+    staffFlightActive: false,
+    staffFlightMode: "combat",
+    staffFlightChangedAt: 0,
     moderationDisconnectPending: false,
     health: runtimeStats.maxHealth,
     energy: runtimeStats.maxEnergy,
@@ -4518,7 +4525,46 @@ function applySessionStaffProfile(session, profile) {
   session.staffRole = role;
   session.staffRank = staffRoleRank(role);
   session.staffProfileLoadedAt = Date.now();
+  if (!staffHasCapability(session, "flight")) clearStaffFlightState(session, "role-revoked");
   return role;
+}
+
+function clearStaffFlightState(session, reason = "clear") {
+  if (!session) return false;
+  const wasActive = session.staffFlightActive === true;
+  session.staffFlightActive = false;
+  session.staffFlightMode = "combat";
+  session.staffFlightChangedAt = Date.now();
+  if (wasActive) {
+    console.log(`[staff] fly disabled actor=${session.actorId || 0} player=${session.playerId || 0} reason=${reason}`);
+  }
+  return wasActive;
+}
+
+function handleStaffFlightRequest(session, parsed) {
+  const data = eventDataHash(parsed);
+  const requested = Number(htGet(data, 1)?.value || 0) === 1;
+  const cinematic = Number(htGet(data, 2)?.value || 0) === 1;
+  if (!requested) {
+    clearStaffFlightState(session, "client-disable");
+    return [];
+  }
+  if (
+    !session?.room ||
+    !session.spawned ||
+    session.dead ||
+    session.isGuest ||
+    !staffHasCapability(session, "flight")
+  ) {
+    clearStaffFlightState(session, "rejected");
+    console.log(`[staff] fly rejected actor=${session?.actorId || 0} player=${session?.playerId || 0} role=${normalizeStaffRole(session?.staffRole)} spawned=${session?.spawned ? 1 : 0} dead=${session?.dead ? 1 : 0} guest=${session?.isGuest ? 1 : 0}`);
+    return [];
+  }
+  session.staffFlightActive = true;
+  session.staffFlightMode = cinematic ? "cinematic" : "combat";
+  session.staffFlightChangedAt = Date.now();
+  console.log(`[staff] fly enabled actor=${session.actorId} player=${session.playerId || 0} role=${normalizeStaffRole(session.staffRole)} mode=${session.staffFlightMode}`);
+  return [];
 }
 
 function cachedStaffCanModerate(sourceSession, targetSession, capability) {
@@ -10128,6 +10174,7 @@ function resetSessionRoomProgress(session) {
   session.team = -1;
   session.zombieType = ZOMBIE_TYPE.HUMAN;
   session.lastTransform = null;
+  clearStaffFlightState(session, "room-reset");
   session.pendingSpawnBroadcast = null;
   session.pendingPickupSync = null;
   resetSessionMatchStats(session);
@@ -12561,6 +12608,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     return handlePlayerReport(session, parsed);
   }
 
+  if (eventCode === STAFF_FLIGHT_EVENT) {
+    return handleStaffFlightRequest(session, parsed);
+  }
+
   if (eventCode === 70) {
     return handleKickRequest(session, parsed, channel);
   }
@@ -12635,6 +12686,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === 100) {
+	clearStaffFlightState(session, "spawn-request");
     if (isZombieRoom(session.room)) {
       console.log(`[zombie] spawn request ignored actor=${session.actorId} reason=server-driven mode=${zombieModeForRoom(session.room)} ready=${zombieReadyPlayers(session.room).length}/${ZOMBIE_MIN_PLAYERS}`);
       return [];
