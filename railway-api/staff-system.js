@@ -11,7 +11,7 @@ export const STAFF_ROLE_RANK = Object.freeze({
 
 const STAFF_ROLE_META = Object.freeze({
   none: Object.freeze({ prefix: "", color: "", panelEnabled: false }),
-  helper: Object.freeze({ prefix: "[HELPER]", color: "#3BA7FF", panelEnabled: false }),
+  helper: Object.freeze({ prefix: "[HELPER]", color: "#3BA7FF", panelEnabled: true }),
   moderator: Object.freeze({ prefix: "[MODER]", color: "#2ECC71", panelEnabled: true }),
   admin: Object.freeze({ prefix: "[ADMIN]", color: "#F5A623", panelEnabled: true }),
   owner: Object.freeze({ prefix: "[OWNER]", color: "#E53935", panelEnabled: true }),
@@ -69,6 +69,7 @@ export function staffProfilePayload(roleValue, displayName = "") {
     battleName,
     panelEnabled: meta.panelEnabled,
     canKick: rank >= STAFF_ROLE_RANK.helper,
+    canFly: rank >= STAFF_ROLE_RANK.helper,
     canCreatePrivateRooms: rank >= STAFF_ROLE_RANK.moderator,
     canBan: rank >= STAFF_ROLE_RANK.admin,
     canSpectate: rank >= STAFF_ROLE_RANK.moderator,
@@ -140,6 +141,27 @@ function staffActionRow(row) {
   };
 }
 
+function staffReportRow(row) {
+  return {
+    id: Number(row.id),
+    reporterPlayerId: Number(row.reporter_player_id),
+    reporterName: String(row.reporter_name || ""),
+    targetPlayerId: Number(row.target_player_id),
+    targetName: String(row.target_name || ""),
+    roomName: String(row.room_name || ""),
+    mapName: String(row.map_name || ""),
+    mode: Number(row.mode || 0),
+    reason: String(row.reason || ""),
+    details: String(row.details || ""),
+    status: String(row.status || "open"),
+    staffNote: String(row.staff_note || ""),
+    handledByPlayerId: Number(row.handled_by_player_id || 0),
+    handledByName: String(row.handled_by_name || ""),
+    createdAt: row.created_at?.toISOString?.() || row.created_at,
+    reviewedAt: row.reviewed_at?.toISOString?.() || row.reviewed_at || "",
+  };
+}
+
 export async function staffAjaxPayload(db, account, act, searchParams) {
   if (!db?.query) return staffFailure("postgres_required", 503);
   const normalizedAct = String(act || "").trim().toLowerCase();
@@ -206,6 +228,67 @@ export async function staffAjaxPayload(db, account, act, searchParams) {
        LIMIT 100`
     );
     return { result: true, ok: true, actions: result.rows.map(staffActionRow) };
+  }
+
+  if (normalizedAct === "report_list" || normalizedAct === "reports") {
+    const requestedStatus = String(searchParams.get("status") || "open").trim().toLowerCase();
+    const status = ["open", "reviewed", "dismissed", "actioned", "all"].includes(requestedStatus)
+      ? requestedStatus
+      : "open";
+    const result = await db.query(
+      `SELECT
+         report.*,
+         reporter.name AS reporter_name,
+         target.name AS target_name,
+         handler.name AS handled_by_name
+       FROM player_reports report
+       JOIN players reporter ON reporter.id = report.reporter_player_id
+       JOIN players target ON target.id = report.target_player_id
+       LEFT JOIN players handler ON handler.id = report.handled_by_player_id
+       WHERE ($1 = 'all' OR report.status = $1)
+       ORDER BY CASE WHEN report.status = 'open' THEN 0 ELSE 1 END, report.created_at DESC
+       LIMIT 100`,
+      [status]
+    );
+    return { result: true, ok: true, reports: result.rows.map(staffReportRow) };
+  }
+
+  if (normalizedAct === "report_update" || normalizedAct === "report_review") {
+    const reportId = Number(searchParams.get("report_id") || searchParams.get("id") || 0);
+    const status = String(searchParams.get("status") || "reviewed").trim().toLowerCase();
+    const staffNote = cleanText(searchParams.get("note"), 700);
+    if (!Number.isSafeInteger(reportId) || reportId <= 0) return staffFailure("invalid_report_id", 400);
+    if (!["reviewed", "dismissed", "actioned"].includes(status)) return staffFailure("invalid_report_status", 400);
+    const updated = await db.query(
+      `UPDATE player_reports
+       SET status = $2,
+           staff_note = $3,
+           handled_by_player_id = $4,
+           reviewed_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [reportId, status, staffNote, Number(account.id)]
+    );
+    if (!updated.rows[0]) return staffFailure("report_not_found", 404);
+    const report = updated.rows[0];
+    await writeAuditEvent(db, {
+      playerId: Number(report.target_player_id),
+      eventType: "player_report_review",
+      category: "moderation",
+      severity: status === "actioned" ? "warning" : "info",
+      description: `Player report #${reportId} ${status}`,
+      source: "staff_panel",
+      metadata: {
+        reportId,
+        reporterPlayerId: Number(report.reporter_player_id),
+        targetPlayerId: Number(report.target_player_id),
+        reason: String(report.reason || ""),
+        status,
+        staffNote,
+        handledByPlayerId: Number(account.id),
+      },
+    });
+    return { result: true, ok: true, reports: [staffReportRow(updated.rows[0])] };
   }
 
   return staffFailure("unknown_staff_action", 404);
