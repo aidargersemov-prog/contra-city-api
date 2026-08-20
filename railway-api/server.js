@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-15-battle-pass-season-1-v80";
+const API_BUILD_ID = "railway-api-2026-08-21-telegram-device-reset-v81";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -2019,6 +2019,15 @@ async function ensureAuditSecuritySchema() {
   await pgPool.query("ALTER TABLE player_activity ADD COLUMN IF NOT EXISTS last_geo JSONB NOT NULL DEFAULT '{}'::jsonb");
 }
 
+async function ensureTelegramSystemState(executor = pgPool) {
+  if (!executor) return;
+  await executor.query(
+    `INSERT INTO launcher_telegram_system_state (id, binding_epoch)
+     VALUES (1, 1)
+     ON CONFLICT (id) DO NOTHING`
+  );
+}
+
 async function ensureLauncherDeviceSchema() {
   await pgPool.query(`
     CREATE TABLE IF NOT EXISTS launcher_devices (
@@ -2275,6 +2284,7 @@ async function initStore() {
 
   await runMigrations();
   await ensureAuditSecuritySchema();
+  await ensureTelegramSystemState();
   await ensurePlayerNamePendingSchema();
   await ensureLauncherDeviceSchema();
   await syncPostgresCatalog();
@@ -3699,6 +3709,7 @@ function normalizeTelegramPairingRequestId(value, prefixes = ["pc", "lr", "ga"])
 
 async function telegramSystemState(executor = pgPool, { lock = false } = {}) {
   if (!executor) return null;
+  await ensureTelegramSystemState(executor);
   const result = await executor.query(
     `SELECT id, binding_epoch, last_reset_at, last_reset_by_telegram_id, updated_at
      FROM launcher_telegram_system_state
@@ -6603,6 +6614,57 @@ async function resetTelegramBindingForPlayer(playerIdValue, adminTelegramIdValue
   } finally {
     client.release();
   }
+}
+
+async function resetLauncherGameLinkForTelegramAdmin(
+  playerIdValue,
+  adminTelegramIdValue,
+  requestOrigin = null
+) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const playerId = Number(playerIdValue || 0);
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0) {
+    return { ok: false, status: 400, error: "invalid_player_id" };
+  }
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+
+  const rotated = await rotateLauncherGameLink(playerId);
+  if (!rotated?.account) {
+    return { ok: false, status: 404, error: "player_not_found" };
+  }
+
+  await writeAuditEvent(pgPool, {
+    playerId,
+    playerName: String(rotated.account.name || ""),
+    eventType: "admin_game_link_reset",
+    category: "security",
+    severity: "warning",
+    description: "Администратор удалил старую игровую ссылку, привязку устройства и Telegram",
+    source: "telegram_admin",
+    newValue: {
+      linkRotated: true,
+      deviceBindingRemoved: rotated.bindingRemoved,
+      telegramBindingRemoved: rotated.telegramBindingRemoved
+    },
+    metadata: { adminTelegramId }
+  });
+
+  return {
+    ok: true,
+    player: {
+      id: playerId,
+      name: String(rotated.account.name || "")
+    },
+    removed: {
+      device: Boolean(rotated.bindingRemoved),
+      telegram: Boolean(rotated.telegramBindingRemoved)
+    },
+    linkRotated: true,
+    loginLink: loginLink(rotated.account, requestOrigin)
+  };
 }
 
 async function prepareGlobalTelegramBindingReset(adminTelegramIdValue) {
@@ -12639,6 +12701,12 @@ async function handleHttpRequest(req, res) {
           result = await resetTelegramBindingForPlayer(
             body?.playerId,
             body?.adminTelegramId
+          );
+        } else if (url.pathname === "/bot/telegram/admin/reset-link") {
+          result = await resetLauncherGameLinkForTelegramAdmin(
+            body?.playerId,
+            body?.adminTelegramId,
+            requestOrigin
           );
         } else if (url.pathname === "/bot/telegram/admin/reset-all/prepare") {
           result = await prepareGlobalTelegramBindingReset(body?.adminTelegramId);
