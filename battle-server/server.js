@@ -848,7 +848,7 @@ const MAP_SPAWN_POINTS = {
   },
   promzona: {
     dm: [
-      { x: 131.94, y: 0.985, z: 13.77, rotY: 0 },
+      { x: -0.953, y: 0.387, z: -2.64, rotY: 0 },
     ]
   },
   legoturnament: {
