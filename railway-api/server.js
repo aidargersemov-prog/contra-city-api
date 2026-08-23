@@ -36,7 +36,8 @@ const ASSET_BUNDLE_NAMES = new Set([
   "arenaring.unity3d",
   "bit_map.unity3d",
   "legoturnament.unity3d",
-  "inferno.unity3d"
+  "inferno.unity3d",
+  "promzona.unity3d"
   //"dashguard.unity3d"
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
@@ -1798,6 +1799,7 @@ const maps = [
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
+  mapEntry(19, "Promzona", MAP_MODE_DEATHMATCH),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
