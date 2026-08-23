@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-21-telegram-device-reset-v81";
+const API_BUILD_ID = "railway-api-2026-08-23-promzona-lfs-redirect-v82";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -39,6 +39,12 @@ const ASSET_BUNDLE_NAMES = new Set([
   "inferno.unity3d",
   "promzona.unity3d"
   //"dashguard.unity3d"
+]);
+const REMOTE_ASSET_BUNDLE_URLS = new Map([
+  [
+    "promzona.unity3d",
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/93264bd9e9f1d0851bedea431ea327292331267b/railway-api/assetbundles/promzona.unity3d"
+  ]
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
@@ -11743,6 +11749,22 @@ function tryServeAssetBundle(req, res, url) {
 
   if (!ASSET_BUNDLE_NAMES.has(fileName.toLowerCase())) {
     sendJson(res, { ok: false, error: "asset_bundle_not_allowed", file: fileName }, 404);
+    return true;
+  }
+
+  const remoteUrl = REMOTE_ASSET_BUNDLE_URLS.get(fileName.toLowerCase());
+  if (remoteUrl) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return true;
+    }
+    res.writeHead(302, {
+      location: remoteUrl,
+      "cache-control": "no-store, no-cache, must-revalidate",
+      pragma: "no-cache",
+      expires: "0"
+    });
+    res.end();
     return true;
   }
 
