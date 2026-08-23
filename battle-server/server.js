@@ -846,6 +846,11 @@ const MAP_SPAWN_POINTS = {
       { x: 242.281, y: -15.663, z: 361.541, rotY: 270 },
     ],
   },
+  promzona: {
+    dm: [
+      { x: 131.94, y: 0.985, z: 13.77, rotY: 0 },
+    ]
+  },
   legoturnament: {
     // World positions from mapsnew/LegoTurnament_unity3d/Assets/LegoTurnament.unity.bak-large-fileids -> POINTS_RESCALE.
     dm: [
