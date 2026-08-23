@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-04-voice-opus40-v297";
+const BUILD_ID = "battle-server-2026-08-24-promzona-scale-spawn-v298";
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
@@ -848,7 +848,9 @@ const MAP_SPAWN_POINTS = {
   },
   promzona: {
     dm: [
-      { x: -0.953, y: 0.387, z: -2.64, rotY: 0 },
+      // Respawn_T0 world position. The authored marker is nested under
+      // POINTS_RESCALE and MAP_ROOT; MAP_ROOT currently has scale 5.
+      { x: 654.935, y: 6.86, z: 150.265, rotY: 0 },
     ]
   },
   legoturnament: {
