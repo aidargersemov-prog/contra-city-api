@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-23-promzona-lfs-redirect-v82";
+const API_BUILD_ID = "railway-api-2026-08-23-promzona-camera-v83";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -43,7 +43,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 const REMOTE_ASSET_BUNDLE_URLS = new Map([
   [
     "promzona.unity3d",
-    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/93264bd9e9f1d0851bedea431ea327292331267b/railway-api/assetbundles/promzona.unity3d"
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/b4a905f90daff036940178bfa8c8a326a2c14a69/railway-api/assetbundles/promzona.unity3d"
   ]
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
