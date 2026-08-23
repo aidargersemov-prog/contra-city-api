@@ -1799,7 +1799,7 @@ const maps = [
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(19, "Promzona", MAP_MODE_DEATHMATCH),
+  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
