@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-24-promzona-current-v88";
+const API_BUILD_ID = "railway-api-2026-08-24-roguelike-v89";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1777,7 +1777,20 @@ const MAP_MODE_CONTROL_POINTS = 8;
 // presented as the dedicated Event mode rather than the legacy tower UI.
 //const MAP_MODE_DASHGUARD_EVENT = 16;
 const MAP_MODE_ZOMBIE = 64;
+const MAP_MODE_ROGUELIKE = 128;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
+const ROGUELIKE_MATERIAL_IDS = new Set([
+  "mat_armored_fiber",
+  "mat_weapon_alloy",
+  "mat_microchips",
+  "mat_chemical_reagents",
+  "mat_rare_electronics",
+  "mat_rare_fabric",
+  "mat_industrial_dye"
+]);
+const ROGUELIKE_MAX_WAVE = 50;
+const ROGUELIKE_MAX_CONTRABUCKS_PER_RUN = 11000;
+const ROGUELIKE_MAX_MATERIALS_PER_RUN = 40;
 const DOSSIER_GAME_MODE_STATS = [
   MAP_MODE_DEATHMATCH,
   MAP_MODE_TEAM_DEATHMATCH,
@@ -1805,7 +1818,7 @@ const maps = [
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH),
+  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH | MAP_MODE_ROGUELIKE),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
@@ -11520,6 +11533,245 @@ async function buyAbility(account, url) {
   return ok({ req: "" });
 }
 
+function roguelikeBoundedInteger(value, min, max, fallback = min) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
+function roguelikeMaterialLimit(wave, won) {
+  return Math.min(
+    ROGUELIKE_MAX_MATERIALS_PER_RUN,
+    Math.max(2, Math.floor(roguelikeBoundedInteger(wave, 0, ROGUELIKE_MAX_WAVE) * 0.8) + (won ? 8 : 0))
+  );
+}
+
+function roguelikeMaterialRewards(url, wave, won) {
+  const raw = String(url.searchParams.get("materials") || "");
+  const rewards = {};
+  let remaining = roguelikeMaterialLimit(wave, won);
+  if (!raw || remaining <= 0) return rewards;
+
+  const entries = raw.split("|");
+  if (entries.length > ROGUELIKE_MATERIAL_IDS.size) return rewards;
+  for (const entry of entries) {
+    if (remaining <= 0) break;
+    const match = /^(mat_[a-z_]+):(\d{1,2})$/.exec(entry);
+    if (!match) continue;
+    const materialId = match[1];
+    if (!ROGUELIKE_MATERIAL_IDS.has(materialId) || Object.prototype.hasOwnProperty.call(rewards, materialId)) continue;
+    const amount = Math.min(9, Number(match[2]));
+    if (!Number.isInteger(amount) || amount <= 0) continue;
+    const granted = Math.min(amount, remaining);
+    rewards[materialId] = granted;
+    remaining -= granted;
+  }
+  return rewards;
+}
+
+async function loadRoguelikeProgress(client, playerId, lock = false) {
+  await client.query(
+    `INSERT INTO player_roguelike_progress (player_id)
+     VALUES ($1)
+     ON CONFLICT (player_id) DO NOTHING`,
+    [Number(playerId)]
+  );
+  const result = await client.query(
+    `SELECT player_id, highest_wave, tutorial_completed, runs_completed
+     FROM player_roguelike_progress
+     WHERE player_id = $1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [Number(playerId)]
+  );
+  return result.rows[0] || null;
+}
+
+async function loadRoguelikeMaterials(client, playerId) {
+  const result = await client.query(
+    `SELECT material_id, amount
+     FROM player_roguelike_materials
+     WHERE player_id = $1
+     ORDER BY material_id`,
+    [Number(playerId)]
+  );
+  return result.rows.reduce((materials, row) => {
+    materials[String(row.material_id)] = Number(row.amount || 0);
+    return materials;
+  }, {});
+}
+
+function roguelikeProgressPayload(progress, materials, options = {}) {
+  return {
+    highestWave: Number(progress?.highest_wave || 0),
+    tutorialCompleted: Boolean(progress?.tutorial_completed),
+    runsCompleted: Number(progress?.runs_completed || 0),
+    materials,
+    awardedContrabucks: Number(options.awardedContrabucks || 0),
+    idempotent: Boolean(options.idempotent)
+  };
+}
+
+async function roguelikeState(account) {
+  if (!pgPool) return { result: false, error: "postgres_required" };
+  let client = null;
+  try {
+    client = await pgPool.connect();
+    const progress = await loadRoguelikeProgress(client, account.id);
+    const materials = await loadRoguelikeMaterials(client, account.id);
+    return ok({ roguelike: roguelikeProgressPayload(progress, materials) });
+  } catch (error) {
+    console.error(`[roguelike] state failed player=${account?.id || 0}`, error);
+    return { result: false, error: "roguelike_state_failed" };
+  } finally {
+    if (client) client.release();
+  }
+}
+
+async function roguelikeStart(account) {
+  if (!pgPool) return { result: false, error: "postgres_required" };
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+      const player = await client.query("SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      if (!player.rows[0] || player.rows[0].cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+      await loadRoguelikeProgress(client, account.id, true);
+      const progressResult = await client.query(
+        `UPDATE player_roguelike_progress
+         SET tutorial_completed = TRUE, updated_at = now()
+         WHERE player_id = $1
+         RETURNING player_id, highest_wave, tutorial_completed, runs_completed`,
+        [Number(account.id)]
+      );
+      await client.query("COMMIT");
+      return ok({ roguelike: roguelikeProgressPayload(progressResult.rows[0], {}) });
+    } catch (error) {
+      try { if (client) await client.query("ROLLBACK"); } catch {}
+      console.error(`[roguelike] start failed player=${account?.id || 0}`, error);
+      return { result: false, error: "roguelike_start_failed" };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function roguelikeComplete(account, url) {
+  if (!pgPool) return { result: false, error: "postgres_required" };
+  const runId = String(url.searchParams.get("rid") || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(runId)) return { result: false, error: "invalid_run_id" };
+  const wave = roguelikeBoundedInteger(url.searchParams.get("wave"), 0, ROGUELIKE_MAX_WAVE);
+  const won = url.searchParams.get("won") === "1";
+  const rewardLimit = Math.min(ROGUELIKE_MAX_CONTRABUCKS_PER_RUN, wave * 180 + (won ? 2000 : 0));
+  const requestedContrabucks = roguelikeBoundedInteger(url.searchParams.get("cb"), 0, rewardLimit);
+  const materials = roguelikeMaterialRewards(url, wave, won);
+  const summary = {
+    kills: roguelikeBoundedInteger(url.searchParams.get("kills"), 0, 5000),
+    elites: roguelikeBoundedInteger(url.searchParams.get("elites"), 0, 1000),
+    bosses: roguelikeBoundedInteger(url.searchParams.get("bosses"), 0, 100),
+    damage: roguelikeBoundedInteger(url.searchParams.get("damage"), 0, 100000000)
+  };
+
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+      const playerResult = await client.query("SELECT id, cckey, money FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      const player = playerResult.rows[0];
+      if (!player || player.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const existingResult = await client.query(
+        `SELECT reward_contrabucks, material_rewards
+         FROM roguelike_runs
+         WHERE player_id = $1 AND client_run_id = $2
+         FOR UPDATE`,
+        [Number(account.id), runId]
+      );
+      if (existingResult.rows[0]) {
+        const progress = await loadRoguelikeProgress(client, account.id, true);
+        const storedMaterials = await loadRoguelikeMaterials(client, account.id);
+        await client.query("COMMIT");
+        return ok({
+          roguelike: roguelikeProgressPayload(progress, storedMaterials, {
+            awardedContrabucks: Number(existingResult.rows[0].reward_contrabucks || 0),
+            idempotent: true
+          }),
+          vcur: Number(player.money || 0)
+        });
+      }
+
+      const progress = await loadRoguelikeProgress(client, account.id, true);
+      const currentMoney = Number(player.money || 0);
+      const nextMoney = currentMoney + requestedContrabucks;
+      await client.query(
+        "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+        [Number(account.id), nextMoney]
+      );
+      for (const [materialId, amount] of Object.entries(materials)) {
+        await client.query(
+          `INSERT INTO player_roguelike_materials (player_id, material_id, amount, updated_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (player_id, material_id) DO UPDATE SET
+             amount = LEAST(1000000, player_roguelike_materials.amount + EXCLUDED.amount),
+             updated_at = now()`,
+          [Number(account.id), materialId, amount]
+        );
+      }
+      const progressResult = await client.query(
+        `UPDATE player_roguelike_progress
+         SET highest_wave = GREATEST(highest_wave, $2),
+             tutorial_completed = TRUE,
+             runs_completed = runs_completed + 1,
+             updated_at = now()
+         WHERE player_id = $1
+         RETURNING player_id, highest_wave, tutorial_completed, runs_completed`,
+        [Number(account.id), wave]
+      );
+      await client.query(
+        `INSERT INTO roguelike_runs (
+           player_id, client_run_id, wave, won, reward_contrabucks, material_rewards, summary
+         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
+        [Number(account.id), runId, wave, won, requestedContrabucks, JSON.stringify(materials), JSON.stringify(summary)]
+      );
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "roguelike_run_completed",
+        category: "roguelike",
+        severity: won ? "notice" : "info",
+        description: `Рогалик: волна ${wave}, ${won ? "победа" : "поражение"}, +${requestedContrabucks} контрабаксов`,
+        oldValue: { balance: currentMoney, highestWave: Number(progress?.highest_wave || 0) },
+        newValue: { balance: nextMoney, highestWave: Number(progressResult.rows[0]?.highest_wave || wave) },
+        metadata: { runId, wave, won, materialRewards: materials, summary }
+      });
+      const storedMaterials = await loadRoguelikeMaterials(client, account.id);
+      await client.query("COMMIT");
+
+      account.money = nextMoney;
+      const cached = store.accounts[String(account.id)];
+      if (cached && cached.key === account.key) cached.money = nextMoney;
+      return ok({
+        roguelike: roguelikeProgressPayload(progressResult.rows[0], storedMaterials, {
+          awardedContrabucks: requestedContrabucks
+        }),
+        vcur: nextMoney
+      });
+    } catch (error) {
+      try { if (client) await client.query("ROLLBACK"); } catch {}
+      console.error(`[roguelike] complete failed player=${account?.id || 0} run=${runId}`, error);
+      return { result: false, error: "roguelike_complete_failed" };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   const { page, act } = normalizedAjaxRoute(url);
   let account = resolvedAccount || accountFrom(url);
@@ -11554,6 +11806,13 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
       caseOpen: battlePassCaseAccessPayload(account, requestOrigin),
       casePending
     });
+  }
+
+  if (page === "rogue") {
+    if (act === "state") return await roguelikeState(account);
+    if (act === "start") return await roguelikeStart(account);
+    if (act === "complete") return await roguelikeComplete(account, url);
+    return { result: false, error: "unknown_roguelike_action" };
   }
 
   if (page === "pl") {
