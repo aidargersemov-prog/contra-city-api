@@ -22,7 +22,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-24-promzona-scale-spawn-v298";
+const BUILD_ID = "battle-server-2026-08-24-roguelike-promzona-v299";
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
@@ -918,6 +918,9 @@ const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
+// Client enum MapMode.MODE.ROGUELIKE. This is a local PvE director mode: it
+// uses the normal battle transport for player spawn and does not add Photon events.
+const MAP_MODE_ROGUELIKE = 128;
 const ZOMBIE_MODE = {
   PAUSE: 1,
   WAIT_FOR_PLAYERS: 2,
@@ -938,6 +941,7 @@ const MAP_ALLOWED_MODES = {
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
   arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
   inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  promzona: [MAP_MODE_DEATHMATCH, MAP_MODE_ROGUELIKE],
 };
 const CTF_MAPS = {
   arena_3lvl: [{team:1,x:-30,y:-65,z:282},{team:2,x:87,y:-65,z:295}],
@@ -1007,6 +1011,11 @@ function normalizeModeForMap(mapName, requestedMode) {
   return allowed.includes(mode) ? mode : allowed[0];
 }
 
+function maxUsersForRoomMode(mode, value, fallback = 8) {
+  const normalized = shortRoomValue(value, fallback, 1, 64);
+  return Number(mode) === MAP_MODE_ROGUELIKE ? 1 : normalized;
+}
+
 function allSpawnPointsForDeathmatch(mapSpawns) {
   return [
     ...(mapSpawns?.dm || []),
@@ -1018,7 +1027,7 @@ function allSpawnPointsForDeathmatch(mapSpawns) {
 function pointListFor(session, team) {
   const mapSpawns = MAP_SPAWN_POINTS[mapKey(session.room?.map)];
   if (!mapSpawns) return null;
-  if (roomMode(session) === MAP_MODE_DEATHMATCH || roomMode(session) === MAP_MODE_ZOMBIE) {
+  if (roomMode(session) === MAP_MODE_DEATHMATCH || roomMode(session) === MAP_MODE_ZOMBIE || roomMode(session) === MAP_MODE_ROGUELIKE) {
     const points = allSpawnPointsForDeathmatch(mapSpawns);
     return points.length ? points : null;
   }
@@ -1061,7 +1070,7 @@ function spawnPointFor(session, team) {
   const preferredPoints = preferredDmSpawnPoints(session, team, points);
   const candidates = preferredPoints.length ? preferredPoints : points;
   const mode = roomMode(session);
-  const baseIndex = mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_ZOMBIE
+  const baseIndex = mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_ZOMBIE || mode === MAP_MODE_ROGUELIKE
     ? Math.floor(Math.random() * candidates.length)
     : (Number(session.actorId) || 1) - 1;
   const point = candidates[Math.abs(baseIndex) % candidates.length];
@@ -2635,7 +2644,7 @@ function roomSettingsFrom(rawRoom) {
     name,
     map,
     mode,
-    maxUsers: shortRoomValue(maxUsers, 8, 1, 64),
+    maxUsers: maxUsersForRoomMode(mode, maxUsers),
     friendlyFire: boolOr(friendly, false),
     timeLimit: shortRoomValue(htGet(rawRoom, "time_limit")?.value, 10, 1, 50),
     fragLimit: shortRoomValue(htGet(rawRoom, "frag_limit")?.value, 50, 1, 1000),
@@ -2648,15 +2657,16 @@ function roomSettingsFrom(rawRoom) {
 }
 
 function makeRoomSettingsRaw(settings) {
+  const mode = Number(settings.mode ?? MAP_MODE_DEATHMATCH);
   const entries = [
     { key: rawString("time_limit"), value: rawShort(shortRoomValue(settings.timeLimit, 10, 1, 50)) },
     { key: rawString("frag_limit"), value: rawShort(shortRoomValue(settings.fragLimit, 50, 1, 1000)) },
     { key: rawString("friendly_fire"), value: rawBool(settings.friendlyFire) },
     { key: rawString("lvl_min"), value: rawShort(shortRoomValue(settings.lvlMin, 1, 1, 99)) },
     { key: rawString("lvl_max"), value: rawShort(shortRoomValue(settings.lvlMax, 50, 1, 99)) },
-    { key: rawString("game_mode"), value: rawByte(settings.mode) },
+    { key: rawString("game_mode"), value: rawByte(mode) },
     { key: rawString("map"), value: rawString(settings.map) },
-    { key: rawString("max_users"), value: rawShort(shortRoomValue(settings.maxUsers, 8, 1, 64)) },
+    { key: rawString("max_users"), value: rawShort(maxUsersForRoomMode(mode, settings.maxUsers)) },
     { key: rawString("name"), value: rawString(settings.name) },
     {
       key: rawString("game_param"),
@@ -5935,7 +5945,7 @@ function roomMode(session) {
 }
 
 function isTeamMode(mode) {
-  return mode >= 2 && mode !== 16 && mode !== 64;
+  return mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CAPTURE_THE_FLAG || mode === MAP_MODE_CONTROL_POINTS;
 }
 
 function isVoiceEvent(parsed) {
@@ -9844,7 +9854,7 @@ function ensureRoom(settings) {
       name,
       map: requestedMap,
       mode: normalizedMode,
-      maxUsers: settings.maxUsers || 8,
+      maxUsers: maxUsersForRoomMode(normalizedMode, settings.maxUsers),
       friendlyFire: settings.friendlyFire || false,
       timeLimit: settings.timeLimit || 10,
       fragLimit: settings.fragLimit || 50,
@@ -9885,7 +9895,7 @@ function ensureRoom(settings) {
       clearZombieTimers(room);
       room.map = settings.map || room.map || DEFAULT_MAP;
       room.mode = normalizeModeForMap(room.map, mode);
-      room.maxUsers = settings.maxUsers || room.maxUsers || 8;
+      room.maxUsers = maxUsersForRoomMode(room.mode, settings.maxUsers || room.maxUsers);
       room.friendlyFire = settings.friendlyFire || false;
       room.timeLimit = settings.timeLimit || room.timeLimit || 10;
       room.fragLimit = settings.fragLimit || room.fragLimit || 50;
