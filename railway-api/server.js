@@ -22,7 +22,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-25-promzona-tracer-v94";
+const API_BUILD_ID = "railway-api-2026-08-26-expedition-v94";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -43,7 +43,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 const REMOTE_ASSET_BUNDLE_URLS = new Map([
   [
     "promzona.unity3d",
-    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/8e8e5f614069e592e83172361ae722848c8bdbe5/railway-api/assetbundles/promzona.unity3d"
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/1d49d3b0e78b2fd9eb8d6baaa5c91a4429276c24/railway-api/assetbundles/promzona.unity3d"
   ]
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
@@ -366,7 +366,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -1779,18 +1779,6 @@ const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
 const MAP_MODE_ROGUELIKE = 128;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
-const ROGUELIKE_MATERIAL_IDS = new Set([
-  "mat_armored_fiber",
-  "mat_weapon_alloy",
-  "mat_microchips",
-  "mat_chemical_reagents",
-  "mat_rare_electronics",
-  "mat_rare_fabric",
-  "mat_industrial_dye"
-]);
-const ROGUELIKE_MAX_WAVE = 50;
-const ROGUELIKE_MAX_CONTRABUCKS_PER_RUN = 11000;
-const ROGUELIKE_MAX_MATERIALS_PER_RUN = 40;
 const DOSSIER_GAME_MODE_STATS = [
   MAP_MODE_DEATHMATCH,
   MAP_MODE_TEAM_DEATHMATCH,
@@ -11533,239 +11521,265 @@ async function buyAbility(account, url) {
   return ok({ req: "" });
 }
 
-function roguelikeBoundedInteger(value, min, max, fallback = min) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+// Expedition persistent inventory is intentionally separate from the legacy weapon/
+// clothing inventory.  Its contents are only written by the battle-service endpoint.
+const EXPEDITION_STASH_WIDTH = 5;
+const EXPEDITION_STASH_HEIGHT = 4;
+const EXPEDITION_PAGE_COSTS = { 3: 10000, 4: 15000 };
+const EXPEDITION_ITEM_META = {
+  mat_industrial_dye: { type: "material", width: 1, height: 1 },
+  mat_rare_fabric: { type: "material", width: 1, height: 2 },
+  mat_chemical_reagents: { type: "material", width: 1, height: 1 },
+  mat_microchips: { type: "material", width: 1, height: 1 },
+  mat_rare_electronics: { type: "material", width: 2, height: 2 },
+  mat_weapon_alloy: { type: "material", width: 2, height: 1 },
+  mat_armored_fiber: { type: "material", width: 2, height: 2 },
+  coupon_100: { type: "coupon", width: 1, height: 1, value: 100 },
+  coupon_300: { type: "coupon", width: 1, height: 1, value: 300 },
+};
+
+function expeditionRunId(value) {
+  const id = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{32}$/.test(id) ? id : "";
 }
 
-function roguelikeMaterialLimit(wave, won) {
-  return Math.min(
-    ROGUELIKE_MAX_MATERIALS_PER_RUN,
-    Math.max(2, Math.floor(roguelikeBoundedInteger(wave, 0, ROGUELIKE_MAX_WAVE) * 0.8) + (won ? 8 : 0))
-  );
-}
-
-function roguelikeMaterialRewards(url, wave, won) {
-  const raw = String(url.searchParams.get("materials") || "");
-  const rewards = {};
-  let remaining = roguelikeMaterialLimit(wave, won);
-  if (!raw || remaining <= 0) return rewards;
-
-  const entries = raw.split("|");
-  if (entries.length > ROGUELIKE_MATERIAL_IDS.size) return rewards;
-  for (const entry of entries) {
-    if (remaining <= 0) break;
-    const match = /^(mat_[a-z_]+):(\d{1,2})$/.exec(entry);
-    if (!match) continue;
-    const materialId = match[1];
-    if (!ROGUELIKE_MATERIAL_IDS.has(materialId) || Object.prototype.hasOwnProperty.call(rewards, materialId)) continue;
-    const amount = Math.min(9, Number(match[2]));
-    if (!Number.isInteger(amount) || amount <= 0) continue;
-    const granted = Math.min(amount, remaining);
-    rewards[materialId] = granted;
-    remaining -= granted;
-  }
-  return rewards;
-}
-
-async function loadRoguelikeProgress(client, playerId, lock = false) {
+async function ensureExpeditionPages(client, playerId) {
   await client.query(
-    `INSERT INTO player_roguelike_progress (player_id)
-     VALUES ($1)
-     ON CONFLICT (player_id) DO NOTHING`,
+    `INSERT INTO expedition_stash_pages (player_id, page_index, unlocked)
+     VALUES ($1, 1, TRUE), ($1, 2, TRUE), ($1, 3, FALSE), ($1, 4, FALSE)
+     ON CONFLICT (player_id, page_index) DO NOTHING`,
     [Number(playerId)]
   );
-  const result = await client.query(
-    `SELECT player_id, highest_wave, tutorial_completed, runs_completed
-     FROM player_roguelike_progress
-     WHERE player_id = $1
-     ${lock ? "FOR UPDATE" : ""}`,
-    [Number(playerId)]
-  );
-  return result.rows[0] || null;
 }
 
-async function loadRoguelikeMaterials(client, playerId) {
-  const result = await client.query(
-    `SELECT material_id, amount
-     FROM player_roguelike_materials
-     WHERE player_id = $1
-     ORDER BY material_id`,
-    [Number(playerId)]
-  );
-  return result.rows.reduce((materials, row) => {
-    materials[String(row.material_id)] = Number(row.amount || 0);
-    return materials;
-  }, {});
-}
-
-function roguelikeProgressPayload(progress, materials, options = {}) {
+function expeditionItemPayload(row) {
   return {
-    highestWave: Number(progress?.highest_wave || 0),
-    tutorialCompleted: Boolean(progress?.tutorial_completed),
-    runsCompleted: Number(progress?.runs_completed || 0),
-    materials,
-    awardedContrabucks: Number(options.awardedContrabucks || 0),
-    idempotent: Boolean(options.idempotent)
+    id: String(row.id), itemId: row.item_id, type: row.item_type,
+    amount: Number(row.amount), value: Number(row.coupon_value || 0),
+    page: Number(row.page_index), x: Number(row.slot_x), y: Number(row.slot_y),
+    width: Number(row.width), height: Number(row.height),
   };
 }
 
-async function roguelikeState(account) {
+async function expeditionState(account) {
   if (!pgPool) return { result: false, error: "postgres_required" };
   let client = null;
   try {
     client = await pgPool.connect();
-    const progress = await loadRoguelikeProgress(client, account.id);
-    const materials = await loadRoguelikeMaterials(client, account.id);
-    return ok({ roguelike: roguelikeProgressPayload(progress, materials) });
+    await ensureExpeditionPages(client, account.id);
+    const [pages, items] = await Promise.all([
+      client.query(`SELECT page_index, unlocked FROM expedition_stash_pages WHERE player_id = $1 ORDER BY page_index`, [Number(account.id)]),
+      client.query(`SELECT id, page_index, slot_x, slot_y, width, height, item_id, item_type, amount, coupon_value
+                    FROM expedition_stash_items WHERE player_id = $1 ORDER BY page_index, slot_y, slot_x, id`, [Number(account.id)]),
+    ]);
+    return ok({
+      expedition: {
+        width: EXPEDITION_STASH_WIDTH, height: EXPEDITION_STASH_HEIGHT,
+        pages: pages.rows.map((page) => ({ index: Number(page.page_index), unlocked: Boolean(page.unlocked), price: EXPEDITION_PAGE_COSTS[Number(page.page_index)] || 0 })),
+        items: items.rows.map(expeditionItemPayload),
+      }
+    });
   } catch (error) {
-    console.error(`[roguelike] state failed player=${account?.id || 0}`, error);
-    return { result: false, error: "roguelike_state_failed" };
+    console.error(`[expedition] state failed player=${account?.id || 0}`, error);
+    return { result: false, error: "expedition_state_failed" };
   } finally {
     if (client) client.release();
   }
 }
 
-async function roguelikeStart(account) {
+async function expeditionUnlockPage(account, requestedPage) {
   if (!pgPool) return { result: false, error: "postgres_required" };
+  const page = Number(requestedPage || 0);
+  const price = EXPEDITION_PAGE_COSTS[page];
+  if (!price) return { result: false, error: "invalid_page" };
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
       client = await pgPool.connect();
       await client.query("BEGIN");
-      const player = await client.query("SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      if (!player.rows[0] || player.rows[0].cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-      await loadRoguelikeProgress(client, account.id, true);
-      const progressResult = await client.query(
-        `UPDATE player_roguelike_progress
-         SET tutorial_completed = TRUE, updated_at = now()
-         WHERE player_id = $1
-         RETURNING player_id, highest_wave, tutorial_completed, runs_completed`,
-        [Number(account.id)]
+      await ensureExpeditionPages(client, account.id);
+      const pageResult = await client.query(
+        `SELECT unlocked FROM expedition_stash_pages WHERE player_id = $1 AND page_index = $2 FOR UPDATE`,
+        [Number(account.id), page]
       );
+      if (pageResult.rows[0]?.unlocked) {
+        await client.query("COMMIT");
+        return ok({ page, unlocked: true, idempotent: true, vcur: Number(account.money || 0) });
+      }
+      const playerResult = await client.query(`SELECT money FROM players WHERE id = $1 FOR UPDATE`, [Number(account.id)]);
+      const money = Number(playerResult.rows[0]?.money || 0);
+      if (money < price) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "not_enough_contrabucks" };
+      }
+      const nextMoney = money - price;
+      await client.query(`UPDATE players SET money = $2, updated_at = now() WHERE id = $1`, [Number(account.id), nextMoney]);
+      await client.query(`UPDATE expedition_stash_pages SET unlocked = TRUE, unlocked_at = now() WHERE player_id = $1 AND page_index = $2`, [Number(account.id), page]);
       await client.query("COMMIT");
-      return ok({ roguelike: roguelikeProgressPayload(progressResult.rows[0], {}) });
+      account.money = nextMoney;
+      const cached = store.accounts[String(account.id)];
+      if (cached && cached.key === account.key) cached.money = nextMoney;
+      return ok({ page, unlocked: true, price, vcur: nextMoney });
     } catch (error) {
       try { if (client) await client.query("ROLLBACK"); } catch {}
-      console.error(`[roguelike] start failed player=${account?.id || 0}`, error);
-      return { result: false, error: "roguelike_start_failed" };
+      console.error(`[expedition] unlock failed player=${account?.id || 0}`, error);
+      return { result: false, error: "expedition_unlock_failed" };
     } finally {
       if (client) client.release();
     }
   });
 }
 
-async function roguelikeComplete(account, url) {
+async function expeditionClaimCoupon(account, rawItemId) {
   if (!pgPool) return { result: false, error: "postgres_required" };
-  const runId = String(url.searchParams.get("rid") || "").trim().toLowerCase();
-  if (!/^[0-9a-f]{32}$/.test(runId)) return { result: false, error: "invalid_run_id" };
-  const wave = roguelikeBoundedInteger(url.searchParams.get("wave"), 0, ROGUELIKE_MAX_WAVE);
-  const won = url.searchParams.get("won") === "1";
-  const rewardLimit = Math.min(ROGUELIKE_MAX_CONTRABUCKS_PER_RUN, wave * 180 + (won ? 2000 : 0));
-  const requestedContrabucks = roguelikeBoundedInteger(url.searchParams.get("cb"), 0, rewardLimit);
-  const materials = roguelikeMaterialRewards(url, wave, won);
-  const summary = {
-    kills: roguelikeBoundedInteger(url.searchParams.get("kills"), 0, 5000),
-    elites: roguelikeBoundedInteger(url.searchParams.get("elites"), 0, 1000),
-    bosses: roguelikeBoundedInteger(url.searchParams.get("bosses"), 0, 100),
-    damage: roguelikeBoundedInteger(url.searchParams.get("damage"), 0, 100000000)
-  };
-
+  const itemId = Number(rawItemId || 0);
+  if (!Number.isSafeInteger(itemId) || itemId <= 0) return { result: false, error: "invalid_coupon" };
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
       client = await pgPool.connect();
       await client.query("BEGIN");
-      const playerResult = await client.query("SELECT id, cckey, money FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
-      const player = playerResult.rows[0];
-      if (!player || player.cckey !== account.key) {
-        await client.query("ROLLBACK");
-        return { result: false, error: "1" };
-      }
-
-      const existingResult = await client.query(
-        `SELECT reward_contrabucks, material_rewards
-         FROM roguelike_runs
-         WHERE player_id = $1 AND client_run_id = $2
-         FOR UPDATE`,
-        [Number(account.id), runId]
+      const itemResult = await client.query(
+        `SELECT id, coupon_value FROM expedition_stash_items
+         WHERE id = $1 AND player_id = $2 AND item_type = 'coupon' FOR UPDATE`,
+        [itemId, Number(account.id)]
       );
-      if (existingResult.rows[0]) {
-        const progress = await loadRoguelikeProgress(client, account.id, true);
-        const storedMaterials = await loadRoguelikeMaterials(client, account.id);
+      const item = itemResult.rows[0];
+      if (!item) {
+        const redeemed = await client.query(`SELECT value FROM expedition_coupon_redemptions WHERE stash_item_id = $1 AND player_id = $2`, [itemId, Number(account.id)]);
         await client.query("COMMIT");
-        return ok({
-          roguelike: roguelikeProgressPayload(progress, storedMaterials, {
-            awardedContrabucks: Number(existingResult.rows[0].reward_contrabucks || 0),
-            idempotent: true
-          }),
-          vcur: Number(player.money || 0)
-        });
+        return redeemed.rows[0]
+          ? ok({ couponId: String(itemId), awarded: Number(redeemed.rows[0].value), idempotent: true, vcur: Number(account.money || 0) })
+          : { result: false, error: "coupon_not_found" };
       }
-
-      const progress = await loadRoguelikeProgress(client, account.id, true);
-      const currentMoney = Number(player.money || 0);
-      const nextMoney = currentMoney + requestedContrabucks;
-      await client.query(
-        "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
-        [Number(account.id), nextMoney]
-      );
-      for (const [materialId, amount] of Object.entries(materials)) {
-        await client.query(
-          `INSERT INTO player_roguelike_materials (player_id, material_id, amount, updated_at)
-           VALUES ($1, $2, $3, now())
-           ON CONFLICT (player_id, material_id) DO UPDATE SET
-             amount = LEAST(1000000, player_roguelike_materials.amount + EXCLUDED.amount),
-             updated_at = now()`,
-          [Number(account.id), materialId, amount]
-        );
+      const value = Number(item.coupon_value || 0);
+      if (value <= 0) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "invalid_coupon" };
       }
-      const progressResult = await client.query(
-        `UPDATE player_roguelike_progress
-         SET highest_wave = GREATEST(highest_wave, $2),
-             tutorial_completed = TRUE,
-             runs_completed = runs_completed + 1,
-             updated_at = now()
-         WHERE player_id = $1
-         RETURNING player_id, highest_wave, tutorial_completed, runs_completed`,
-        [Number(account.id), wave]
+      const redemption = await client.query(
+        `INSERT INTO expedition_coupon_redemptions (stash_item_id, player_id, value)
+         VALUES ($1, $2, $3) ON CONFLICT (stash_item_id) DO NOTHING RETURNING value`,
+        [itemId, Number(account.id), value]
       );
-      await client.query(
-        `INSERT INTO roguelike_runs (
-           player_id, client_run_id, wave, won, reward_contrabucks, material_rewards, summary
-         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`,
-        [Number(account.id), runId, wave, won, requestedContrabucks, JSON.stringify(materials), JSON.stringify(summary)]
-      );
-      await auditGameEvent(client, {
-        playerId: account.id,
-        eventType: "roguelike_run_completed",
-        category: "roguelike",
-        severity: won ? "notice" : "info",
-        description: `Рогалик: волна ${wave}, ${won ? "победа" : "поражение"}, +${requestedContrabucks} контрабаксов`,
-        oldValue: { balance: currentMoney, highestWave: Number(progress?.highest_wave || 0) },
-        newValue: { balance: nextMoney, highestWave: Number(progressResult.rows[0]?.highest_wave || wave) },
-        metadata: { runId, wave, won, materialRewards: materials, summary }
-      });
-      const storedMaterials = await loadRoguelikeMaterials(client, account.id);
+      if (!redemption.rows[0]) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "coupon_already_redeemed" };
+      }
+      const playerResult = await client.query(`SELECT money FROM players WHERE id = $1 FOR UPDATE`, [Number(account.id)]);
+      const nextMoney = Number(playerResult.rows[0]?.money || 0) + value;
+      await client.query(`DELETE FROM expedition_stash_items WHERE id = $1 AND player_id = $2`, [itemId, Number(account.id)]);
+      await client.query(`UPDATE players SET money = $2, updated_at = now() WHERE id = $1`, [Number(account.id), nextMoney]);
       await client.query("COMMIT");
-
       account.money = nextMoney;
       const cached = store.accounts[String(account.id)];
       if (cached && cached.key === account.key) cached.money = nextMoney;
-      return ok({
-        roguelike: roguelikeProgressPayload(progressResult.rows[0], storedMaterials, {
-          awardedContrabucks: requestedContrabucks
-        }),
-        vcur: nextMoney
-      });
+      return ok({ couponId: String(itemId), awarded: value, vcur: nextMoney });
     } catch (error) {
       try { if (client) await client.query("ROLLBACK"); } catch {}
-      console.error(`[roguelike] complete failed player=${account?.id || 0} run=${runId}`, error);
-      return { result: false, error: "roguelike_complete_failed" };
+      console.error(`[expedition] coupon claim failed player=${account?.id || 0} item=${itemId}`, error);
+      return { result: false, error: "expedition_coupon_failed" };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+function expeditionSlotFits(items, page, x, y, width, height) {
+  for (const item of items) {
+    if (Number(item.page_index) !== page) continue;
+    const overlapX = x < Number(item.slot_x) + Number(item.width) && x + width > Number(item.slot_x);
+    const overlapY = y < Number(item.slot_y) + Number(item.height) && y + height > Number(item.slot_y);
+    if (overlapX && overlapY) return false;
+  }
+  return true;
+}
+
+function expeditionFirstFreeSlot(items, pages, meta) {
+  for (const page of pages) {
+    if (!page.unlocked) continue;
+    for (let y = 0; y <= EXPEDITION_STASH_HEIGHT - meta.height; y += 1) {
+      for (let x = 0; x <= EXPEDITION_STASH_WIDTH - meta.width; x += 1) {
+        if (expeditionSlotFits(items, Number(page.page_index), x, y, meta.width, meta.height)) return { page: Number(page.page_index), x, y };
+      }
+    }
+  }
+  return null;
+}
+
+function expeditionSanitizeLoot(rawLoot) {
+  if (!Array.isArray(rawLoot) || rawLoot.length > 36) return null;
+  const result = [];
+  for (const raw of rawLoot) {
+    const itemId = String(raw?.itemId || raw?.id || "").trim();
+    const meta = EXPEDITION_ITEM_META[itemId];
+    const amount = Number(raw?.amount || 0);
+    if (!meta || !Number.isInteger(amount) || amount < 1 || amount > 100) return null;
+    result.push({ itemId, amount, meta });
+  }
+  return result;
+}
+
+async function battleExpeditionComplete(body) {
+  if (!pgPool) return { ok: false, error: "postgres_required", status: 503 };
+  const playerId = Number(body?.playerId || 0);
+  const runId = expeditionRunId(body?.runId || body?.clientRunId);
+  const result = String(body?.result || "").toLowerCase();
+  const highestWave = Math.max(0, Math.min(50, Math.trunc(Number(body?.highestWave || 0))));
+  const playerCount = Math.max(1, Math.min(4, Math.trunc(Number(body?.playerCount || 1))));
+  const roomName = String(body?.roomName || "").slice(0, 96);
+  const loot = expeditionSanitizeLoot(body?.loot || []);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0 || !runId || !["evacuated", "wiped"].includes(result) || !loot) return { ok: false, error: "invalid_expedition_result", status: 400 };
+  if (result === "wiped" && loot.length) return { ok: false, error: "wiped_run_cannot_transfer_loot", status: 400 };
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+      await ensureExpeditionPages(client, playerId);
+      const existingResult = await client.query(
+        `SELECT state FROM expedition_runs WHERE player_id = $1 AND client_run_id = $2 FOR UPDATE`, [playerId, runId]
+      );
+      if (existingResult.rows[0]) {
+        await client.query("COMMIT");
+        return { ok: true, idempotent: true, result: existingResult.rows[0].state };
+      }
+      const pagesResult = await client.query(`SELECT page_index, unlocked FROM expedition_stash_pages WHERE player_id = $1 ORDER BY page_index FOR UPDATE`, [playerId]);
+      const itemsResult = await client.query(`SELECT page_index, slot_x, slot_y, width, height FROM expedition_stash_items WHERE player_id = $1 FOR UPDATE`, [playerId]);
+      const staged = [];
+      const occupied = itemsResult.rows.slice();
+      if (result === "evacuated") {
+        for (const lootItem of loot) {
+          for (let amountIndex = 0; amountIndex < lootItem.amount; amountIndex += 1) {
+            const slot = expeditionFirstFreeSlot(occupied, pagesResult.rows, lootItem.meta);
+            if (!slot) {
+              await client.query("ROLLBACK");
+              return { ok: false, error: "expedition_stash_full", status: 409 };
+            }
+            const row = { page_index: slot.page, slot_x: slot.x, slot_y: slot.y, width: lootItem.meta.width, height: lootItem.meta.height };
+            occupied.push(row);
+            staged.push({ ...row, itemId: lootItem.itemId, meta: lootItem.meta });
+          }
+        }
+        for (const item of staged) {
+          await client.query(
+            `INSERT INTO expedition_stash_items (player_id, page_index, slot_x, slot_y, width, height, item_id, item_type, amount, coupon_value)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,$9)`,
+            [playerId, item.page_index, item.slot_x, item.slot_y, item.width, item.height, item.itemId, item.meta.type, Number(item.meta.value || 0)]
+          );
+        }
+      }
+      await client.query(
+        `INSERT INTO expedition_runs (player_id, client_run_id, room_name, player_count, state, highest_wave, loot, finished_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now())`,
+        [playerId, runId, roomName, playerCount, result, highestWave, JSON.stringify(loot.map(({ itemId, amount }) => ({ itemId, amount })))]
+      );
+      await client.query("COMMIT");
+      return { ok: true, result, transferredItems: staged.length };
+    } catch (error) {
+      try { if (client) await client.query("ROLLBACK"); } catch {}
+      console.error(`[expedition] battle completion failed player=${playerId} run=${runId}`, error);
+      return { ok: false, error: "expedition_complete_failed", status: 500 };
     } finally {
       if (client) client.release();
     }
@@ -11808,12 +11822,16 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     });
   }
 
-  if (page === "rogue") {
-    if (act === "state") return await roguelikeState(account);
-    if (act === "start") return await roguelikeStart(account);
-    if (act === "complete") return await roguelikeComplete(account, url);
-    return { result: false, error: "unknown_roguelike_action" };
+  if (page === "expedition" || page === "rogue") {
+    if (act === "state") return expeditionState(account);
+    if (act === "unlock_page") return expeditionUnlockPage(account, url.searchParams.get("page"));
+    if (act === "claim_coupon") return expeditionClaimCoupon(account, url.searchParams.get("item") || url.searchParams.get("itemId"));
+    // The battle service, not the client, creates a run result and transfers its loot.
+    if (act === "start") return ok({ expedition: { accepted: true } });
+    if (act === "complete") return { result: false, error: "battle_service_required" };
+    return { result: false, error: "unknown_expedition_action" };
   }
+
 
   if (page === "pl") {
     if (act === "i") {
@@ -13522,6 +13540,29 @@ async function handleHttpRequest(req, res) {
       sendJson(res, await recordBattleSecurityEvent(body));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "battle_security_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/expedition") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 128 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.playerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const result = await battleExpeditionComplete(body);
+      sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "battle_expedition_failed" }, serviceErrorStatus(error));
     }
     return;
   }
