@@ -1,5 +1,6 @@
 ﻿const dgram = require("dgram");
 const net = require("net");
+const crypto = require("crypto");
 const { TextDecoder } = require("util");
 const { monitorEventLoopDelay } = require("perf_hooks");
 
@@ -22,7 +23,12 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-24-roguelike-promzona-v299";
+const BUILD_ID = "battle-server-2026-08-26-expedition-v302";
+// Isolated Expedition protocol. Code 157 is unused by the recovered client;
+// no existing Photon event (84/97/99/100/105) is repurposed.
+const EXPEDITION_EVENT = 157;
+const EXPEDITION_COMMAND = Object.freeze({ START: 1, WAVE: 2, COMPLETE: 3, STARTED: 101, COMPLETED: 102, REJECTED: 103 });
+const EXPEDITION_WAVE_REPORT_MIN_MS = Math.max(1000, Number(process.env.EXPEDITION_WAVE_REPORT_MIN_MS || 5000));
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
@@ -918,8 +924,7 @@ const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
 const MAP_MODE_ZOMBIE = 64;
-// Client enum MapMode.MODE.ROGUELIKE. This is a local PvE director mode: it
-// uses the normal battle transport for player spawn and does not add Photon events.
+// New mode. It deliberately does not reuse any original Photon event code.
 const MAP_MODE_ROGUELIKE = 128;
 const ZOMBIE_MODE = {
   PAUSE: 1,
@@ -1013,7 +1018,8 @@ function normalizeModeForMap(mapName, requestedMode) {
 
 function maxUsersForRoomMode(mode, value, fallback = 8) {
   const normalized = shortRoomValue(value, fallback, 1, 64);
-  return Number(mode) === MAP_MODE_ROGUELIKE ? 1 : normalized;
+  if (Number(mode) === MAP_MODE_ROGUELIKE) return Math.max(1, Math.min(4, normalized));
+  return normalized;
 }
 
 function allSpawnPointsForDeathmatch(mapSpawns) {
@@ -9888,6 +9894,7 @@ function ensureRoom(settings) {
       standardRestartTimer: null,
       standardTeam1Wins: 0,
       standardTeam2Wins: 0,
+      expedition: null,
     });
   } else {
     const room = rooms.get(name);
@@ -9922,6 +9929,7 @@ function ensureRoom(settings) {
       room.standardRoundWinner = 0;
       room.standardTeam1Wins = 0;
       room.standardTeam2Wins = 0;
+      room.expedition = null;
     }
     ensureRoomItems(room);
   }
@@ -11475,6 +11483,157 @@ function buildBattleChatEvent(session, message, type) {
   ]);
 }
 
+function isExpeditionRoom(session) {
+  return Number(session?.room?.mode) === MAP_MODE_ROGUELIKE && mapKey(session?.room?.map) === "promzona";
+}
+
+function expeditionRunId(value) {
+  const runId = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{32}$/.test(runId) ? runId : "";
+}
+
+function newExpeditionRunId() {
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function expeditionPayloadValue(data, key, fallback = null) {
+  const item = data ? htGet(data, key) : null;
+  return item ? item.value : fallback;
+}
+
+function makeExpeditionReply(session, command, runId, message, ok) {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(command) },
+        { key: rawByte(2), value: rawString(runId || "") },
+        { key: rawByte(3), value: rawString(message || "") },
+        { key: rawByte(4), value: rawBool(Boolean(ok)) },
+      ]),
+    },
+  ]);
+}
+
+function ensureExpeditionRun(room) {
+  if (!room.expedition || room.expedition.phase === "finished") {
+    room.expedition = {
+      runId: newExpeditionRunId(), phase: "starting", wave: 0,
+      playerCount: 1, startedAt: Date.now(), lastWaveAt: 0,
+      completionByPlayer: new Map(),
+    };
+  }
+  return room.expedition;
+}
+
+function expeditionLootFromWire(value) {
+  if (typeof value !== "string" || value.length > 4096) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length > 9) return null;
+    const allowed = new Set([
+      "mat_industrial_dye", "mat_rare_fabric", "mat_chemical_reagents", "mat_microchips",
+      "mat_rare_electronics", "mat_weapon_alloy", "mat_armored_fiber", "coupon_100", "coupon_300",
+    ]);
+    const loot = [];
+    for (const entry of parsed) {
+      const itemId = String(entry?.id || "").trim();
+      const amount = Number(entry?.amount || 0);
+      if (!allowed.has(itemId) || !Number.isInteger(amount) || amount < 1 || amount > 100) return null;
+      loot.push({ itemId, amount });
+    }
+    return loot;
+  } catch {
+    return null;
+  }
+}
+
+async function persistExpeditionCompletion(session, run, result, highestWave, playerCount, loot) {
+  if (!API_BASE_URL || typeof fetch !== "function") return { ok: false, error: "battle_api_unavailable" };
+  const response = await fetchWithTimeout(`${API_BASE_URL}/battle/expedition`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(API_TOKEN ? { "x-battle-token": API_TOKEN } : {}) },
+    body: JSON.stringify({
+      token: API_TOKEN,
+      playerId: Number(session.playerId || 0), runId: run.runId, result,
+      highestWave, playerCount, roomName: String(session.room?.name || "").slice(0, 96), loot,
+    }),
+  }, BATTLE_EVENT_TIMEOUT_MS);
+  let body = null;
+  try { body = await response?.json(); } catch {}
+  return { ok: Boolean(response?.ok && body?.ok), error: String(body?.error || (response?.ok ? "" : "battle_api_failed")), body };
+}
+
+async function handleExpeditionRequest(session, parsed) {
+  const data = eventDataHash(parsed);
+  if (!isExpeditionRoom(session) || !data) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "wrong_room", false)];
+  }
+  const command = Number(expeditionPayloadValue(data, 1, 0));
+  const room = session.room;
+  if (command === EXPEDITION_COMMAND.START) {
+    const run = ensureExpeditionRun(room);
+    const requestedPlayers = Math.max(1, Math.min(4, Math.trunc(Number(expeditionPayloadValue(data, 3, 1)) || 1)));
+    run.playerCount = Math.max(run.playerCount, requestedPlayers);
+    session.expeditionRunId = run.runId;
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.STARTED, run.runId, "started", true)];
+  }
+
+  const run = room.expedition;
+  const runId = expeditionRunId(expeditionPayloadValue(data, 2, ""));
+  if (!run || !runId || runId !== run.runId || session.expeditionRunId !== run.runId) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run?.runId || "", "run_not_authorized", false)];
+  }
+
+  if (command === EXPEDITION_COMMAND.WAVE) {
+    const requestedWave = Math.trunc(Number(expeditionPayloadValue(data, 3, 0)) || 0);
+    if (requestedWave < 1 || requestedWave > 50 || requestedWave > run.wave + 1) {
+      return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "invalid_wave", false)];
+    }
+    const now = Date.now();
+    if (requestedWave > run.wave && run.lastWaveAt && now - run.lastWaveAt < EXPEDITION_WAVE_REPORT_MIN_MS) {
+      return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "wave_rate_limited", false)];
+    }
+    if (requestedWave > run.wave) {
+      run.wave = requestedWave;
+      run.phase = "active";
+      run.lastWaveAt = now;
+    }
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.STARTED, run.runId, `wave_${run.wave}`, true)];
+  }
+
+  if (command !== EXPEDITION_COMMAND.COMPLETE) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "unknown_command", false)];
+  }
+
+  const result = String(expeditionPayloadValue(data, 3, "")).toLowerCase();
+  const highestWave = Math.trunc(Number(expeditionPayloadValue(data, 4, 0)) || 0);
+  const playerCount = Math.max(1, Math.min(4, Math.trunc(Number(expeditionPayloadValue(data, 5, run.playerCount)) || run.playerCount)));
+  const loot = expeditionLootFromWire(expeditionPayloadValue(data, 6, ""));
+  if (!["evacuated", "wiped"].includes(result) || highestWave < 0 || highestWave > 50 || !loot || (result === "evacuated" && (highestWave !== 50 || run.wave !== 50)) || (result === "wiped" && loot.length)) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "invalid_completion", false)];
+  }
+  const playerId = Number(session.playerId || 0);
+  const existing = run.completionByPlayer.get(playerId);
+  if (existing) return [existing];
+  const pending = makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "completion_pending", false);
+  run.completionByPlayer.set(playerId, pending);
+  try {
+    const saved = await persistExpeditionCompletion(session, run, result, highestWave, playerCount, loot);
+    const reply = makeExpeditionReply(session, saved.ok ? EXPEDITION_COMMAND.COMPLETED : EXPEDITION_COMMAND.REJECTED, run.runId, saved.ok ? "saved" : saved.error, saved.ok);
+    run.completionByPlayer.set(playerId, reply);
+    if (saved.ok) console.log(`[expedition] complete room=${room.name} player=${playerId} run=${run.runId} wave=${highestWave} transferred=${saved.body?.transferredItems || 0}`);
+    else console.log(`[expedition] completion rejected room=${room.name} player=${playerId} run=${run.runId} error=${saved.error}`);
+    return [reply];
+  } catch (error) {
+    const reply = makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "battle_api_failed", false);
+    run.completionByPlayer.set(playerId, reply);
+    console.log(`[expedition] completion failed room=${room.name} player=${playerId} ${error.message}`);
+    return [reply];
+  }
+}
+
 function broadcastBattleChat(session, payload, type, channel = 0) {
   const room = session?.room;
   if (!room?.players?.size || !payload) return 0;
@@ -12611,6 +12770,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (eventCode === 155) {
     return handleBattleChatRequest(session, parsed, channel);
+  }
+
+  if (eventCode === EXPEDITION_EVENT) {
+    return handleExpeditionRequest(session, parsed);
   }
 
   if (eventCode === VOICE_CAPABILITY_EVENT) {
