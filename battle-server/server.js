@@ -23,18 +23,24 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-28-expedition-solo-launch-v304";
+const BUILD_ID = "battle-server-2026-08-28-expedition-party-v305";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
 const EXPEDITION_COMMAND = Object.freeze({
   START: 1, WAVE: 2, COMPLETE: 3,
   SOLO_QUEUE_JOIN: 10, SOLO_QUEUE_CANCEL: 11,
+  PARTY_CREATE: 20, PARTY_LEAVE: 21, PARTY_INVITE: 22, PARTY_INVITE_RESPONSE: 23, PARTY_READY: 24, PARTY_REFRESH: 25,
   STARTED: 101, COMPLETED: 102, REJECTED: 103,
   SOLO_QUEUE_STATE: 110, SOLO_QUEUE_LAUNCH: 111, SOLO_QUEUE_REJECTED: 112,
+  PARTY_STATE: 120, PARTY_INVITATION: 121, PARTY_LAUNCH: 123, PARTY_REJECTED: 124,
 });
 const expeditionSoloQueues = new Map();
 let expeditionSoloQueueSequence = 0;
+const expeditionParties = new Map();
+let expeditionPartySequence = 0;
+const expeditionPartyFriendCache = new Map();
+const EXPEDITION_PARTY_FRIEND_CACHE_MS = 5000;
 const EXPEDITION_WAVE_REPORT_MIN_MS = Math.max(1000, Number(process.env.EXPEDITION_WAVE_REPORT_MIN_MS || 5000));
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
@@ -10306,6 +10312,7 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
 }
 
 function detachSessionFromRoom(session, reason = "leave") {
+  removeExpeditionPartyMember(session, `detach-${reason}`, session?.lastChannel || 0);
   removeExpeditionSoloMatchmakingSession(session, `detach-${reason}`, session?.lastChannel || 0);
   const room = session?.room;
   dropCtfFlagsForSession(session, 2, session?.lastChannel || 0);
@@ -11747,6 +11754,420 @@ async function handleExpeditionSoloMatchmaking(session, command, channel = 0) {
   return [];
 }
 
+function isActiveExpeditionPartySession(session, partyId) {
+  return Boolean(
+    session &&
+    !session.transportDisconnected &&
+    isBattleListSession(session) &&
+    session.listLobby &&
+    session.sessionId &&
+    session.expeditionPartyId === partyId &&
+    sessions.get(session.sessionId) === session,
+  );
+}
+
+function activeExpeditionLobbySessionForUser(playerId) {
+  const id = Number(playerId || 0);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  for (const candidate of sessions.values()) {
+    if (!candidate || candidate.transportDisconnected || !isBattleListSession(candidate)) continue;
+    // The recovered list-lobby path attaches a shared placeholder room to the
+    // session, so listLobby (not room === null) is the authoritative signal
+    // that a player is in the headquarters and can receive a PvE invite.
+    if (!candidate.listLobby || Number(candidate.playerId || 0) !== id) continue;
+    if (!candidate.sessionId || sessions.get(candidate.sessionId) !== candidate) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function anyBattleSessionForUser(playerId) {
+  const id = Number(playerId || 0);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  for (const candidate of sessions.values()) {
+    if (!candidate || candidate.transportDisconnected || !isBattleListSession(candidate)) continue;
+    if (Number(candidate.playerId || 0) === id && candidate.sessionId && sessions.get(candidate.sessionId) === candidate) return candidate;
+  }
+  return null;
+}
+
+function partyMembers(party) {
+  return Array.from(party?.members?.values?.() || [])
+    .filter((member) => isActiveExpeditionPartySession(member, party?.id))
+    .slice(0, 4);
+}
+
+function partyCountdownSeconds(party) {
+  if (!party?.countdownEndsAt) return 0;
+  return Math.max(0, Math.min(5, Math.ceil((party.countdownEndsAt - Date.now()) / 1000)));
+}
+
+function makeExpeditionPartyState(session, party, friendRows = []) {
+  const members = partyMembers(party);
+  const names = members.map((member) => String(member.playerName || "Боец").slice(0, 48));
+  const userIds = members.map((member) => Number(member.playerId || 0));
+  const ready = members.map((member) => Boolean(member.expeditionPartyReady));
+  while (names.length < 4) names.push("");
+  while (userIds.length < 4) userIds.push(0);
+  while (ready.length < 4) ready.push(false);
+  const friendTable = rawHashtable(friendRows.map((friend) => ({
+    key: rawInt(Number(friend.userId || 0)),
+    value: rawHashtable([
+      { key: rawByte(1), value: rawString(String(friend.name || "Боец").slice(0, 48)) },
+      { key: rawByte(2), value: rawBool(Boolean(friend.canInvite)) },
+      { key: rawByte(3), value: rawString(String(friend.status || "НЕ В СЕТИ").slice(0, 48)) },
+    ]),
+  })));
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.PARTY_STATE) },
+        { key: rawByte(2), value: rawString(String(party?.id || "")) },
+        { key: rawByte(3), value: rawByte(members.length) },
+        { key: rawByte(4), value: rawString(names[0]) },
+        { key: rawByte(5), value: rawString(names[1]) },
+        { key: rawByte(6), value: rawString(names[2]) },
+        { key: rawByte(7), value: rawString(names[3]) },
+        { key: rawByte(8), value: rawInt(userIds[0]) },
+        { key: rawByte(9), value: rawInt(userIds[1]) },
+        { key: rawByte(10), value: rawInt(userIds[2]) },
+        { key: rawByte(11), value: rawInt(userIds[3]) },
+        { key: rawByte(12), value: rawBool(ready[0]) },
+        { key: rawByte(13), value: rawBool(ready[1]) },
+        { key: rawByte(14), value: rawBool(ready[2]) },
+        { key: rawByte(15), value: rawBool(ready[3]) },
+        { key: rawByte(16), value: rawInt(Number(party?.leaderUserId || 0)) },
+        { key: rawByte(17), value: rawByte(partyCountdownSeconds(party)) },
+        { key: rawByte(18), value: rawBool(true) },
+        { key: rawByte(19), value: rawString(String(party?.message || "Собери отряд и приготовьтесь к рейду.").slice(0, 128)) },
+        { key: rawByte(20), value: friendTable },
+      ]),
+    },
+  ]);
+}
+
+function makeExpeditionPartyInactive(session, message = "") {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.PARTY_STATE) },
+        { key: rawByte(18), value: rawBool(false) },
+        { key: rawByte(19), value: rawString(String(message).slice(0, 128)) },
+      ]),
+    },
+  ]);
+}
+
+function makeExpeditionPartyRejected(session, message = "Действие недоступно.") {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.PARTY_REJECTED) },
+        { key: rawByte(19), value: rawString(String(message).slice(0, 128)) },
+      ]),
+    },
+  ]);
+}
+
+function makeExpeditionPartyInvitation(session, partyId = "", inviterId = 0, inviterName = "") {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.PARTY_INVITATION) },
+        { key: rawByte(2), value: rawString(String(partyId || "")) },
+        { key: rawByte(3), value: rawInt(Number(inviterId || 0)) },
+        { key: rawByte(4), value: rawString(String(inviterName || "").slice(0, 48)) },
+      ]),
+    },
+  ]);
+}
+
+function makeExpeditionPartyLaunch(session, roomName) {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.PARTY_LAUNCH) },
+        { key: rawByte(2), value: rawString(String(roomName || "")) },
+      ]),
+    },
+  ]);
+}
+
+function clearExpeditionPartyCountdown(party) {
+  if (!party) return;
+  if (party.countdownTimer) clearTimeout(party.countdownTimer);
+  party.countdownTimer = null;
+  party.countdownEndsAt = 0;
+}
+
+async function expeditionPartyFriendRows(party, ownerId) {
+  const owner = Number(ownerId || 0);
+  if (!owner) return [];
+  const knownFriends = await loadExpeditionPartyFriends(owner);
+  const rows = [];
+  for (const friend of knownFriends) {
+    const userId = Number(friend?.userId || 0);
+    if (!userId || userId === owner || Number(friend?.state || 0) !== 1) continue;
+    const member = partyMembers(party).some((entry) => Number(entry.playerId || 0) === userId);
+    const invitationState = party?.inviteStates?.get(userId) || "";
+    const lobbySession = activeExpeditionLobbySessionForUser(userId);
+    const anySession = anyBattleSessionForUser(userId);
+    let status = "НЕ В СЕТИ";
+    let canInvite = false;
+    if (member) status = "В ОТРЯДЕ";
+    else if (invitationState) status = invitationState;
+    else if (lobbySession && !lobbySession.expeditionPartyId && !lobbySession.expeditionSoloQueueId) {
+      status = "В СЕТИ";
+      canInvite = partyMembers(party).length < 4 && !party.countdownEndsAt;
+    } else if (anySession?.room || (anySession && !anySession.listLobby)) status = "В БОЮ";
+    else if (anySession) status = "В СЕТИ";
+    rows.push({ userId, name: friend.name, canInvite, status });
+  }
+  return rows;
+}
+
+async function loadExpeditionPartyFriends(userId) {
+  const id = Number(userId || 0);
+  const cached = expeditionPartyFriendCache.get(id);
+  if (cached && Date.now() - cached.loadedAt < EXPEDITION_PARTY_FRIEND_CACHE_MS) return cached.friends;
+  const friends = await loadMasterSocialList(id);
+  expeditionPartyFriendCache.set(id, { loadedAt: Date.now(), friends });
+  return friends;
+}
+
+async function publishExpeditionPartyState(party, channel = 0) {
+  if (!party?.members?.size || expeditionParties.get(party.id) !== party) return 0;
+  let sent = 0;
+  for (const member of partyMembers(party)) {
+    const rows = await expeditionPartyFriendRows(party, member.playerId);
+    if (expeditionParties.get(party.id) !== party) return sent;
+    if (member.socket && member.rinfo && sendReliablePayload(member.socket, member.rinfo, member, makeExpeditionPartyState(member, party, rows), channel)) sent += 1;
+  }
+  return sent;
+}
+
+function clearExpeditionPartyInvitations(party, message = "") {
+  for (const invitation of party?.pendingInvites?.values?.() || []) {
+    const target = invitation?.session;
+    if (target?.pendingExpeditionPartyInvite?.partyId === party.id) target.pendingExpeditionPartyInvite = null;
+    if (target?.socket && target?.rinfo) sendReliablePayload(target.socket, target.rinfo, target, makeExpeditionPartyInvitation(target), target.lastChannel || 0);
+  }
+  if (party?.pendingInvites) party.pendingInvites.clear();
+  if (message && party?.inviteStates) party.inviteStates.clear();
+}
+
+function disbandExpeditionParty(party, reason = "Отряд расформирован.", channel = 0) {
+  if (!party || expeditionParties.get(party.id) !== party) return false;
+  clearExpeditionPartyCountdown(party);
+  clearExpeditionPartyInvitations(party, reason);
+  expeditionParties.delete(party.id);
+  for (const member of party.members.values()) {
+    if (member?.expeditionPartyId === party.id) {
+      member.expeditionPartyId = "";
+      member.expeditionPartyReady = false;
+    }
+    if (member?.socket && member?.rinfo) sendReliablePayload(member.socket, member.rinfo, member, makeExpeditionPartyInactive(member, reason), channel);
+  }
+  party.members.clear();
+  console.log(`[expedition] party disband party=${party.id} reason=${reason}`);
+  return true;
+}
+
+function removeExpeditionPartyMember(session, reason = "leave", channel = 0) {
+  const partyId = String(session?.expeditionPartyId || "");
+  if (!partyId) return false;
+  const party = expeditionParties.get(partyId);
+  session.expeditionPartyId = "";
+  session.expeditionPartyReady = false;
+  if (!party?.members) return false;
+  if (Number(session.playerId || 0) === Number(party.leaderUserId || 0)) {
+    return disbandExpeditionParty(party, "Лидер покинул отряд.", channel);
+  }
+  clearExpeditionPartyCountdown(party);
+  party.members.delete(session.sessionId);
+  party.message = `${String(session.playerName || "Боец").slice(0, 48)} покинул отряд.`;
+  if (party.members.size === 0) {
+    expeditionParties.delete(partyId);
+  } else {
+    publishExpeditionPartyState(party, channel).catch((error) => console.log(`[expedition] party leave publish failed ${error.message}`));
+  }
+  console.log(`[expedition] party leave party=${partyId} player=${session.playerId || "unknown"} reason=${reason}`);
+  return true;
+}
+
+function allExpeditionPartyMembersReady(party) {
+  const members = partyMembers(party);
+  return members.length > 0 && members.length === party.members.size && members.every((member) => member.expeditionPartyReady);
+}
+
+function reserveExpeditionPartyRoom(party, members) {
+  const room = ensureRoom({
+    name: `Expedition party ${party.id}`,
+    map: "promzona",
+    mode: MAP_MODE_ROGUELIKE,
+    maxUsers: 4,
+    friendlyFire: false,
+    timeLimit: 10,
+    fragLimit: 50,
+    lvlMin: 1,
+    lvlMax: 99,
+    hasFullSettings: true,
+  });
+  room.expeditionReserved = true;
+  room.expeditionQueueId = party.id;
+  room.expeditionReservationPlayerIds = new Set(members.map((member) => Number(member.playerId || 0)).filter((id) => id > 0));
+  if (room.expeditionReservationTimer) clearTimeout(room.expeditionReservationTimer);
+  room.expeditionReservationTimer = setTimeout(() => {
+    if (rooms.get(room.name) !== room) return;
+    room.expeditionReservationTimer = null;
+    room.expeditionReserved = false;
+    room.expeditionReservationPlayerIds = null;
+    if ((room.players?.size || 0) === 0) deleteEmptyRoom(room, "expedition-party-reservation-timeout");
+  }, 90000);
+  room.expeditionReservationTimer.unref?.();
+  return room;
+}
+
+function startExpeditionPartyCountdown(party, channel = 0) {
+  if (!party || party.countdownTimer || !allExpeditionPartyMembersReady(party)) return;
+  party.countdownEndsAt = Date.now() + 5000;
+  party.message = "Все готовы. Вылет через 5 секунд.";
+  publishExpeditionPartyState(party, channel).catch((error) => console.log(`[expedition] party countdown publish failed ${error.message}`));
+  party.countdownTimer = setTimeout(() => {
+    party.countdownTimer = null;
+    party.countdownEndsAt = 0;
+    const members = partyMembers(party);
+    if (expeditionParties.get(party.id) !== party || !allExpeditionPartyMembersReady(party)) return;
+    const room = reserveExpeditionPartyRoom(party, members);
+    expeditionParties.delete(party.id);
+    party.members.clear();
+    for (const member of members) {
+      member.expeditionPartyId = "";
+      member.expeditionPartyReady = false;
+      if (member.socket && member.rinfo) sendReliablePayload(member.socket, member.rinfo, member, makeExpeditionPartyLaunch(member, room.name), channel);
+    }
+    console.log(`[expedition] party launch party=${party.id} room=${room.name} players=${members.map((member) => member.playerId).join(",")}`);
+  }, 5000);
+  party.countdownTimer.unref?.();
+}
+
+async function handleExpeditionPartyLobby(session, command, data, channel = 0) {
+  if (!session?.listLobby || !isBattleListSession(session)) return [makeExpeditionPartyRejected(session, "Отряд доступен только в штабе.")];
+  if (command === EXPEDITION_COMMAND.PARTY_CREATE) {
+    const profile = await loadExpeditionSoloQueueProfile(session);
+    if (!profile) return [makeExpeditionPartyRejected(session, "Профиль временно недоступен.")];
+    removeExpeditionSoloMatchmakingSession(session, "party-create", channel);
+    removeExpeditionPartyMember(session, "recreate", channel);
+    expeditionPartySequence += 1;
+    const party = {
+      id: `party-${Date.now().toString(36)}-${expeditionPartySequence.toString(36)}`,
+      leaderUserId: Number(session.playerId || 0),
+      members: new Map([[session.sessionId, session]]),
+      pendingInvites: new Map(),
+      inviteStates: new Map(),
+      countdownTimer: null,
+      countdownEndsAt: 0,
+      message: "Собери отряд и приготовьтесь к рейду.",
+    };
+    session.expeditionPartyId = party.id;
+    session.expeditionPartyReady = false;
+    expeditionParties.set(party.id, party);
+    await publishExpeditionPartyState(party, channel);
+    console.log(`[expedition] party create party=${party.id} leader=${session.playerId}`);
+    return [];
+  }
+
+  const party = expeditionParties.get(String(session.expeditionPartyId || ""));
+  if (command === EXPEDITION_COMMAND.PARTY_LEAVE) {
+    removeExpeditionPartyMember(session, "client-leave", channel);
+    return [];
+  }
+  if (!party || !isActiveExpeditionPartySession(session, party.id)) return [makeExpeditionPartyRejected(session, "Отряд больше недоступен.")];
+
+  if (command === EXPEDITION_COMMAND.PARTY_REFRESH) {
+    await publishExpeditionPartyState(party, channel);
+    return [];
+  }
+
+  if (command === EXPEDITION_COMMAND.PARTY_INVITE) {
+    if (partyMembers(party).length >= 4 || party.countdownEndsAt) return [makeExpeditionPartyRejected(session, "Состав уже зафиксирован.")];
+    const targetId = Number(expeditionPayloadValue(data, 2, 0));
+    const target = activeExpeditionLobbySessionForUser(targetId);
+    const knownFriends = await loadExpeditionPartyFriends(session.playerId);
+    const isFriend = knownFriends.some((friend) => Number(friend?.userId || 0) === targetId && Number(friend?.state || 0) === 1);
+    if (expeditionParties.get(party.id) !== party || !isActiveExpeditionPartySession(session, party.id)) return [];
+    if (!target || !isFriend || target.expeditionPartyId || target.expeditionSoloQueueId || target.pendingExpeditionPartyInvite) {
+      party.inviteStates.set(targetId, "НЕДОСТУПЕН");
+      party.message = "Этот друг сейчас недоступен для рейда.";
+      await publishExpeditionPartyState(party, channel);
+      return [];
+    }
+    party.pendingInvites.set(targetId, { session: target });
+    party.inviteStates.set(targetId, "ПРИГЛАШЁН");
+    target.pendingExpeditionPartyInvite = { partyId: party.id, inviterUserId: session.playerId, inviterName: session.playerName };
+    sendReliablePayload(target.socket, target.rinfo, target, makeExpeditionPartyInvitation(target, party.id, session.playerId, session.playerName), target.lastChannel || channel);
+    party.message = "Приглашение отправлено.";
+    await publishExpeditionPartyState(party, channel);
+    return [];
+  }
+
+  if (command === EXPEDITION_COMMAND.PARTY_READY) {
+    const ready = Boolean(expeditionPayloadValue(data, 2, false));
+    session.expeditionPartyReady = ready;
+    if (!ready) {
+      clearExpeditionPartyCountdown(party);
+      party.message = "Один из бойцов ещё не готов.";
+      await publishExpeditionPartyState(party, channel);
+      return [];
+    }
+    party.message = "Ожидаем готовность отряда.";
+    if (allExpeditionPartyMembersReady(party)) startExpeditionPartyCountdown(party, channel);
+    else await publishExpeditionPartyState(party, channel);
+    return [];
+  }
+
+  return [makeExpeditionPartyRejected(session, "Неизвестное действие отряда.")];
+}
+
+async function handleExpeditionPartyInviteResponse(session, data, channel = 0) {
+  const pending = session?.pendingExpeditionPartyInvite;
+  const partyId = String(expeditionPayloadValue(data, 2, ""));
+  const accepted = Boolean(expeditionPayloadValue(data, 3, false));
+  if (!pending || pending.partyId !== partyId) return [makeExpeditionPartyRejected(session, "Приглашение больше не активно.")];
+  session.pendingExpeditionPartyInvite = null;
+  const party = expeditionParties.get(partyId);
+  if (!party || !isActiveExpeditionPartySession(activeExpeditionLobbySessionForUser(pending.inviterUserId), partyId)) return [makeExpeditionPartyRejected(session, "Отряд больше недоступен.")];
+  party.pendingInvites.delete(Number(session.playerId || 0));
+  if (!accepted) {
+    party.inviteStates.set(Number(session.playerId || 0), "ОТКАЗАЛСЯ");
+    party.message = `${String(session.playerName || "Боец").slice(0, 48)} отказался от приглашения.`;
+    await publishExpeditionPartyState(party, channel);
+    return [makeExpeditionPartyInactive(session, "")];
+  }
+  if (partyMembers(party).length >= 4 || session.expeditionPartyId || session.expeditionSoloQueueId || !session.listLobby) {
+    party.inviteStates.set(Number(session.playerId || 0), "НЕДОСТУПЕН");
+    await publishExpeditionPartyState(party, channel);
+    return [makeExpeditionPartyRejected(session, "Место в отряде уже занято.")];
+  }
+  session.expeditionPartyId = party.id;
+  session.expeditionPartyReady = false;
+  party.members.set(session.sessionId, session);
+  party.inviteStates.delete(Number(session.playerId || 0));
+  party.message = `${String(session.playerName || "Боец").slice(0, 48)} присоединился к отряду.`;
+  await publishExpeditionPartyState(party, channel);
+  return [];
+}
+
 function ensureExpeditionRun(room) {
   if (!room.expedition || room.expedition.phase === "finished") {
     room.expedition = {
@@ -11804,6 +12225,18 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
   const command = Number(expeditionPayloadValue(data, 1, 0));
   if (session?.listLobby && (command === EXPEDITION_COMMAND.SOLO_QUEUE_JOIN || command === EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL)) {
     return handleExpeditionSoloMatchmaking(session, command, channel);
+  }
+  if (session?.listLobby && command === EXPEDITION_COMMAND.PARTY_INVITE_RESPONSE) {
+    return handleExpeditionPartyInviteResponse(session, data, channel);
+  }
+  if (session?.listLobby && [
+    EXPEDITION_COMMAND.PARTY_CREATE,
+    EXPEDITION_COMMAND.PARTY_LEAVE,
+    EXPEDITION_COMMAND.PARTY_INVITE,
+    EXPEDITION_COMMAND.PARTY_READY,
+    EXPEDITION_COMMAND.PARTY_REFRESH,
+  ].includes(command)) {
+    return handleExpeditionPartyLobby(session, command, data, channel);
   }
   if (!isExpeditionRoom(session)) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "wrong_room", false)];
