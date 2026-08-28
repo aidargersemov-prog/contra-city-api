@@ -23,7 +23,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-28-expedition-developer-solo-v308";
+const BUILD_ID = "battle-server-2026-08-28-expedition-ai-coop-v309";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -37,6 +37,12 @@ const EXPEDITION_COMMAND = Object.freeze({
   STARTED: 101, COMPLETED: 102, REJECTED: 103,
   SOLO_QUEUE_STATE: 110, SOLO_QUEUE_LAUNCH: 111, SOLO_QUEUE_REJECTED: 112,
   PARTY_STATE: 120, PARTY_INVITATION: 121, PARTY_LAUNCH: 123, PARTY_REJECTED: 124,
+  // Co-op PvE is deliberately carried only by the isolated Expedition event.
+  // Legacy Photon Event84/99/100/105 contracts remain untouched.
+  PLAYER_STATE: 40, SHOT_INTENT: 41, REVIVE_REQUEST: 42, RESYNC_REQUEST: 43,
+  HOST_SNAPSHOT: 44, HOST_ACTION: 45, HOST_DAMAGE: 46,
+  AI_AUTHORITY: 130, AI_SNAPSHOT: 131, AI_LIFECYCLE: 132, AI_DAMAGE: 133,
+  AI_REVIVE: 134, AI_WIPE: 135, AI_RESYNC: 136,
 });
 const expeditionSoloQueues = new Map();
 let expeditionSoloQueueSequence = 0;
@@ -45,6 +51,9 @@ let expeditionPartySequence = 0;
 const expeditionPartyFriendCache = new Map();
 const EXPEDITION_PARTY_FRIEND_CACHE_MS = 5000;
 const EXPEDITION_WAVE_REPORT_MIN_MS = Math.max(1000, Number(process.env.EXPEDITION_WAVE_REPORT_MIN_MS || 5000));
+const EXPEDITION_AI_SNAPSHOT_MIN_MS = 180;
+const EXPEDITION_AI_COMMAND_MIN_MS = 35;
+const EXPEDITION_AI_MAX_PAYLOAD_BYTES = 24576;
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
 const VOICE_FRAME_EVENT = 68;
@@ -10301,6 +10310,11 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
     { requireGameState: false },
   );
   room.players.delete(actorId);
+  // The Unity AI host may leave mid-wave. Transfer authority only after the
+  // actor is removed, so election is deterministically the lowest active id.
+  if (room.expedition && room.expedition.phase !== "finished" && Number(room.expedition.authorityActorId || 0) === Number(actorId)) {
+    publishExpeditionAiAuthority(room, room.expedition, options.channel || 0);
+  }
   cancelRoomKickVoteForDeparture(room, actorId, options.channel || 0, reason);
   forgetActorForRoom(room, actorId);
   maybeFinishZombieRound(room, `leave-${reason}`, options.channel || 0);
@@ -11538,6 +11552,70 @@ function makeExpeditionReply(session, command, runId, message, ok) {
   ]);
 }
 
+// Event-157 AI transport has a fixed schema. The Node server validates room
+// membership, authority, order and rate, then relays Unity-host simulation;
+// it intentionally does not pretend to own NavMesh or Unity raycasts.
+function makeExpeditionAiEvent(command, runId, sequence, sourceActorId, typedPayload = "", targetActorId = 0) {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(sourceActorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(Number(command || 0)) },
+        { key: rawByte(2), value: rawString(String(runId || "")) },
+        { key: rawByte(3), value: rawInt(Math.max(0, Math.trunc(Number(sequence || 0)))) },
+        { key: rawByte(4), value: rawInt(Number(sourceActorId || 0)) },
+        { key: rawByte(5), value: rawInt(Number(targetActorId || 0)) },
+        { key: rawByte(6), value: rawByte(1) },
+        { key: rawByte(7), value: rawString(String(typedPayload || "")) },
+      ]),
+    },
+  ]);
+}
+
+function activeExpeditionRoomMembers(room) {
+  return Array.from(room?.players?.entries?.() || [])
+    .filter(([, member]) => member && !member.transportDisconnected && member.socket && member.rinfo)
+    .sort((left, right) => Number(left[0]) - Number(right[0]));
+}
+
+function expeditionAuthorityActor(room) {
+  const members = activeExpeditionRoomMembers(room);
+  return members.length ? Number(members[0][0]) : 0;
+}
+
+function sendExpeditionAiToSession(target, command, run, sequence, sourceActorId, typedPayload = "", targetActorId = 0, channel = 0) {
+  if (!target?.socket || !target?.rinfo || !run) return false;
+  return sendReliablePayload(target.socket, target.rinfo, target,
+    makeExpeditionAiEvent(command, run.runId, sequence, sourceActorId, typedPayload, targetActorId), channel);
+}
+
+function publishExpeditionAiAuthority(room, run, channel = 0) {
+  if (!room || !run) return 0;
+  const nextActor = expeditionAuthorityActor(room);
+  run.authorityActorId = nextActor;
+  run.authorityChangedAt = Date.now();
+  let sent = 0;
+  for (const [, member] of activeExpeditionRoomMembers(room)) {
+    if (sendExpeditionAiToSession(member, EXPEDITION_COMMAND.AI_AUTHORITY, run, run.lastAiSequence || 0, nextActor, "", 0, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function relayExpeditionAi(room, source, command, run, sequence, typedPayload, targetActorId = 0, channel = 0, includeSource = false) {
+  let sent = 0;
+  for (const [, member] of activeExpeditionRoomMembers(room)) {
+    if (!includeSource && member === source) continue;
+    if (targetActorId && Number(member.actorId || 0) !== Number(targetActorId)) continue;
+    if (sendExpeditionAiToSession(member, command, run, sequence, Number(source?.actorId || 0), typedPayload, targetActorId, channel)) sent += 1;
+  }
+  return sent;
+}
+
+function validExpeditionAiPayload(value) {
+  return typeof value === "string" && Buffer.byteLength(value, "utf8") <= EXPEDITION_AI_MAX_PAYLOAD_BYTES;
+}
+
 function isActiveExpeditionSoloQueueSession(session, queueId) {
   return Boolean(
     session &&
@@ -12247,6 +12325,9 @@ function ensureExpeditionRun(room) {
       runId: newExpeditionRunId(), phase: "starting", wave: 0,
       playerCount: 1, startedAt: Date.now(), lastWaveAt: 0,
       completionByPlayer: new Map(),
+      authorityActorId: 0, authorityChangedAt: 0,
+      lastAiSequence: 0, lastAiSnapshotAt: 0, lastAiSnapshot: "",
+      aiSequenceByActor: new Map(), aiAttackIds: new Set(), lastAiCommandAt: 0,
     };
   }
   return room.expedition;
@@ -12290,6 +12371,91 @@ async function persistExpeditionCompletion(session, run, result, highestWave, pl
   return { ok: Boolean(response?.ok && body?.ok), error: String(body?.error || (response?.ok ? "" : "battle_api_failed")), body };
 }
 
+function handleExpeditionAiRequest(session, room, run, command, data, channel = 0) {
+  const supported = new Set([
+    EXPEDITION_COMMAND.PLAYER_STATE, EXPEDITION_COMMAND.SHOT_INTENT,
+    EXPEDITION_COMMAND.REVIVE_REQUEST, EXPEDITION_COMMAND.RESYNC_REQUEST,
+    EXPEDITION_COMMAND.HOST_SNAPSHOT, EXPEDITION_COMMAND.HOST_ACTION,
+    EXPEDITION_COMMAND.HOST_DAMAGE,
+  ]);
+  if (!supported.has(command)) return null;
+
+  const actorId = Number(session?.actorId || 0);
+  const sourceActorId = Number(expeditionPayloadValue(data, 4, actorId));
+  const targetActorId = Number(expeditionPayloadValue(data, 5, 0));
+  const sequence = Math.trunc(Number(expeditionPayloadValue(data, 3, 0)) || 0);
+  const typedPayload = String(expeditionPayloadValue(data, 7, "") || "");
+  if (!actorId || sourceActorId !== actorId || sequence <= 0 || !validExpeditionAiPayload(typedPayload)) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "invalid_ai_payload", false)];
+  }
+  const previous = Number(run.aiSequenceByActor.get(actorId) || 0);
+  if (sequence <= previous) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "stale_ai_sequence", false)];
+  }
+  const now = Date.now();
+  if (command !== EXPEDITION_COMMAND.RESYNC_REQUEST && now - Number(run.lastAiCommandAt || 0) < EXPEDITION_AI_COMMAND_MIN_MS) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "ai_rate_limited", false)];
+  }
+  run.aiSequenceByActor.set(actorId, sequence);
+  run.lastAiCommandAt = now;
+
+  const authorityActorId = Number(run.authorityActorId || expeditionAuthorityActor(room));
+  if (!run.authorityActorId) publishExpeditionAiAuthority(room, run, channel);
+  const isAuthority = actorId === Number(run.authorityActorId || authorityActorId);
+
+  if (command === EXPEDITION_COMMAND.PLAYER_STATE) {
+    const authority = room.players.get(Number(run.authorityActorId || 0));
+    if (authority && authority !== session) sendExpeditionAiToSession(authority, EXPEDITION_COMMAND.PLAYER_STATE, run, sequence, actorId, typedPayload, 0, channel);
+    return [];
+  }
+  if (command === EXPEDITION_COMMAND.RESYNC_REQUEST) {
+    if (run.lastAiSnapshot) {
+      sendExpeditionAiToSession(session, EXPEDITION_COMMAND.AI_RESYNC, run, run.lastAiSequence, Number(run.authorityActorId || 0), run.lastAiSnapshot, actorId, channel);
+    } else {
+      sendExpeditionAiToSession(session, EXPEDITION_COMMAND.AI_AUTHORITY, run, run.lastAiSequence, Number(run.authorityActorId || 0), "", 0, channel);
+    }
+    return [];
+  }
+  if (command === EXPEDITION_COMMAND.SHOT_INTENT || command === EXPEDITION_COMMAND.REVIVE_REQUEST) {
+    const authority = room.players.get(Number(run.authorityActorId || 0));
+    if (!authority) return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "ai_authority_unavailable", false)];
+    const eventCode = command === EXPEDITION_COMMAND.SHOT_INTENT ? EXPEDITION_COMMAND.SHOT_INTENT : EXPEDITION_COMMAND.REVIVE_REQUEST;
+    sendExpeditionAiToSession(authority, eventCode, run, sequence, actorId, typedPayload, targetActorId, channel);
+    return [];
+  }
+  if (!isAuthority) return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "ai_authority_required", false)];
+
+  if (command === EXPEDITION_COMMAND.HOST_SNAPSHOT) {
+    if (now - Number(run.lastAiSnapshotAt || 0) < EXPEDITION_AI_SNAPSHOT_MIN_MS) return [];
+    run.lastAiSnapshotAt = now;
+    run.lastAiSequence = sequence;
+    run.lastAiSnapshot = typedPayload;
+    relayExpeditionAi(room, session, EXPEDITION_COMMAND.AI_SNAPSHOT, run, sequence, typedPayload, 0, channel);
+    return [];
+  }
+  if (command === EXPEDITION_COMMAND.HOST_ACTION) {
+    let lifecycle = "";
+    try { lifecycle = String(JSON.parse(typedPayload)?.Kind || "").toLowerCase(); } catch {}
+    const eventCode = lifecycle === "revive" ? EXPEDITION_COMMAND.AI_REVIVE : (lifecycle === "wipe" ? EXPEDITION_COMMAND.AI_WIPE : EXPEDITION_COMMAND.AI_LIFECYCLE);
+    relayExpeditionAi(room, session, eventCode, run, sequence, typedPayload, targetActorId, channel);
+    return [];
+  }
+  if (command === EXPEDITION_COMMAND.HOST_DAMAGE) {
+    if (!targetActorId || !room.players.has(targetActorId)) return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "invalid_ai_damage_target", false)];
+    let attackId = 0;
+    try { attackId = Math.trunc(Number(JSON.parse(typedPayload)?.AttackId || 0)); } catch {}
+    // Attack ids are monotonic per Unity host. After a legitimate failover the
+    // new host starts its own sequence, so include its actor id in dedupe.
+    const attackKey = `${actorId}:${attackId}`;
+    if (attackId <= 0 || run.aiAttackIds.has(attackKey)) return [];
+    run.aiAttackIds.add(attackKey);
+    if (run.aiAttackIds.size > 2048) run.aiAttackIds.clear();
+    relayExpeditionAi(room, session, EXPEDITION_COMMAND.AI_DAMAGE, run, sequence, typedPayload, targetActorId, channel);
+    return [];
+  }
+  return [];
+}
+
 async function handleExpeditionRequest(session, parsed, channel = 0) {
   const data = eventDataHash(parsed);
   if (!data) {
@@ -12322,7 +12488,10 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
     const run = ensureExpeditionRun(room);
     const requestedPlayers = Math.max(1, Math.min(4, Math.trunc(Number(expeditionPayloadValue(data, 3, 1)) || 1)));
     run.playerCount = Math.max(run.playerCount, requestedPlayers);
-    session.expeditionRunId = run.runId;
+    // One room owns one run. Bind all current members immediately so a client
+    // that receives authority before its own START reply is still authorized.
+    for (const [, member] of activeExpeditionRoomMembers(room)) member.expeditionRunId = run.runId;
+    publishExpeditionAiAuthority(room, run, channel);
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.STARTED, run.runId, "started", true)];
   }
 
@@ -12331,6 +12500,9 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
   if (!run || !runId || runId !== run.runId || session.expeditionRunId !== run.runId) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run?.runId || "", "run_not_authorized", false)];
   }
+
+  const aiResult = handleExpeditionAiRequest(session, room, run, command, data, channel);
+  if (aiResult !== null) return aiResult;
 
   if (command === EXPEDITION_COMMAND.WAVE) {
     const requestedWave = Math.trunc(Number(expeditionPayloadValue(data, 3, 0)) || 0);
