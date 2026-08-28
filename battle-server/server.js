@@ -23,7 +23,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-28-expedition-party-v306";
+const BUILD_ID = "battle-server-2026-08-28-expedition-developer-solo-v308";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -31,6 +31,9 @@ const EXPEDITION_COMMAND = Object.freeze({
   START: 1, WAVE: 2, COMPLETE: 3,
   SOLO_QUEUE_JOIN: 10, SOLO_QUEUE_CANCEL: 11,
   PARTY_CREATE: 20, PARTY_LEAVE: 21, PARTY_INVITE: 22, PARTY_INVITE_RESPONSE: 23, PARTY_READY: 24, PARTY_REFRESH: 25,
+  // A developer-only lobby request. It does not weaken the normal 4/4
+  // SOLO/party launch gates; the server rechecks the fresh staff role below.
+  DEVELOPER_SOLO_LAUNCH: 30,
   STARTED: 101, COMPLETED: 102, REJECTED: 103,
   SOLO_QUEUE_STATE: 110, SOLO_QUEUE_LAUNCH: 111, SOLO_QUEUE_REJECTED: 112,
   PARTY_STATE: 120, PARTY_INVITATION: 121, PARTY_LAUNCH: 123, PARTY_REJECTED: 124,
@@ -11711,9 +11714,12 @@ function pruneExpeditionSoloQueues(channel = 0) {
   }
 }
 
-async function loadExpeditionSoloQueueProfile(session) {
+async function loadExpeditionSoloQueueProfile(session, options = {}) {
   if (!session?.listLobby || !session.lobbyActor) return null;
-  const { profile } = await profileForJoin(session.lobbyActor, { forceRefresh: false });
+  const { profile, source } = await profileForJoin(session.lobbyActor, { forceRefresh: Boolean(options.forceRefresh) });
+  // A privileged launch must fail closed if the canonical profile service is
+  // unavailable. Regular matchmaking retains its existing cache behaviour.
+  if (options.requireFresh && source !== "fresh") return null;
   if (!profile || profile.accessDenied || isFallbackBattleProfile(profile)) return null;
   if (session.transportDisconnected || !session.sessionId || sessions.get(session.sessionId) !== session) return null;
   session.playerId = profile.authId;
@@ -11721,6 +11727,66 @@ async function loadExpeditionSoloQueueProfile(session) {
   session.playerName = profile.name;
   session.loadedProfile = profile;
   return profile;
+}
+
+// This reservation is deliberately separate from reserveExpeditionSoloRoom().
+// Normal SOLO still launches only from its 4/4 queue; this path is the explicit
+// developer tool requested from the staff panel and reserves the room for one
+// authenticated developer profile only.
+function reserveDeveloperExpeditionSoloRoom(session) {
+  const playerId = Number(session?.playerId || 0);
+  const reservationId = `developer-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
+  const room = ensureRoom({
+    name: `Expedition developer ${reservationId}`,
+    map: "promzona",
+    mode: MAP_MODE_ROGUELIKE,
+    maxUsers: 4,
+    friendlyFire: false,
+    timeLimit: 10,
+    fragLimit: 50,
+    lvlMin: 1,
+    lvlMax: 99,
+    hasFullSettings: true,
+  });
+  room.expeditionReserved = true;
+  room.expeditionQueueId = reservationId;
+  room.expeditionReservationPlayerIds = new Set(playerId > 0 ? [playerId] : []);
+  if (room.expeditionReservationTimer) clearTimeout(room.expeditionReservationTimer);
+  room.expeditionReservationTimer = setTimeout(() => {
+    if (rooms.get(room.name) !== room) return;
+    room.expeditionReservationTimer = null;
+    room.expeditionReserved = false;
+    room.expeditionReservationPlayerIds = null;
+    if ((room.players?.size || 0) === 0) deleteEmptyRoom(room, "expedition-developer-reservation-timeout");
+  }, 90000);
+  room.expeditionReservationTimer.unref?.();
+  return room;
+}
+
+async function handleDeveloperExpeditionSoloLaunch(session, channel = 0) {
+  if (!session?.listLobby || !isBattleListSession(session)) {
+    return [makeExpeditionSoloQueueRejected(session, "developer_lobby_only")];
+  }
+
+  // Do not trust the client-side panel role. Force a canonical profile refresh
+  // and require the exact Developer role (Owner and lower staff roles do not
+  // inherit this test-only bypass).
+  const profile = await loadExpeditionSoloQueueProfile(session, { forceRefresh: true, requireFresh: true });
+  if (!profile) return [makeExpeditionSoloQueueRejected(session, "profile_unavailable")];
+  const staffRole = applySessionStaffProfile(session, profile);
+  if (staffRole !== "developer") {
+    console.log(`[expedition] developer solo denied player=${session.playerId || "unknown"} role=${staffRole}`);
+    return [makeExpeditionSoloQueueRejected(session, "developer_role_required")];
+  }
+
+  // A staff member cannot remain in a regular queue/party while launching a
+  // private one-person test. Cleanup reuses the same state publication paths.
+  removeExpeditionSoloMatchmakingSession(session, "developer-launch", channel);
+  removeExpeditionPartyMember(session, "developer-launch", channel);
+
+  const room = reserveDeveloperExpeditionSoloRoom(session);
+  console.log(`[expedition] developer solo launch room=${room.name} player=${session.playerId} role=${staffRole}`);
+  return [makeExpeditionSoloQueueLaunch(session, room.name)];
 }
 
 async function handleExpeditionSoloMatchmaking(session, command, channel = 0) {
@@ -11841,7 +11907,7 @@ function makeExpeditionPartyState(session, party, friendRows = []) {
         { key: rawByte(16), value: rawInt(Number(party?.leaderUserId || 0)) },
         { key: rawByte(17), value: rawByte(partyCountdownSeconds(party)) },
         { key: rawByte(18), value: rawBool(true) },
-        { key: rawByte(19), value: rawString(String(party?.message || "Собери отряд и приготовьтесь к рейду.").slice(0, 128)) },
+        { key: rawByte(19), value: rawString(String(party?.message || "Соберите отряд и приготовьтесь к рейду.").slice(0, 128)) },
         { key: rawByte(20), value: friendTable },
       ]),
     },
@@ -12081,7 +12147,7 @@ async function handleExpeditionPartyLobby(session, command, data, channel = 0) {
       inviteStates: new Map(),
       countdownTimer: null,
       countdownEndsAt: 0,
-      message: "Собери отряд и приготовьтесь к рейду.",
+      message: "Соберите отряд и приготовьтесь к рейду.",
     };
     session.expeditionPartyId = party.id;
     session.expeditionPartyReady = false;
@@ -12230,6 +12296,9 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "wrong_room", false)];
   }
   const command = Number(expeditionPayloadValue(data, 1, 0));
+  if (session?.listLobby && command === EXPEDITION_COMMAND.DEVELOPER_SOLO_LAUNCH) {
+    return handleDeveloperExpeditionSoloLaunch(session, channel);
+  }
   if (session?.listLobby && (command === EXPEDITION_COMMAND.SOLO_QUEUE_JOIN || command === EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL)) {
     return handleExpeditionSoloMatchmaking(session, command, channel);
   }
