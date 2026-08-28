@@ -23,11 +23,18 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-26-expedition-v302";
+const BUILD_ID = "battle-server-2026-08-28-expedition-solo-launch-v304";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
-const EXPEDITION_COMMAND = Object.freeze({ START: 1, WAVE: 2, COMPLETE: 3, STARTED: 101, COMPLETED: 102, REJECTED: 103 });
+const EXPEDITION_COMMAND = Object.freeze({
+  START: 1, WAVE: 2, COMPLETE: 3,
+  SOLO_QUEUE_JOIN: 10, SOLO_QUEUE_CANCEL: 11,
+  STARTED: 101, COMPLETED: 102, REJECTED: 103,
+  SOLO_QUEUE_STATE: 110, SOLO_QUEUE_LAUNCH: 111, SOLO_QUEUE_REJECTED: 112,
+});
+const expeditionSoloQueues = new Map();
+let expeditionSoloQueueSequence = 0;
 const EXPEDITION_WAVE_REPORT_MIN_MS = Math.max(1000, Number(process.env.EXPEDITION_WAVE_REPORT_MIN_MS || 5000));
 // Private voice protocol. It is intentionally outside the recovered original
 // contract: original Contra City has no voice client or server events.
@@ -10210,6 +10217,10 @@ function deleteEmptyRoom(room, reason = "empty") {
   if (!room?.name || (room.players?.size || 0) > 0) return false;
   if (rooms.get(room.name) !== room) return false;
   clearZombieTimers(room);
+  if (room.expeditionReservationTimer) {
+    clearTimeout(room.expeditionReservationTimer);
+    room.expeditionReservationTimer = null;
+  }
   rooms.delete(room.name);
   console.log(`[state] empty room deleted reason=${reason} room=${room.name} map=${room.map || DEFAULT_MAP}`);
   scheduleRoomListPush(`delete-${reason}`);
@@ -10295,6 +10306,7 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
 }
 
 function detachSessionFromRoom(session, reason = "leave") {
+  removeExpeditionSoloMatchmakingSession(session, `detach-${reason}`, session?.lastChannel || 0);
   const room = session?.room;
   dropCtfFlagsForSession(session, 2, session?.lastChannel || 0);
   let removed = false;
@@ -11516,6 +11528,225 @@ function makeExpeditionReply(session, command, runId, message, ok) {
   ]);
 }
 
+function isActiveExpeditionSoloQueueSession(session, queueId) {
+  return Boolean(
+    session &&
+    !session.transportDisconnected &&
+    session.listLobby &&
+    session.sessionId &&
+    session.expeditionSoloQueueId === queueId &&
+    sessions.get(session.sessionId) === session,
+  );
+}
+
+function makeExpeditionSoloQueueState(session, queue) {
+  const players = Array.from(queue?.members?.values?.() || [])
+    .filter((member) => isActiveExpeditionSoloQueueSession(member, queue?.id))
+    .slice(0, 4);
+  const ready = players.length === 4;
+  const names = players.map((member) => String(member.playerName || "Боец").slice(0, 48));
+  while (names.length < 4) names.push("");
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.SOLO_QUEUE_STATE) },
+        { key: rawByte(2), value: rawString(String(queue?.id || "")) },
+        { key: rawByte(3), value: rawByte(players.length) },
+        { key: rawByte(4), value: rawString(names[0]) },
+        { key: rawByte(5), value: rawString(names[1]) },
+        { key: rawByte(6), value: rawString(names[2]) },
+        { key: rawByte(7), value: rawString(names[3]) },
+        { key: rawByte(8), value: rawBool(ready) },
+        { key: rawByte(9), value: rawString(ready ? "Отряд собран." : "Подбираем бойцов…") },
+      ]),
+    },
+  ]);
+}
+
+function makeExpeditionSoloQueueRejected(session, reason) {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.SOLO_QUEUE_REJECTED) },
+        { key: rawByte(9), value: rawString(String(reason || "queue_unavailable").slice(0, 64)) },
+      ]),
+    },
+  ]);
+}
+
+function makeExpeditionSoloQueueLaunch(session, roomName) {
+  return rawEvent(EXPEDITION_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(EXPEDITION_COMMAND.SOLO_QUEUE_LAUNCH) },
+        { key: rawByte(2), value: rawString(String(roomName || "")) },
+        { key: rawByte(9), value: rawString("launching") },
+      ]),
+    },
+  ]);
+}
+
+function publishExpeditionSoloQueueState(queue, channel = 0) {
+  if (!queue?.members?.size) return 0;
+  let sent = 0;
+  for (const member of queue.members.values()) {
+    if (!isActiveExpeditionSoloQueueSession(member, queue.id) || !member.socket || !member.rinfo) continue;
+    if (sendReliablePayload(member.socket, member.rinfo, member, makeExpeditionSoloQueueState(member, queue), channel)) sent += 1;
+  }
+  return sent;
+}
+
+function clearExpeditionSoloQueueLaunch(queue) {
+  if (!queue?.launchTimer) return;
+  clearTimeout(queue.launchTimer);
+  queue.launchTimer = null;
+}
+
+function expeditionReservationAllowsPlayer(room, playerId) {
+  if (!room?.expeditionReserved) return true;
+  const id = Number(playerId || 0);
+  return Number.isFinite(id) && id > 0 && room.expeditionReservationPlayerIds instanceof Set && room.expeditionReservationPlayerIds.has(id);
+}
+
+function reserveExpeditionSoloRoom(queue, members) {
+  const room = ensureRoom({
+    name: `Expedition solo ${queue.id}`,
+    map: "promzona",
+    mode: MAP_MODE_ROGUELIKE,
+    maxUsers: 4,
+    friendlyFire: false,
+    timeLimit: 10,
+    fragLimit: 50,
+    lvlMin: 1,
+    lvlMax: 99,
+    hasFullSettings: true,
+  });
+  room.expeditionReserved = true;
+  room.expeditionQueueId = queue.id;
+  room.expeditionReservationPlayerIds = new Set(members.map((member) => Number(member.playerId || 0)).filter((id) => id > 0));
+  if (room.expeditionReservationTimer) clearTimeout(room.expeditionReservationTimer);
+  room.expeditionReservationTimer = setTimeout(() => {
+    if (rooms.get(room.name) !== room) return;
+    room.expeditionReservationTimer = null;
+    room.expeditionReserved = false;
+    room.expeditionReservationPlayerIds = null;
+    if ((room.players?.size || 0) === 0) deleteEmptyRoom(room, "expedition-reservation-timeout");
+  }, 90000);
+  room.expeditionReservationTimer.unref?.();
+  return room;
+}
+
+function scheduleExpeditionSoloQueueLaunch(queue, channel = 0) {
+  if (!queue || queue.launchTimer || queue.members.size !== 4) return;
+  // Keep the confirmed 4/4 state visible long enough for the roster to paint,
+  // then atomically reserve the Promzona room for these exact four profiles.
+  queue.launchTimer = setTimeout(() => {
+    queue.launchTimer = null;
+    const members = Array.from(queue.members.values())
+      .filter((member) => isActiveExpeditionSoloQueueSession(member, queue.id));
+    if (members.length !== 4 || expeditionSoloQueues.get(queue.id) !== queue) {
+      pruneExpeditionSoloQueues(channel);
+      return;
+    }
+
+    const room = reserveExpeditionSoloRoom(queue, members);
+    expeditionSoloQueues.delete(queue.id);
+    queue.members.clear();
+    for (const member of members) {
+      member.expeditionSoloQueueId = "";
+      if (!member.socket || !member.rinfo) continue;
+      sendReliablePayload(member.socket, member.rinfo, member, makeExpeditionSoloQueueLaunch(member, room.name), channel);
+    }
+    console.log(`[expedition] solo queue launch queue=${queue.id} room=${room.name} players=${members.map((member) => member.playerId).join(",")}`);
+  }, 400);
+  queue.launchTimer.unref?.();
+}
+
+function removeExpeditionSoloMatchmakingSession(session, reason = "leave", channel = 0) {
+  const queueId = String(session?.expeditionSoloQueueId || "");
+  if (!queueId) return false;
+  const queue = expeditionSoloQueues.get(queueId);
+  session.expeditionSoloQueueId = "";
+  if (!queue?.members) return false;
+  clearExpeditionSoloQueueLaunch(queue);
+  queue.members.delete(session.sessionId);
+  if (queue.members.size === 0) {
+    expeditionSoloQueues.delete(queueId);
+  } else {
+    publishExpeditionSoloQueueState(queue, channel);
+  }
+  console.log(`[expedition] solo queue leave reason=${reason} queue=${queueId} player=${session.playerId || "unknown"}`);
+  return true;
+}
+
+function pruneExpeditionSoloQueues(channel = 0) {
+  for (const [queueId, queue] of expeditionSoloQueues) {
+    let changed = false;
+    for (const [sessionId, member] of queue.members) {
+      if (isActiveExpeditionSoloQueueSession(member, queueId)) continue;
+      queue.members.delete(sessionId);
+      if (member?.expeditionSoloQueueId === queueId) member.expeditionSoloQueueId = "";
+      changed = true;
+    }
+    if (queue.members.size === 0) {
+      clearExpeditionSoloQueueLaunch(queue);
+      expeditionSoloQueues.delete(queueId);
+    } else if (changed) {
+      if (queue.members.size < 4) clearExpeditionSoloQueueLaunch(queue);
+      publishExpeditionSoloQueueState(queue, channel);
+    }
+  }
+}
+
+async function loadExpeditionSoloQueueProfile(session) {
+  if (!session?.listLobby || !session.lobbyActor) return null;
+  const { profile } = await profileForJoin(session.lobbyActor, { forceRefresh: false });
+  if (!profile || profile.accessDenied || isFallbackBattleProfile(profile)) return null;
+  if (session.transportDisconnected || !session.sessionId || sessions.get(session.sessionId) !== session) return null;
+  session.playerId = profile.authId;
+  session.playerAuthKey = profile.authKey || actorCredentials(session.lobbyActor).authKey || "";
+  session.playerName = profile.name;
+  session.loadedProfile = profile;
+  return profile;
+}
+
+async function handleExpeditionSoloMatchmaking(session, command, channel = 0) {
+  if (!session?.listLobby) return [makeExpeditionSoloQueueRejected(session, "not_in_lobby")];
+  if (command === EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL) {
+    removeExpeditionSoloMatchmakingSession(session, "client-cancel", channel);
+    return [];
+  }
+  if (command !== EXPEDITION_COMMAND.SOLO_QUEUE_JOIN) {
+    return [makeExpeditionSoloQueueRejected(session, "unknown_command")];
+  }
+
+  const profile = await loadExpeditionSoloQueueProfile(session);
+  if (!profile) return [makeExpeditionSoloQueueRejected(session, "profile_unavailable")];
+  pruneExpeditionSoloQueues(channel);
+  removeExpeditionSoloMatchmakingSession(session, "requeue", channel);
+
+  let queue = Array.from(expeditionSoloQueues.values()).find((candidate) => candidate.members.size < 4);
+  if (!queue) {
+    expeditionSoloQueueSequence += 1;
+    queue = { id: `solo-${Date.now().toString(36)}-${expeditionSoloQueueSequence.toString(36)}`, members: new Map() };
+    expeditionSoloQueues.set(queue.id, queue);
+  }
+  queue.members.set(session.sessionId, session);
+  session.expeditionSoloQueueId = queue.id;
+  publishExpeditionSoloQueueState(queue, channel);
+  if (queue.members.size === 4) {
+    scheduleExpeditionSoloQueueLaunch(queue, channel);
+  }
+  console.log(`[expedition] solo queue join queue=${queue.id} player=${profile.authId} name=${profile.name} count=${queue.members.size}/4`);
+  return [];
+}
+
 function ensureExpeditionRun(room) {
   if (!room.expedition || room.expedition.phase === "finished") {
     room.expedition = {
@@ -11565,12 +11796,18 @@ async function persistExpeditionCompletion(session, run, result, highestWave, pl
   return { ok: Boolean(response?.ok && body?.ok), error: String(body?.error || (response?.ok ? "" : "battle_api_failed")), body };
 }
 
-async function handleExpeditionRequest(session, parsed) {
+async function handleExpeditionRequest(session, parsed, channel = 0) {
   const data = eventDataHash(parsed);
-  if (!isExpeditionRoom(session) || !data) {
+  if (!data) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "wrong_room", false)];
   }
   const command = Number(expeditionPayloadValue(data, 1, 0));
+  if (session?.listLobby && (command === EXPEDITION_COMMAND.SOLO_QUEUE_JOIN || command === EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL)) {
+    return handleExpeditionSoloMatchmaking(session, command, channel);
+  }
+  if (!isExpeditionRoom(session)) {
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "wrong_room", false)];
+  }
   const room = session.room;
   if (command === EXPEDITION_COMMAND.START) {
     const run = ensureExpeditionRun(room);
@@ -12551,6 +12788,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
+      session.lobbyActor = actorParam;
       session.listLobby = true;
       warmPlayerProfile(actorParam, "list-lobby");
       if (isMasterSocialPort(port)) {
@@ -12586,6 +12824,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
+      session.lobbyActor = actorParam;
       session.listLobby = true;
       warmPlayerProfile(actorParam, "plain-lobby");
       console.log(`[state] plain lobby join accepted port=${port} lobby=${requestedName} actorKeys=${describeHashtable(actorParam)}`);
@@ -12607,8 +12846,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || (joinRoom.players?.size || 0) <= 0) {
-        if (joinRoom && (joinRoom.players?.size || 0) <= 0) deleteEmptyRoom(joinRoom, "stale-name-join");
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved)) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved) deleteEmptyRoom(joinRoom, "stale-name-join");
         console.log(`[state] room join rejected reason=missing-room name=${settings.name} requested=${requestedName}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
@@ -12622,6 +12861,13 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (!Number.isFinite(requestedAuthId) || requestedAuthId <= 0 || !requestedAuthKey) {
       console.log(`[state] room join rejected reason=missing-auth requested=${settings.name}`);
       return [rawOperationResponse(255, [], -3, "profile-unavailable")];
+    }
+    if (settings.hasFullSettings === false) {
+      const joinRoom = rooms.get(settings.name);
+      if (joinRoom?.expeditionReserved && !expeditionReservationAllowsPlayer(joinRoom, requestedAuthId)) {
+        console.log(`[expedition] reserved room join rejected room=${joinRoom.name} player=${requestedAuthId}`);
+        return [rawOperationResponse(255, [], -17, "expedition-reservation-required")];
+      }
     }
     const joinAttempt = (session.joinAttemptGeneration || 0) + 1;
     session.joinAttemptGeneration = joinAttempt;
@@ -12647,14 +12893,18 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || (joinRoom.players?.size || 0) <= 0) {
-        if (joinRoom && (joinRoom.players?.size || 0) <= 0) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved)) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
         console.log(`[state] room join rejected reason=missing-room-after-profile name=${settings.name}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
       if (!roomPasswordMatches(joinRoom, settings.password)) {
         console.log(`[state] room join rejected reason=invalid-password-after-profile name=${settings.name} player=${profile.authId}`);
         return [rawOperationResponse(255, [], -12, "invalid-password")];
+      }
+      if (joinRoom.expeditionReserved && !expeditionReservationAllowsPlayer(joinRoom, profile.authId)) {
+        console.log(`[expedition] reserved room profile rejected room=${joinRoom.name} player=${profile.authId}`);
+        return [rawOperationResponse(255, [], -17, "expedition-reservation-required")];
       }
     }
     const requestedStaffSpectator =
@@ -12715,6 +12965,14 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.actorJoinAnnouncedAt = new Map();
     markKnownRoomActors(session);
     session.room.players.set(session.actorId, session);
+    if (session.room.expeditionReserved && session.room.expeditionReservationPlayerIds instanceof Set && session.room.players.size >= session.room.expeditionReservationPlayerIds.size) {
+      session.room.expeditionReserved = false;
+      session.room.expeditionReservationPlayerIds = null;
+      if (session.room.expeditionReservationTimer) {
+        clearTimeout(session.room.expeditionReservationTimer);
+        session.room.expeditionReservationTimer = null;
+      }
+    }
     scheduleRoomListPush("room-join", channel);
     markActorKnown(session, session.actorId);
     session.gameStateRequested = false;
@@ -12773,7 +13031,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
   }
 
   if (eventCode === EXPEDITION_EVENT) {
-    return handleExpeditionRequest(session, parsed);
+    return handleExpeditionRequest(session, parsed, channel);
   }
 
   if (eventCode === VOICE_CAPABILITY_EVENT) {
