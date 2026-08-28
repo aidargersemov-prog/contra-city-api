@@ -23,7 +23,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-28-expedition-party-v305";
+const BUILD_ID = "battle-server-2026-08-28-expedition-party-v306";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -12007,7 +12007,11 @@ function removeExpeditionPartyMember(session, reason = "leave", channel = 0) {
 
 function allExpeditionPartyMembersReady(party) {
   const members = partyMembers(party);
-  return members.length > 0 && members.length === party.members.size && members.every((member) => member.expeditionPartyReady);
+  // Party PvE is a four-player expedition. A leader must not be able to
+  // launch a one-, two- or three-person reservation just because every
+  // currently occupied slot is marked ready. The client only visualizes this
+  // state; the server remains the authoritative launch gate.
+  return members.length === 4 && members.length === party.members.size && members.every((member) => member.expeditionPartyReady);
 }
 
 function reserveExpeditionPartyRoom(party, members) {
@@ -12130,7 +12134,10 @@ async function handleExpeditionPartyLobby(session, command, data, channel = 0) {
       await publishExpeditionPartyState(party, channel);
       return [];
     }
-    party.message = "Ожидаем готовность отряда.";
+    const memberCount = partyMembers(party).length;
+    party.message = memberCount < 4
+      ? `Готов. Ожидаем ещё ${4 - memberCount} бойц${4 - memberCount === 1 ? "а" : "ов"}.`
+      : "Ожидаем готовность отряда.";
     if (allExpeditionPartyMembersReady(party)) startExpeditionPartyCountdown(party, channel);
     else await publishExpeditionPartyState(party, channel);
     return [];
