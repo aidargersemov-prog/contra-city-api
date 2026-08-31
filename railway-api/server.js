@@ -20,9 +20,10 @@ import {
   rollSummerCaseReward,
   rollTropicalCaseReward,
 } from "./case-loot.js";
+import { createClanCupSystem } from "./clan-cup-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-28-expedition-promzona-v100";
+const API_BUILD_ID = "railway-api-2026-08-31-clan-cup-v102";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -43,7 +44,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 const REMOTE_ASSET_BUNDLE_URLS = new Map([
   [
     "promzona.unity3d",
-    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/aaed3d29f64307051aaff1dbcdc233abc18da1ad/railway-api/assetbundles/promzona.unity3d"
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/b6c64d529f3b6123638dc4eeeff6fb59d8e31a50/railway-api/assetbundles/promzona.unity3d"
   ]
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
@@ -142,6 +143,7 @@ const DONATE_ORDER_TTL_MS = Math.max(5 * 60 * 1000, Math.min(
 const TELEGRAM_CLEANUP_INTERVAL_MS = Math.max(60000, Number(
   process.env.TELEGRAM_CLEANUP_INTERVAL_MS || 5 * 60 * 1000
 ));
+const CLAN_CUP_LIFECYCLE_INTERVAL_MS = Math.max(1000, Number(process.env.CLAN_CUP_LIFECYCLE_INTERVAL_MS || 5000));
 const TELEGRAM_PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const TELEGRAM_CLEANUP_ADVISORY_LOCK = 741963521;
 const TELEGRAM_RESET_ADVISORY_LOCK = 741963522;
@@ -366,7 +368,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition" || pathname.startsWith("/battle/clan-cup/")) {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -1915,6 +1917,11 @@ function saveStore(store) {
 }
 
 let pgPool = null;
+const clanCup = createClanCupSystem({
+  getPool: () => pgPool,
+  loadRole: loadActiveStaffRole,
+  audit: auditGameEvent,
+});
 let pgSaveChain = Promise.resolve();
 const viewSelectionSaveVersions = new Map();
 const weaponSelectionSaveVersions = new Map();
@@ -2585,6 +2592,13 @@ async function savePostgresStore(nextStore) {
 }
 
 let store = await initStore();
+if (pgPool) {
+  clanCup.tick().catch((error) => console.error("[clan-cup] initial lifecycle tick failed", error));
+  const clanCupLifecycleTimer = setInterval(() => {
+    clanCup.tick().catch((error) => console.error("[clan-cup] scheduled lifecycle tick failed", error));
+  }, CLAN_CUP_LIFECYCLE_INTERVAL_MS);
+  clanCupLifecycleTimer.unref?.();
+}
 if (pgPool && TELEGRAM_LINK_API_TOKEN) {
   cleanupTelegramPairingState().catch((error) => {
     console.error("[telegram-pairing] initial cleanup failed", error);
@@ -11795,7 +11809,16 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   if (!resolvedAccount && !isEquipmentSelectionSaveRequest(url)) account = await refreshAccountFromPostgres(account);
 
   if (page === "staff") {
+    if (String(act || "").startsWith("cup_")) {
+      return clanCup.adminAjax(account, act, url.searchParams);
+    }
     return staffAjaxPayload(pgPool, account, act, url.searchParams);
+  }
+
+  // Clan Cup is a new isolated HTTP contract. The CEF bridge calls this
+  // through Unity Ajax, so the browser never receives session credentials.
+  if (page === "clancup") {
+    return clanCup.playerAjax(account, act || "state", url.searchParams);
   }
 
   if (page === "auth" && act === "g") {
@@ -12067,7 +12090,13 @@ function tryServeLauncherRelease(req, res, url) {
   const manifestRequest = url.pathname === "/launcher/update.json";
   const signatureRequest = url.pathname === "/launcher/update.json.sig";
   const releaseMatch = /^\/launcher\/releases\/([0-9A-Za-z._-]{1,64})\/ContraCityLauncher\.exe$/.exec(url.pathname);
-  if (!manifestRequest && !signatureRequest && !releaseMatch) return false;
+  const fixedRuntimeMatch = /^\/launcher\/webview2-fixed\/([0-9.]{1,32})\/(Microsoft\.WebView2\.FixedVersionRuntime\.([0-9.]{1,32})\.x64\.cab)$/.exec(url.pathname);
+  if (!manifestRequest && !signatureRequest && !releaseMatch && !fixedRuntimeMatch) return false;
+
+  if (fixedRuntimeMatch && fixedRuntimeMatch[1] !== fixedRuntimeMatch[3]) {
+    sendJson(res, { ok: false, error: "launcher_release_not_found" }, 404);
+    return true;
+  }
 
   if (req.method !== "GET" && req.method !== "HEAD") {
     sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
@@ -12085,6 +12114,10 @@ function tryServeLauncherRelease(req, res, url) {
     filePath = path.join(LAUNCHER_RELEASE_DIR, "update.json.sig");
     contentType = "text/plain; charset=us-ascii";
     cacheControl = "no-store, no-cache, must-revalidate";
+  } else if (fixedRuntimeMatch) {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, "webview2-fixed", fixedRuntimeMatch[1], fixedRuntimeMatch[2]);
+    contentType = "application/vnd.ms-cab-compressed";
+    cacheControl = "public, max-age=31536000, immutable";
   } else {
     filePath = path.join(LAUNCHER_RELEASE_DIR, releaseMatch[1], "ContraCityLauncher.exe");
     contentType = "application/octet-stream";
@@ -12105,6 +12138,7 @@ function tryServeLauncherRelease(req, res, url) {
     "last-modified": stat.mtime.toUTCString()
   };
   if (releaseMatch) headers["content-disposition"] = "attachment; filename=\"ContraCityLauncher.exe\"";
+  if (fixedRuntimeMatch) headers["content-disposition"] = `attachment; filename="${fixedRuntimeMatch[2]}"`;
 
   let start = 0;
   let end = stat.size - 1;
@@ -13484,6 +13518,33 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (url.pathname.startsWith("/battle/clan-cup/")) {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 128 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      let result;
+      if (url.pathname === "/battle/clan-cup/dispatch") result = await clanCup.battleDispatch(body);
+      else if (url.pathname === "/battle/clan-cup/authorize") result = await clanCup.battleAuthorize(body);
+      else if (url.pathname === "/battle/clan-cup/result") result = await clanCup.battleResult(body);
+      else {
+        sendJson(res, { ok: false, error: "not_found" }, 404);
+        return;
+      }
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok ? 200 : 400));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "clan_cup_battle_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
   if (url.pathname === "/battle/social") {
     if (req.method !== "POST") {
       sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
@@ -13599,7 +13660,7 @@ async function handleHttpRequest(req, res) {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
       schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_reports/player_staff_roles/player_staff_chat_messages/player_staff_actions"
+        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/clan_cups/clan_cup_entries/clan_cup_entry_players/clan_cup_matches/clan_cup_match_players/clan_cup_awards/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_reports/player_staff_roles/player_staff_chat_messages/player_staff_actions"
         : "accounts-json",
       accounts: Object.keys(store.accounts).length,
       databaseUrlConfigured: Boolean(DATABASE_URL)
