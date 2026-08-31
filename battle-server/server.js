@@ -23,10 +23,15 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-08-28-expedition-ai-coop-v309";
+const BUILD_ID = "battle-server-2026-08-31-clan-cup-v310";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
+// Clan Cup has its own lobby-to-reservation signal. It intentionally does not
+// touch the recovered legacy events (84/97/99/100/105) or PvE Event157.
+const CLAN_CUP_EVENT = 158;
+const CLAN_CUP_COMMAND = Object.freeze({ LAUNCH: 1 });
+const CLAN_CUP_DISPATCH_MS = Math.max(1000, Number(process.env.CLAN_CUP_DISPATCH_MS || 5000));
 const EXPEDITION_COMMAND = Object.freeze({
   START: 1, WAVE: 2, COMPLETE: 3,
   SOLO_QUEUE_JOIN: 10, SOLO_QUEUE_CANCEL: 11,
@@ -6252,6 +6257,9 @@ function hasTeamDamageMode(mode) {
 }
 
 function normalizeTeamForRoom(session, requestedTeam = null) {
+  if (isClanCupRoom(session?.room) && [1, 2].includes(Number(session?.clanCupTeam))) {
+    return Number(session.clanCupTeam);
+  }
   const mode = roomMode(session);
   const team = Number(requestedTeam);
 
@@ -6704,6 +6712,17 @@ function scheduleStandardRoundLimit(room, channel = 0) {
     try {
       if (!room || rooms.get(room.name) !== room) return;
       if (!isStandardRoundRoom(room) || room.standardRoundState !== "active" || Number(room.standardRoundSeq || 0) !== roundSeq) return;
+      if (isClanCupRoom(room)) {
+        const winner = standardRoundWinner(room);
+        if (!winner) {
+          room.clanCup.suddenDeath = true;
+          room.clanCup.suddenDeathAt = Date.now();
+          console.log(`[clan-cup] sudden-death room=${room.name} match=${room.clanCup.matchId} score=${clanCupScores(room).scoreA}:${clanCupScores(room).scoreB}`);
+          return;
+        }
+        finishStandardRound(room, winner, "time-limit", channel);
+        return;
+      }
       finishStandardRound(room, standardRoundWinner(room), "time-limit", channel);
     } catch (error) {
       console.error(`[round] time-limit failed room=${room?.name || "unknown"} seq=${roundSeq}`, error);
@@ -6714,6 +6733,10 @@ function scheduleStandardRoundLimit(room, channel = 0) {
 
 function startStandardRound(room, channel = 0, reason = "sync") {
   if (!isStandardRoundRoom(room) || room.standardRoundState === "pause" || room.standardRoundState === "active") return 0;
+  if (isClanCupRoom(room) && !clanCupRoomReady(room)) {
+    console.log(`[clan-cup] waiting room=${room.name} match=${room.clanCup.matchId} team1=${Array.from(room.players.values()).filter((entry) => Number(entry.clanCupTeam) === 1).length}/5 team2=${Array.from(room.players.values()).filter((entry) => Number(entry.clanCupTeam) === 2).length}/5`);
+    return 0;
+  }
   room.standardRoundSeq = Number(room.standardRoundSeq || 0) + 1;
   room.standardRoundState = "active";
   room.standardRoundWinner = 0;
@@ -6786,7 +6809,12 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
   ].filter(Boolean);
   let sent = 0;
   for (const payload of payloads) sent += sendStandardPayloadToReadyRoom(room, payload, channel, currentSession, currentResponses);
-  scheduleStandardRestart(room, channel);
+  if (isClanCupRoom(room) && [1, 2].includes(Number(winner))) {
+    room.clanCup.finished = true;
+    submitClanCupResult(room, Number(winner), reason, scoreSource);
+  } else {
+    scheduleStandardRestart(room, channel);
+  }
   console.log(`[round] end room=${room.name} map=${room.map} mode=${room.mode} winner=${winner || "draw"} reason=${reason} players=${standardReadyPlayers(room).length} score=${hasTeamScoreMode(Number(room.mode)) ? `${teamScorePoints(scoreSource, 1)}:${teamScorePoints(scoreSource, 2)}` : "ffa"} summaries=${summaries} sent=${sent}`);
   return sent;
 }
@@ -6799,6 +6827,9 @@ function maybeFinishStandardRound(room, reason = "state", channel = 0, currentSe
     if (!source) return 0;
     const red = teamScorePoints(source, 1);
     const blue = teamScorePoints(source, 2);
+    if (isClanCupRoom(room) && room.clanCup.suddenDeath && red !== blue) {
+      return finishStandardRound(room, red > blue ? 1 : 2, "sudden-death", channel, currentSession, currentResponses);
+    }
     if (red >= fragLimit || blue >= fragLimit) return finishStandardRound(room, red === blue ? 0 : (red > blue ? 1 : 2), reason, channel, currentSession, currentResponses);
     return 0;
   }
@@ -10222,6 +10253,8 @@ function resetSessionRoomProgress(session) {
   resetSessionFragState(session);
   clearSessionActiveShotLedgers(session);
   session.team = -1;
+  session.clanCupMatchId = 0;
+  session.clanCupTeam = 0;
   session.zombieType = ZOMBIE_TYPE.HUMAN;
   session.lastTransform = null;
   clearStaffFlightState(session, "room-reset");
@@ -10234,6 +10267,7 @@ function resetSessionRoomProgress(session) {
 function deleteEmptyRoom(room, reason = "empty") {
   if (!room?.name || (room.players?.size || 0) > 0) return false;
   if (rooms.get(room.name) !== room) return false;
+  if (isClanCupRoom(room) && !room.clanCup.resultDelivered) return false;
   clearZombieTimers(room);
   if (room.expeditionReservationTimer) {
     clearTimeout(room.expeditionReservationTimer);
@@ -11537,17 +11571,24 @@ function expeditionPayloadValue(data, key, fallback = null) {
   return item ? item.value : fallback;
 }
 
-function makeExpeditionReply(session, command, runId, message, ok) {
+function makeExpeditionReply(session, command, runId, message, ok, replyToCommand = 0) {
+  const entries = [
+    { key: rawByte(1), value: rawByte(command) },
+    { key: rawByte(2), value: rawString(runId || "") },
+    { key: rawByte(3), value: rawString(message || "") },
+    { key: rawByte(4), value: rawBool(Boolean(ok)) },
+  ];
+  // Key 5 is reserved for the original request command on base Expedition
+  // replies. AI messages already use it as target actor id, so it is emitted
+  // only by makeExpeditionReply, never by the AI transport.
+  if (Number.isInteger(Number(replyToCommand)) && Number(replyToCommand) > 0) {
+    entries.push({ key: rawByte(5), value: rawByte(Number(replyToCommand)) });
+  }
   return rawEvent(EXPEDITION_EVENT, [
     { key: 254, value: rawInt(Number(session?.actorId || 0)) },
     {
       key: 245,
-      value: rawHashtable([
-        { key: rawByte(1), value: rawByte(command) },
-        { key: rawByte(2), value: rawString(runId || "") },
-        { key: rawByte(3), value: rawString(message || "") },
-        { key: rawByte(4), value: rawBool(Boolean(ok)) },
-      ]),
+      value: rawHashtable(entries),
     },
   ]);
 }
@@ -11700,6 +11741,155 @@ function expeditionReservationAllowsPlayer(room, playerId) {
   if (!room?.expeditionReserved) return true;
   const id = Number(playerId || 0);
   return Number.isFinite(id) && id > 0 && room.expeditionReservationPlayerIds instanceof Set && room.expeditionReservationPlayerIds.has(id);
+}
+
+function isClanCupRoom(room) {
+  return Boolean(room?.clanCup && Number(room.clanCup.matchId || 0) > 0);
+}
+
+function clanCupRoomReady(room) {
+  if (!isClanCupRoom(room) || room.clanCup.resultDelivered) return false;
+  const players = Array.from(room.players?.values?.() || []);
+  const team1 = players.filter((entry) => Number(entry.clanCupTeam) === 1).length;
+  const team2 = players.filter((entry) => Number(entry.clanCupTeam) === 2).length;
+  return team1 === 5 && team2 === 5;
+}
+
+function makeClanCupLaunch(session, assignment) {
+  return rawEvent(CLAN_CUP_EVENT, [
+    { key: 254, value: rawInt(Number(session?.actorId || 0)) },
+    {
+      key: 245,
+      value: rawHashtable([
+        { key: rawByte(1), value: rawByte(CLAN_CUP_COMMAND.LAUNCH) },
+        { key: rawByte(2), value: rawString(String(assignment.roomName || "").slice(0, 96)) },
+        { key: rawByte(3), value: rawInt(Number(assignment.matchId || 0)) },
+        { key: rawByte(4), value: rawByte(Number(assignment.team || 0)) },
+        { key: rawByte(5), value: rawString("LegoTurnament") },
+      ]),
+    },
+  ]);
+}
+
+function reserveClanCupRoom(assignment) {
+  const matchId = Number(assignment?.matchId || 0);
+  const cupId = Number(assignment?.cupId || 0);
+  const roomName = String(assignment?.roomName || "").trim().slice(0, 96);
+  const playerId = Number(assignment?.playerId || 0);
+  const team = Number(assignment?.team || 0);
+  if (!Number.isInteger(matchId) || matchId <= 0 || !Number.isInteger(cupId) || cupId <= 0 || !roomName || !Number.isInteger(playerId) || playerId <= 0 || ![1, 2].includes(team)) return null;
+  const room = ensureRoom({
+    name: roomName,
+    map: "LegoTurnament",
+    mode: MAP_MODE_TEAM_DEATHMATCH,
+    maxUsers: 10,
+    friendlyFire: false,
+    timeLimit: 15,
+    fragLimit: 30,
+    lvlMin: 1,
+    lvlMax: 99,
+    hasFullSettings: true,
+  });
+  if (isClanCupRoom(room) && Number(room.clanCup.matchId) !== matchId) {
+    console.log(`[clan-cup] reservation collision room=${roomName} existingMatch=${room.clanCup.matchId} requestedMatch=${matchId}`);
+    return null;
+  }
+  if (!isClanCupRoom(room)) {
+    room.clanCup = {
+      cupId,
+      matchId,
+      roomName,
+      playerTeams: new Map(),
+      resultDelivered: false,
+      resultPromise: null,
+      suddenDeath: false,
+      finished: false,
+    };
+  }
+  room.clanCup.playerTeams.set(playerId, team);
+  return room;
+}
+
+async function authorizeClanCupJoin(room, playerId) {
+  if (!isClanCupRoom(room) || !API_TOKEN) return { ok: false, error: "clan-cup-service-unavailable" };
+  try {
+    const result = await postApiJson("/battle/clan-cup/authorize", {
+      playerId: Number(playerId || 0),
+      roomName: String(room.name || ""),
+    });
+    if (
+      !result || result.ok !== true ||
+      Number(result.matchId || 0) !== Number(room.clanCup.matchId) ||
+      ![1, 2].includes(Number(result.team)) ||
+      Number(result.scoreLimit || 0) !== 30 || Number(result.durationSeconds || 0) !== 900 ||
+      String(result.map || "").toLowerCase() !== "legoturnament" ||
+      String(result.mode || "").toLowerCase() !== "team_deathmatch"
+    ) {
+      return { ok: false, error: String(result?.error || "clan-cup-authorization-denied") };
+    }
+    room.clanCup.playerTeams.set(Number(playerId), Number(result.team));
+    return { ok: true, matchId: Number(result.matchId), team: Number(result.team) };
+  } catch (error) {
+    console.log(`[clan-cup] authorize failed room=${room?.name || "unknown"} player=${playerId || 0} ${error.message}`);
+    return { ok: false, error: "clan-cup-authorization-unavailable" };
+  }
+}
+
+function clanCupScores(room, source = null) {
+  const player = source || Array.from(room?.players?.values?.() || [])[0] || null;
+  return { scoreA: teamScorePoints(player, 1), scoreB: teamScorePoints(player, 2) };
+}
+
+function submitClanCupResult(room, winnerTeam, reason, source = null) {
+  if (!isClanCupRoom(room) || ![1, 2].includes(Number(winnerTeam)) || room.clanCup.resultDelivered || room.clanCup.resultPromise) return;
+  const scores = clanCupScores(room, source);
+  if (scores.scoreA === scores.scoreB) return;
+  const matchId = Number(room.clanCup.matchId);
+  const roomName = String(room.name || "");
+  room.clanCup.resultPromise = postApiJson("/battle/clan-cup/result", {
+    matchId,
+    roomName,
+    winnerTeam: Number(winnerTeam),
+    scoreA: scores.scoreA,
+    scoreB: scores.scoreB,
+    reason: String(reason || "battle").slice(0, 40),
+  }).then((result) => {
+    if (!result || result.ok !== true) throw new Error(String(result?.error || "result-denied"));
+    room.clanCup.resultDelivered = true;
+    room.clanCup.finished = true;
+    console.log(`[clan-cup] result accepted room=${roomName} match=${matchId} winner=${winnerTeam} score=${scores.scoreA}:${scores.scoreB}${result.idempotent ? " idempotent=yes" : ""}`);
+  }).catch((error) => {
+    console.log(`[clan-cup] result submit failed room=${roomName} match=${matchId} ${error.message}`);
+    const retry = setTimeout(() => {
+      if (rooms.get(roomName) === room && isClanCupRoom(room) && !room.clanCup.resultDelivered) submitClanCupResult(room, winnerTeam, reason, source);
+    }, 5000);
+    retry.unref?.();
+  }).finally(() => {
+    room.clanCup.resultPromise = null;
+  });
+}
+
+async function runClanCupDispatch() {
+  if (!API_TOKEN) return;
+  const members = Array.from(sessions.values()).filter((session) => (
+    session && !session.transportDisconnected && isBattleListSession(session) && session.listLobby &&
+    Number.isInteger(Number(session.playerId || 0)) && Number(session.playerId) > 0 &&
+    session.sessionId && sessions.get(session.sessionId) === session
+  ));
+  if (!members.length) return;
+  try {
+    const result = await postApiJson("/battle/clan-cup/dispatch", { playerIds: members.map((member) => Number(member.playerId)) });
+    const assignments = Array.isArray(result?.assignments) ? result.assignments : [];
+    const sessionsByPlayer = new Map(members.map((member) => [Number(member.playerId), member]));
+    for (const assignment of assignments) {
+      const room = reserveClanCupRoom(assignment);
+      const member = sessionsByPlayer.get(Number(assignment?.playerId || 0));
+      if (!room || !member || !member.socket || !member.rinfo) continue;
+      sendReliablePayload(member.socket, member.rinfo, member, makeClanCupLaunch(member, assignment), member.lastChannel || 0);
+    }
+  } catch (error) {
+    console.log(`[clan-cup] dispatch failed ${error.message}`);
+  }
 }
 
 function reserveExpeditionSoloRoom(queue, members) {
@@ -12530,22 +12720,22 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
   const playerCount = Math.max(1, Math.min(4, Math.trunc(Number(expeditionPayloadValue(data, 5, run.playerCount)) || run.playerCount)));
   const loot = expeditionLootFromWire(expeditionPayloadValue(data, 6, ""));
   if (!["evacuated", "wiped"].includes(result) || highestWave < 0 || highestWave > 50 || !loot || (result === "evacuated" && (highestWave !== 50 || run.wave !== 50)) || (result === "wiped" && loot.length)) {
-    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "invalid_completion", false)];
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "invalid_completion", false, EXPEDITION_COMMAND.COMPLETE)];
   }
   const playerId = Number(session.playerId || 0);
   const existing = run.completionByPlayer.get(playerId);
   if (existing) return [existing];
-  const pending = makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "completion_pending", false);
+  const pending = makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "completion_pending", false, EXPEDITION_COMMAND.COMPLETE);
   run.completionByPlayer.set(playerId, pending);
   try {
     const saved = await persistExpeditionCompletion(session, run, result, highestWave, playerCount, loot);
-    const reply = makeExpeditionReply(session, saved.ok ? EXPEDITION_COMMAND.COMPLETED : EXPEDITION_COMMAND.REJECTED, run.runId, saved.ok ? "saved" : saved.error, saved.ok);
+    const reply = makeExpeditionReply(session, saved.ok ? EXPEDITION_COMMAND.COMPLETED : EXPEDITION_COMMAND.REJECTED, run.runId, saved.ok ? "saved" : saved.error, saved.ok, EXPEDITION_COMMAND.COMPLETE);
     run.completionByPlayer.set(playerId, reply);
     if (saved.ok) console.log(`[expedition] complete room=${room.name} player=${playerId} run=${run.runId} wave=${highestWave} transferred=${saved.body?.transferredItems || 0}`);
     else console.log(`[expedition] completion rejected room=${room.name} player=${playerId} run=${run.runId} error=${saved.error}`);
     return [reply];
   } catch (error) {
-    const reply = makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "battle_api_failed", false);
+    const reply = makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "battle_api_failed", false, EXPEDITION_COMMAND.COMPLETE);
     run.completionByPlayer.set(playerId, reply);
     console.log(`[expedition] completion failed room=${room.name} player=${playerId} ${error.message}`);
     return [reply];
@@ -13525,10 +13715,14 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const settings = roomSettingsFrom(roomPropsParam);
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
+    if (settings.hasFullSettings !== false && (String(settings.name).toLowerCase().startsWith("clancup-") || isClanCupRoom(rooms.get(settings.name)))) {
+      console.log(`[clan-cup] direct room create rejected name=${settings.name}`);
+      return [rawOperationResponse(255, [], -17, "clan-cup-reservation-required")];
+    }
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved)) {
-        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved) deleteEmptyRoom(joinRoom, "stale-name-join");
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !isClanCupRoom(joinRoom))) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !isClanCupRoom(joinRoom)) deleteEmptyRoom(joinRoom, "stale-name-join");
         console.log(`[state] room join rejected reason=missing-room name=${settings.name} requested=${requestedName}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
@@ -13574,8 +13768,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved)) {
-        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !isClanCupRoom(joinRoom))) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !isClanCupRoom(joinRoom)) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
         console.log(`[state] room join rejected reason=missing-room-after-profile name=${settings.name}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
@@ -13586,6 +13780,14 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       if (joinRoom.expeditionReserved && !expeditionReservationAllowsPlayer(joinRoom, profile.authId)) {
         console.log(`[expedition] reserved room profile rejected room=${joinRoom.name} player=${profile.authId}`);
         return [rawOperationResponse(255, [], -17, "expedition-reservation-required")];
+      }
+    }
+    let clanCupAuthorization = null;
+    if (settings.hasFullSettings === false && isClanCupRoom(rooms.get(settings.name))) {
+      clanCupAuthorization = await authorizeClanCupJoin(rooms.get(settings.name), profile.authId);
+      if (!clanCupAuthorization.ok) {
+        console.log(`[clan-cup] reserved room join rejected room=${settings.name} player=${profile.authId} reason=${clanCupAuthorization.error}`);
+        return [rawOperationResponse(255, [], -17, "clan-cup-reservation-required")];
       }
     }
     const requestedStaffSpectator =
@@ -13620,6 +13822,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     applySessionStaffProfile(session, profile);
     session.isGuest = staffSpectator;
     session.pendingBattleProfile = null;
+    session.clanCupMatchId = Number(clanCupAuthorization?.matchId || 0);
+    session.clanCupTeam = Number(clanCupAuthorization?.team || 0);
+    if (session.clanCupTeam) session.team = session.clanCupTeam;
     session.currentWeaponSlot = 1;
     session.weaponStates = makeWeaponRuntimeState(profile);
     session.peerWeaponConfirmKeys = new Map();
@@ -14285,6 +14490,10 @@ const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREAS
 if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
 const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
 if (typeof clanTreasuryInitialPoll.unref === "function") clanTreasuryInitialPoll.unref();
+const clanCupDispatchInterval = setInterval(runClanCupDispatch, CLAN_CUP_DISPATCH_MS);
+if (typeof clanCupDispatchInterval.unref === "function") clanCupDispatchInterval.unref();
+const clanCupInitialDispatch = setTimeout(runClanCupDispatch, 0);
+if (typeof clanCupInitialDispatch.unref === "function") clanCupInitialDispatch.unref();
 
 for (const port of PORTS) {
   const udp = dgram.createSocket("udp4");
