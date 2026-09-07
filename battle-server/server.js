@@ -23,7 +23,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-01-v311";
+const BUILD_ID = "battle-server-2026-09-07-clan-contracts-v314";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -1358,6 +1358,7 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     exp2clan: 0,
     matchStartedAt: 0,
     matchStatsPosted: false,
+    matchInstanceId: "",
     matchShots: 0,
     matchHits: 0,
     matchKills: 0,
@@ -7343,11 +7344,6 @@ function isProjectileWeaponType(type) {
   return weaponType === 8 || weaponType === 9 || weaponType === 15;
 }
 
-function isArcingProjectileWeaponType(type) {
-  const weaponType = Number(type);
-  return weaponType === 9 || weaponType === 15;
-}
-
 function isProjectileLaunchShot(state, launchMode) {
   return isProjectileWeaponType(state?.type) && Number(launchMode ?? 0) === LAUNCH_MODE.LAUNCH;
 }
@@ -7927,10 +7923,14 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
     const impact = consumeProjectileImpact(state, data, now);
     if (impact.ok) return { ok: true, reason: impact.reason, intervalMs };
     if (
-      isArcingProjectileWeaponType(state.type) &&
+      isProjectileWeaponType(state.type) &&
       impact.reason === "projectile-missing-launch" &&
       shotTimestampKey(data)
     ) {
+      // RocketTracer.Blow() always sends the final SHOT Event97 with the
+      // original launch timestamp. A dropped/missed LAUNCH packet must not
+      // suppress this original client impact: its self echo drives
+      // EffectManager.launcherEffect() and CharacterMotor.SetExplosionForce.
       return { ok: true, reason: "projectile-impact-untracked", intervalMs };
     }
     return { ok: false, reason: impact.reason, intervalMs };
@@ -10093,6 +10093,9 @@ function resetSessionMatchStats(session) {
 
 function beginSessionMatchStats(session) {
   resetSessionMatchStats(session);
+  session.matchInstanceId = typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${crypto.randomBytes(16).toString("hex").slice(0, 8)}-${crypto.randomBytes(16).toString("hex").slice(0, 4)}-4${crypto.randomBytes(16).toString("hex").slice(0, 3)}-8${crypto.randomBytes(16).toString("hex").slice(0, 3)}-${crypto.randomBytes(16).toString("hex").slice(0, 12)}`;
   session.expEarned = 0;
   session.exp2clan = 0;
   session.matchStartedAt = Date.now();
@@ -10146,6 +10149,11 @@ function postSessionBattleSummary(session, reason = "leave", outcome = {}) {
     ...(outcome && typeof outcome.eventData === "object" ? outcome.eventData : {}),
   };
   const summary = {
+    matchInstanceId: String(session.matchInstanceId || ""),
+    // The battle server emits this only for a real end-of-session summary.
+    // A server generated matchInstanceId, not an arbitrary duration limit,
+    // is the anti-repeat contract for clan progress.
+    contractEligible: true,
     playTimeMinutes,
     kills: numberOr(session.matchKills, 0),
     deaths: numberOr(session.matchDeaths, 0),
@@ -12334,7 +12342,7 @@ function ensureExpeditionRun(room) {
       completionByPlayer: new Map(),
       authorityActorId: 0, authorityChangedAt: 0,
       lastAiSequence: 0, lastAiSnapshotAt: 0, lastAiSnapshot: "",
-      aiSequenceByActor: new Map(), aiAttackIds: new Set(), lastAiCommandAt: 0,
+      aiSequenceByActor: new Map(), aiAttackIds: new Set(), lastAiCommandAtByActor: new Map(),
     };
   }
   return room.expedition;
@@ -12400,11 +12408,13 @@ function handleExpeditionAiRequest(session, room, run, command, data, channel = 
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "stale_ai_sequence", false)];
   }
   const now = Date.now();
-  if (command !== EXPEDITION_COMMAND.RESYNC_REQUEST && now - Number(run.lastAiCommandAt || 0) < EXPEDITION_AI_COMMAND_MIN_MS) {
+  if (!(run.lastAiCommandAtByActor instanceof Map)) run.lastAiCommandAtByActor = new Map();
+  const lastCommandAt = Number(run.lastAiCommandAtByActor.get(actorId) || 0);
+  if (command !== EXPEDITION_COMMAND.RESYNC_REQUEST && now - lastCommandAt < EXPEDITION_AI_COMMAND_MIN_MS) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run.runId, "ai_rate_limited", false)];
   }
   run.aiSequenceByActor.set(actorId, sequence);
-  run.lastAiCommandAt = now;
+  run.lastAiCommandAtByActor.set(actorId, now);
 
   const authorityActorId = Number(run.authorityActorId || expeditionAuthorityActor(room));
   if (!run.authorityActorId) publishExpeditionAiAuthority(room, run, channel);
