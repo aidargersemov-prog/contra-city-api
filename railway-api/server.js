@@ -20,10 +20,9 @@ import {
   rollSummerCaseReward,
   rollTropicalCaseReward,
 } from "./case-loot.js";
-import { createClanCupSystem } from "./clan-cup-system.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-08-31-clan-cup-v102";
+const API_BUILD_ID = "railway-api-2026-09-07-clan-contracts-v110";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -44,7 +43,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 const REMOTE_ASSET_BUNDLE_URLS = new Map([
   [
     "promzona.unity3d",
-    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/b6c64d529f3b6123638dc4eeeff6fb59d8e31a50/railway-api/assetbundles/promzona.unity3d"
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/014b6f8495d522979916984cf6d9c6ab9970b6d7/railway-api/assetbundles/promzona.unity3d"
   ]
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
@@ -143,7 +142,6 @@ const DONATE_ORDER_TTL_MS = Math.max(5 * 60 * 1000, Math.min(
 const TELEGRAM_CLEANUP_INTERVAL_MS = Math.max(60000, Number(
   process.env.TELEGRAM_CLEANUP_INTERVAL_MS || 5 * 60 * 1000
 ));
-const CLAN_CUP_LIFECYCLE_INTERVAL_MS = Math.max(1000, Number(process.env.CLAN_CUP_LIFECYCLE_INTERVAL_MS || 5000));
 const TELEGRAM_PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const TELEGRAM_CLEANUP_ADVISORY_LOCK = 741963521;
 const TELEGRAM_RESET_ADVISORY_LOCK = 741963522;
@@ -368,7 +366,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition" || pathname.startsWith("/battle/clan-cup/")) {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -522,6 +520,36 @@ const CLAN_ARM_ID_SET = new Set(CLAN_ARM_IDS);
 const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
 const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
 const CLAN_ARM_ITEM_TYPE = 5;
+// Contracts are intentionally guarded by a separate rollout flag. The CEF
+// toggle only changes presentation; it must never create a second economy.
+const CLAN_CONTRACTS_ENABLED = process.env.CLAN_CONTRACTS_ENABLED === "1";
+const CLAN_CONTRACT_RESET_HOUR_MOSCOW = 5;
+const CLAN_CONTRACTS_TIMEZONE = "Europe/Moscow";
+const CLAN_CONTRACT_ARM_PRODUCTS = Object.freeze([
+  Object.freeze({ armId: 2, minLevel: 1, price: 600 }),
+  Object.freeze({ armId: 3, minLevel: 1, price: 600 }),
+  Object.freeze({ armId: 4, minLevel: 5, price: 720 }),
+  Object.freeze({ armId: 5, minLevel: 5, price: 720 }),
+  Object.freeze({ armId: 8, minLevel: 10, price: 1000 })
+]);
+const CLAN_CONTRACT_ARM_PRODUCT_BY_ID = new Map(
+  CLAN_CONTRACT_ARM_PRODUCTS.map((item) => [item.armId, item])
+);
+const CLAN_CONTRACT_CASES = Object.freeze({
+  field: Object.freeze({ key: "field", name: "Оперативный кейс", price: 180, armChance: 35, enhancerSeconds: 24 * 60 * 60 }),
+  command: Object.freeze({ key: "command", name: "Командный кейс", price: 420, armChance: 60, enhancerSeconds: 72 * 60 * 60 })
+});
+const CLAN_CONTRACT_TIER_CONFIG = Object.freeze({
+  1: Object.freeze({ completionBonus: 12, objectives: Object.freeze({ battles: [3, 8], eliminations: [40, 12], headshots: [8, 14], victories: [2, 16] }) }),
+  2: Object.freeze({ completionBonus: 17, objectives: Object.freeze({ battles: [4, 12], eliminations: [70, 17], headshots: [15, 19], victories: [3, 23] }) }),
+  3: Object.freeze({ completionBonus: 24, objectives: Object.freeze({ battles: [5, 16], eliminations: [110, 22], headshots: [25, 26], victories: [4, 30] }) })
+});
+const CLAN_CONTRACT_OBJECTIVES = Object.freeze({
+  battles: Object.freeze({ title: "Боевой выезд", text: "Проведите бои до завершения." }),
+  eliminations: Object.freeze({ title: "Работа по цели", text: "Устраните противников в бою." }),
+  headshots: Object.freeze({ title: "Точный огонь", text: "Совершите точные устранения." }),
+  victories: Object.freeze({ title: "Взять рубеж", text: "Приведите команду к победе." })
+});
 // Enhancers 3 ("Лёгкое приземление") and 36 ("Меркурий") are deliberately
 // hidden from the ordinary shop. Existing inventory rows are preserved, but
 // new listing/buying is disabled and the battle server ignores both IDs.
@@ -1917,11 +1945,6 @@ function saveStore(store) {
 }
 
 let pgPool = null;
-const clanCup = createClanCupSystem({
-  getPool: () => pgPool,
-  loadRole: loadActiveStaffRole,
-  audit: auditGameEvent,
-});
 let pgSaveChain = Promise.resolve();
 const viewSelectionSaveVersions = new Map();
 const weaponSelectionSaveVersions = new Map();
@@ -2592,13 +2615,6 @@ async function savePostgresStore(nextStore) {
 }
 
 let store = await initStore();
-if (pgPool) {
-  clanCup.tick().catch((error) => console.error("[clan-cup] initial lifecycle tick failed", error));
-  const clanCupLifecycleTimer = setInterval(() => {
-    clanCup.tick().catch((error) => console.error("[clan-cup] scheduled lifecycle tick failed", error));
-  }, CLAN_CUP_LIFECYCLE_INTERVAL_MS);
-  clanCupLifecycleTimer.unref?.();
-}
 if (pgPool && TELEGRAM_LINK_API_TOKEN) {
   cleanupTelegramPairingState().catch((error) => {
     console.error("[telegram-pairing] initial cleanup failed", error);
@@ -9150,6 +9166,11 @@ function clanArmsPayload(requestOrigin = null, clan = null) {
     };
     if (!clanOwnsArm(clan, id)) {
       arm.sc = cost(7000 + id, clanArmCost(id));
+      if (CLAN_CONTRACTS_ENABLED && CLAN_CONTRACT_ARM_PRODUCT_BY_ID.has(id)) {
+        // The legacy screen keeps displaying the real crest but cannot spend
+        // treasury currency on a contract-only unlock.
+        arm.co = 1;
+      }
     }
     return arm;
   });
@@ -10233,6 +10254,15 @@ async function deleteClanPostgres(account, clanId) {
          RETURNING id, created_at`,
         [Number(clanId), CLAN_EVENT_TYPE.DELETE, Number(account.id), JSON.stringify({}), expiresAt]
       );
+      // Contract tables intentionally do not reference the legacy `clans`
+      // snapshot: savePostgresStore rebuilds that table.  Delete the detached
+      // contract ledger explicitly in the same transaction as clan deletion.
+      if (CLAN_CONTRACTS_ENABLED) {
+        await client.query("DELETE FROM clan_contract_wallet_events WHERE clan_id = $1", [Number(clanId)]);
+        await client.query("DELETE FROM clan_contract_operations WHERE clan_id = $1", [Number(clanId)]);
+        await client.query("DELETE FROM clan_contract_wallets WHERE clan_id = $1", [Number(clanId)]);
+        await client.query("DELETE FROM clan_contract_cycles WHERE clan_id = $1", [Number(clanId)]);
+      }
       await client.query("DELETE FROM clan_invites WHERE clan_id = $1", [Number(clanId)]);
       await client.query("DELETE FROM clan_members WHERE clan_id = $1", [Number(clanId)]);
       const deletedClanResult = await client.query(
@@ -10384,6 +10414,9 @@ function changeClanArm(account, url) {
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (!armId) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(clan.armId || 0) === armId) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+  if (CLAN_CONTRACTS_ENABLED && CLAN_CONTRACT_ARM_PRODUCT_BY_ID.has(armId) && !clanOwnsArm(clan, armId)) {
+    return { result: false, code: CLAN_ERROR.CLAN_ACCESS_DISABLE, error: "contract_shop_required" };
+  }
   const price = clanArmCostForClan(clan, armId);
   if (Number(clan.money || 0) < price) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
   clan.money = Number(clan.money || 0) - price;
@@ -10726,6 +10759,508 @@ function withPurchasedDuration(item, duration, existingItem = null, now = curren
   const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
   itemData.eD = base + seconds;
   return itemData;
+}
+
+function clanContractsAvailable() {
+  return Boolean(CLAN_CONTRACTS_ENABLED && pgPool);
+}
+
+function clanContractTier(level) {
+  const normalized = Math.max(1, Number(level || 1));
+  return normalized >= 10 ? 3 : normalized >= 5 ? 2 : 1;
+}
+
+function clanContractCycleWindow(now = new Date()) {
+  // Moscow has a fixed UTC+3 offset. Moving the instant by (UTC+3 - reset
+  // hour) lets UTC calendar components represent the operation day safely.
+  const shifted = new Date(now.getTime() + (3 - CLAN_CONTRACT_RESET_HOUR_MOSCOW) * 60 * 60 * 1000);
+  const cycleKey = shifted.toISOString().slice(0, 10);
+  const year = Number(cycleKey.slice(0, 4));
+  const month = Number(cycleKey.slice(5, 7));
+  const day = Number(cycleKey.slice(8, 10));
+  const resetAt = new Date(Date.UTC(year, month - 1, day + 1, CLAN_CONTRACT_RESET_HOUR_MOSCOW - 3, 0, 0));
+  return { cycleKey, resetAt };
+}
+
+function clanContractObjectiveOrder(clanId, cycleKey) {
+  const pool = Object.keys(CLAN_CONTRACT_OBJECTIVES);
+  const hash = crypto.createHash("sha256").update(`clan-contracts:v1:${Number(clanId)}:${cycleKey}`).digest();
+  for (let index = pool.length - 1; index > 0; index -= 1) {
+    const next = hash[pool.length - 1 - index] % (index + 1);
+    [pool[index], pool[next]] = [pool[next], pool[index]];
+  }
+  return pool.slice(0, 3);
+}
+
+function validClanContractRequestId(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+async function ensureClanContractWallet(client, clanId) {
+  await client.query(
+    `INSERT INTO clan_contract_wallets (clan_id)
+     VALUES ($1)
+     ON CONFLICT (clan_id) DO NOTHING`,
+    [Number(clanId)]
+  );
+  const wallet = await client.query(
+    `SELECT clan_id, balance, earned_total, spent_total, revision, updated_at
+     FROM clan_contract_wallets
+     WHERE clan_id = $1
+     FOR UPDATE`,
+    [Number(clanId)]
+  );
+  return wallet.rows[0];
+}
+
+async function ensureClanContractCycle(client, clan) {
+  const window = clanContractCycleWindow();
+  const tier = clanContractTier(clan.level);
+  const config = CLAN_CONTRACT_TIER_CONFIG[tier];
+  await client.query(
+    `INSERT INTO clan_contract_cycles (clan_id, cycle_key, tier, reset_at, completion_bonus)
+     VALUES ($1, $2::date, $3, $4, $5)
+     ON CONFLICT (clan_id, cycle_key) DO NOTHING`,
+    [Number(clan.id), window.cycleKey, tier, window.resetAt.toISOString(), config.completionBonus]
+  );
+  const cycleResult = await client.query(
+    `SELECT id, clan_id, cycle_key, tier, reset_at, completion_bonus, bonus_completed_at
+     FROM clan_contract_cycles
+     WHERE clan_id = $1 AND cycle_key = $2::date
+     FOR UPDATE`,
+    [Number(clan.id), window.cycleKey]
+  );
+  const cycle = cycleResult.rows[0];
+  const existing = await client.query(
+    `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at
+     FROM clan_contract_entries
+     WHERE cycle_id = $1
+     ORDER BY slot
+     FOR UPDATE`,
+    [Number(cycle.id)]
+  );
+  if (existing.rows.length === 0) {
+    const lockedConfig = CLAN_CONTRACT_TIER_CONFIG[Number(cycle.tier)] || config;
+    const objectives = clanContractObjectiveOrder(clan.id, window.cycleKey);
+    for (let index = 0; index < objectives.length; index += 1) {
+      const key = objectives[index];
+      const definition = lockedConfig.objectives[key];
+      await client.query(
+        `INSERT INTO clan_contract_entries (cycle_id, slot, objective_key, target_value, reward)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [Number(cycle.id), index + 1, key, Number(definition[0]), Number(definition[1])]
+      );
+    }
+  }
+  const entries = existing.rows.length === 0
+    ? await client.query(
+      `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at
+       FROM clan_contract_entries WHERE cycle_id = $1 ORDER BY slot FOR UPDATE`,
+      [Number(cycle.id)]
+    )
+    : existing;
+  return { cycle, entries: entries.rows };
+}
+
+async function changeClanContractWallet(client, clanId, actorPlayerId, amount, reason, referenceType, referenceId, metadata = {}) {
+  const wallet = await ensureClanContractWallet(client, clanId);
+  const delta = Math.trunc(Number(amount || 0));
+  const before = Number(wallet.balance || 0);
+  const balance = before + delta;
+  if (balance < 0) {
+    const error = new Error("insufficient_contract_marks");
+    error.code = "INSUFFICIENT_CONTRACT_MARKS";
+    throw error;
+  }
+  const earned = Number(wallet.earned_total || 0) + Math.max(0, delta);
+  const spent = Number(wallet.spent_total || 0) + Math.max(0, -delta);
+  const updated = await client.query(
+    `UPDATE clan_contract_wallets
+     SET balance = $2, earned_total = $3, spent_total = $4,
+         revision = revision + 1, updated_at = now()
+     WHERE clan_id = $1
+     RETURNING balance, earned_total, spent_total, revision, updated_at`,
+    [Number(clanId), balance, earned, spent]
+  );
+  await client.query(
+    `INSERT INTO clan_contract_wallet_events (
+       clan_id, actor_player_id, amount, balance_after, reason,
+       reference_type, reference_id, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+    [Number(clanId), Number(actorPlayerId) || null, delta, balance, reason, referenceType || "", String(referenceId || ""), JSON.stringify(metadata || {})]
+  );
+  return updated.rows[0];
+}
+
+function contractArmCatalog(clan, requestOrigin) {
+  return CLAN_CONTRACT_ARM_PRODUCTS.map((product) => ({
+    armId: product.armId,
+    price: product.price,
+    minLevel: product.minLevel,
+    owned: clanOwnsArm(clan, product.armId),
+    available: Number(clan.level || 1) >= product.minLevel,
+    url: clanArmImageUrl(product.armId, requestOrigin)
+  }));
+}
+
+function contractCaseCatalog() {
+  return Object.values(CLAN_CONTRACT_CASES).map((item) => ({
+    key: item.key,
+    name: item.name,
+    price: item.price,
+    armChance: item.armChance,
+    enhancerHours: Math.round(item.enhancerSeconds / 3600)
+  }));
+}
+
+function eligibleContractArmProducts(clan) {
+  return CLAN_CONTRACT_ARM_PRODUCTS.filter(
+    (product) => Number(clan.level || 1) >= product.minLevel && !clanOwnsArm(clan, product.armId)
+  );
+}
+
+function eligibleContractEnhancers(clan) {
+  return CLAN_ENHANCER_IDS
+    .map((id) => canonicalEnhancersById.get(Number(id)))
+    .filter((item) => item && Number(item.iC || 0) === 1 && Number(item.nlvl || 1) <= Number(clan.level || 1));
+}
+
+function contractCaseReward(clan, caseDefinition) {
+  const arms = eligibleContractArmProducts(clan);
+  const enhancers = eligibleContractEnhancers(clan);
+  const armWins = arms.length > 0 && (enhancers.length === 0 || crypto.randomInt(0, 100) < caseDefinition.armChance);
+  if (armWins) {
+    const product = arms[crypto.randomInt(0, arms.length)];
+    return { kind: "arm", armId: product.armId, name: `Герб #${product.armId}` };
+  }
+  if (enhancers.length > 0) {
+    const item = enhancers[crypto.randomInt(0, enhancers.length)];
+    return { kind: "enhancer", enhancerId: Number(item.e_id || 0), name: String(item.sn || item.sname || "Клановый усилитель"), seconds: caseDefinition.enhancerSeconds };
+  }
+  if (arms.length > 0) {
+    const product = arms[crypto.randomInt(0, arms.length)];
+    return { kind: "arm", armId: product.armId, name: `Герб #${product.armId}` };
+  }
+  return { kind: "refund", amount: Math.floor(caseDefinition.price / 2), name: "Возврат знаков" };
+}
+
+async function persistContractArm(client, clan, armId, source) {
+  const changed = ensureClanOwnedArm(clan, armId, source);
+  if (!changed) return false;
+  const item = clan.inventory.find((entry) => String(entry.itemKey || "") === clanArmInventoryKey(armId));
+  await client.query(
+    `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
+     VALUES ($1, $2, $3::jsonb, NULL, now())
+     ON CONFLICT (clan_id, item_key) DO UPDATE SET item_data = EXCLUDED.item_data, expires_at = NULL`,
+    [Number(clan.id), clanArmInventoryKey(armId), JSON.stringify(item)]
+  );
+  return true;
+}
+
+async function persistContractEnhancer(client, clan, enhancerId, seconds, source) {
+  const canonical = canonicalEnhancersById.get(Number(enhancerId));
+  if (!canonical || Number(canonical.iC || 0) !== 1) return null;
+  const key = `2:${Number(enhancerId)}`;
+  const now = currentUnixSeconds();
+  const existing = (clan.inventory || []).find((item) => String(item.itemKey || inventoryItemKey(item)) === key) || null;
+  const item = clone(canonical);
+  item.it = 2;
+  item.itype = 2;
+  item.iC = 1;
+  item.itemKey = key;
+  item.eD = Math.max(Number(existing?.eD || 0), now) + Math.max(1, Number(seconds || 0));
+  item.createdAt = existing?.createdAt || new Date().toISOString();
+  item.source = source;
+  clan.inventory = (clan.inventory || []).filter((entry) => String(entry.itemKey || inventoryItemKey(entry)) !== key);
+  clan.inventory.push(item);
+  await client.query(
+    `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
+     VALUES ($1, $2, $3::jsonb, to_timestamp($4), now())
+     ON CONFLICT (clan_id, item_key) DO UPDATE SET item_data = EXCLUDED.item_data, expires_at = EXCLUDED.expires_at`,
+    [Number(clan.id), key, JSON.stringify(item), Number(item.eD)]
+  );
+  return item;
+}
+
+async function clanContractState(client, account, clan, requestOrigin) {
+  const wallet = await ensureClanContractWallet(client, clan.id);
+  const cycleState = await ensureClanContractCycle(client, clan);
+  const entryIds = cycleState.entries.map((entry) => Number(entry.id));
+  const contributionRows = entryIds.length
+    ? await client.query(
+      `SELECT contract_id, player_id, value
+       FROM clan_contract_contributions
+       WHERE contract_id = ANY($1::bigint[])
+       ORDER BY value DESC, player_id ASC`,
+      [entryIds]
+    )
+    : { rows: [] };
+  const contributions = new Map();
+  for (const row of contributionRows.rows) {
+    const list = contributions.get(Number(row.contract_id)) || [];
+    list.push(row);
+    contributions.set(Number(row.contract_id), list);
+  }
+  const recent = await client.query(
+    `SELECT reason, amount, balance_after, reference_type, reference_id, metadata, created_at
+     FROM clan_contract_wallet_events
+     WHERE clan_id = $1
+     ORDER BY id DESC LIMIT 12`,
+    [Number(clan.id)]
+  );
+  const operations = await client.query(
+    `SELECT operation_kind, product_key, result_data, created_at
+     FROM clan_contract_operations
+     WHERE clan_id = $1
+     ORDER BY id DESC LIMIT 1`,
+    [Number(clan.id)]
+  );
+  const isOwner = isClanOwner(account, clan);
+  return {
+    enabled: true,
+    timezone: CLAN_CONTRACTS_TIMEZONE,
+    canSpend: isOwner,
+    resetAt: new Date(cycleState.cycle.reset_at).toISOString(),
+    wallet: {
+      balance: Number(wallet.balance || 0),
+      earned: Number(wallet.earned_total || 0),
+      spent: Number(wallet.spent_total || 0),
+      revision: Number(wallet.revision || 0)
+    },
+    cycle: {
+      key: String(cycleState.cycle.cycle_key).slice(0, 10),
+      tier: Number(cycleState.cycle.tier),
+      completionBonus: Number(cycleState.cycle.completion_bonus),
+      bonusCompleted: Boolean(cycleState.cycle.bonus_completed_at)
+    },
+    contracts: cycleState.entries.map((entry) => {
+      const rows = contributions.get(Number(entry.id)) || [];
+      const own = rows.find((row) => Number(row.player_id) === Number(account.id));
+      return {
+        id: Number(entry.id),
+        key: entry.objective_key,
+        title: CLAN_CONTRACT_OBJECTIVES[entry.objective_key]?.title || entry.objective_key,
+        text: CLAN_CONTRACT_OBJECTIVES[entry.objective_key]?.text || "Выполните задачу вместе с командой.",
+        target: Number(entry.target_value),
+        progress: Number(entry.current_value),
+        reward: Number(entry.reward),
+        completed: Boolean(entry.completed_at),
+        contribution: Number(own?.value || 0),
+        contributors: rows.slice(0, 3).map((row) => ({
+          userId: Number(row.player_id),
+          name: accountById(Number(row.player_id))?.name || "Боец",
+          value: Number(row.value)
+        }))
+      };
+    }),
+    catalog: { arms: contractArmCatalog(clan, requestOrigin), cases: contractCaseCatalog() },
+    history: recent.rows.map((row) => ({
+      reason: String(row.reason || ""),
+      amount: Number(row.amount || 0),
+      balance: Number(row.balance_after || 0),
+      referenceType: String(row.reference_type || ""),
+      referenceId: String(row.reference_id || ""),
+      metadata: jsonValue(row.metadata, {}),
+      at: new Date(row.created_at).toISOString()
+    })),
+    lastOperation: operations.rows[0] ? {
+      kind: String(operations.rows[0].operation_kind),
+      product: String(operations.rows[0].product_key),
+      result: jsonValue(operations.rows[0].result_data, {}),
+      at: new Date(operations.rows[0].created_at).toISOString()
+    } : null
+  };
+}
+
+async function clanContractStateResponse(account, requestOrigin) {
+  if (!clanContractsAvailable()) return ok({ contracts: { enabled: false } });
+  const clan = playerClanRecord(account.id);
+  if (!clan) return ok({ contracts: { enabled: false, reason: "no_clan" } });
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const contracts = await clanContractState(client, account, clan, requestOrigin);
+    await client.query("COMMIT");
+    return ok({ contracts });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(`[clan-contracts] state failed clan=${clan.id} player=${account.id}`, error);
+    return { result: false, error: "contract_state_failed" };
+  } finally {
+    client.release();
+  }
+}
+
+async function purchaseClanContractArm(account, armId, requestId, requestOrigin) {
+  if (!clanContractsAvailable()) return { result: false, error: "contracts_disabled" };
+  const product = CLAN_CONTRACT_ARM_PRODUCT_BY_ID.get(Number(armId));
+  const clan = playerClanRecord(account.id);
+  if (!clan || !product || !validClanContractRequestId(requestId)) return { result: false, error: "invalid_contract_purchase" };
+  return enqueuePostgresMutation(async () => {
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      const previous = await client.query(
+        `SELECT clan_id, actor_player_id, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
+        [requestId]
+      );
+      if (previous.rows[0]) {
+        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)) throw new Error("contract_request_collision");
+        const contracts = await clanContractState(client, account, clan, requestOrigin);
+        await client.query("COMMIT");
+        return ok({ contracts, grantedArmId: Number(jsonValue(previous.rows[0].result_data, {}).grantedArmId || 0), replayed: true });
+      }
+      const owner = await client.query("SELECT owner_player_id, level FROM clans WHERE id = $1 FOR UPDATE", [Number(clan.id)]);
+      if (!owner.rows[0] || Number(owner.rows[0].owner_player_id) !== Number(account.id)) throw new Error("clan_owner_required");
+      if (Number(owner.rows[0].level || 1) < product.minLevel || clanOwnsArm(clan, product.armId)) throw new Error("contract_arm_unavailable");
+      await changeClanContractWallet(client, clan.id, account.id, -product.price, "shop_arm", "arm", product.armId, { price: product.price });
+      await persistContractArm(client, clan, product.armId, "clan_contract_shop");
+      const result = { grantedArmId: product.armId, reward: { kind: "arm", armId: product.armId } };
+      await client.query(
+        `INSERT INTO clan_contract_operations (clan_id, actor_player_id, request_id, operation_kind, product_key, amount, result_data)
+         VALUES ($1, $2, $3, 'buy_arm', $4, $5, $6::jsonb)`,
+        [Number(clan.id), Number(account.id), requestId, `arm:${product.armId}`, product.price, JSON.stringify(result)]
+      );
+      const contracts = await clanContractState(client, account, clan, requestOrigin);
+      await auditGameEvent(client, {
+        playerId: account.id, clanId: clan.id, clanName: clan.name, eventType: "clan_contract_arm_purchase", category: "clan",
+        description: `Клан получил герб #${product.armId} за ${product.price} знаков контракта`, metadata: { armId: product.armId, requestId }
+      });
+      await client.query("COMMIT");
+      return ok({ contracts, ...result });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      const errorCode = error.code === "INSUFFICIENT_CONTRACT_MARKS" ? "insufficient_contract_marks" : String(error.message || "contract_arm_purchase_failed");
+      return { result: false, error: errorCode };
+    } finally {
+      client.release();
+    }
+  });
+}
+
+async function openClanContractCase(account, caseKey, requestId, requestOrigin) {
+  if (!clanContractsAvailable()) return { result: false, error: "contracts_disabled" };
+  const definition = CLAN_CONTRACT_CASES[String(caseKey || "")];
+  const clan = playerClanRecord(account.id);
+  if (!clan || !definition || !validClanContractRequestId(requestId)) return { result: false, error: "invalid_contract_case" };
+  return enqueuePostgresMutation(async () => {
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      const previous = await client.query(
+        `SELECT clan_id, actor_player_id, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
+        [requestId]
+      );
+      if (previous.rows[0]) {
+        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)) throw new Error("contract_request_collision");
+        const result = jsonValue(previous.rows[0].result_data, {});
+        const contracts = await clanContractState(client, account, clan, requestOrigin);
+        await client.query("COMMIT");
+        return ok({ contracts, ...result, replayed: true });
+      }
+      const owner = await client.query("SELECT owner_player_id FROM clans WHERE id = $1 FOR UPDATE", [Number(clan.id)]);
+      if (!owner.rows[0] || Number(owner.rows[0].owner_player_id) !== Number(account.id)) throw new Error("clan_owner_required");
+      await changeClanContractWallet(client, clan.id, account.id, -definition.price, "case_open", "case", definition.key, { price: definition.price });
+      const reward = contractCaseReward(clan, definition);
+      if (reward.kind === "arm") await persistContractArm(client, clan, reward.armId, "clan_contract_case");
+      if (reward.kind === "enhancer") await persistContractEnhancer(client, clan, reward.enhancerId, reward.seconds, "clan_contract_case");
+      if (reward.kind === "refund") await changeClanContractWallet(client, clan.id, account.id, reward.amount, "case_refund", "case", definition.key, { source: "empty_catalog" });
+      const result = { reward, grantedArmId: reward.kind === "arm" ? reward.armId : 0 };
+      await client.query(
+        `INSERT INTO clan_contract_operations (clan_id, actor_player_id, request_id, operation_kind, product_key, amount, result_data)
+         VALUES ($1, $2, $3, 'open_case', $4, $5, $6::jsonb)`,
+        [Number(clan.id), Number(account.id), requestId, definition.key, definition.price, JSON.stringify(result)]
+      );
+      const contracts = await clanContractState(client, account, clan, requestOrigin);
+      await auditGameEvent(client, {
+        playerId: account.id, clanId: clan.id, clanName: clan.name, eventType: "clan_contract_case_open", category: "clan",
+        description: `Открыт ${definition.name}`, metadata: { caseKey: definition.key, requestId, reward }
+      });
+      await client.query("COMMIT");
+      return ok({ contracts, ...result });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      const errorCode = error.code === "INSUFFICIENT_CONTRACT_MARKS" ? "insufficient_contract_marks" : String(error.message || "contract_case_open_failed");
+      return { result: false, error: errorCode };
+    } finally {
+      client.release();
+    }
+  });
+}
+
+async function advanceClanContractsFromSummary(client, event, playerId, details) {
+  if (!clanContractsAvailable() || event.contractEligible !== true) return null;
+  const matchInstanceId = String(event.matchInstanceId || "");
+  if (!validClanContractRequestId(matchInstanceId)) return null;
+  const clan = playerClanRecord(playerId);
+  if (!clan || clan.deletedAt) return null;
+  const cycleState = await ensureClanContractCycle(client, clan);
+  const receipt = await client.query(
+    `INSERT INTO clan_contract_match_receipts (clan_id, player_id, match_instance_id, cycle_id)
+     VALUES ($1, $2, $3::uuid, $4)
+     ON CONFLICT DO NOTHING
+     RETURNING match_instance_id`,
+    [Number(clan.id), Number(playerId), matchInstanceId, Number(cycleState.cycle.id)]
+  );
+  if (receipt.rows.length === 0) return null;
+  const deltas = {
+    battles: 1,
+    eliminations: Math.max(0, Math.trunc(eventNumber(event, details, "kills", 0))),
+    headshots: Math.max(0, Math.trunc(eventNumber(event, details, "headshots", 0))),
+    victories: Boolean(event.won ?? details.won) ? 1 : 0
+  };
+  const completed = [];
+  for (const entry of cycleState.entries) {
+    const offered = Number(deltas[entry.objective_key] || 0);
+    if (offered <= 0 || entry.completed_at) continue;
+    const before = Number(entry.current_value || 0);
+    const target = Number(entry.target_value || 0);
+    const accepted = Math.min(offered, Math.max(0, target - before));
+    if (accepted <= 0) continue;
+    const next = before + accepted;
+    const isCompleted = next >= target;
+    await client.query(
+      `UPDATE clan_contract_entries
+       SET current_value = $2, completed_at = CASE WHEN $3 THEN now() ELSE completed_at END
+       WHERE id = $1`,
+      [Number(entry.id), next, isCompleted]
+    );
+    await client.query(
+      `INSERT INTO clan_contract_contributions (contract_id, player_id, value)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (contract_id, player_id) DO UPDATE
+       SET value = clan_contract_contributions.value + EXCLUDED.value, updated_at = now()`,
+      [Number(entry.id), Number(playerId), accepted]
+    );
+    if (isCompleted) {
+      await changeClanContractWallet(client, clan.id, playerId, Number(entry.reward), "contract_complete", "contract", entry.id, { objective: entry.objective_key });
+      completed.push(entry.objective_key);
+    }
+  }
+  const completedCount = await client.query(
+    `SELECT COUNT(*)::int AS count FROM clan_contract_entries WHERE cycle_id = $1 AND completed_at IS NOT NULL`,
+    [Number(cycleState.cycle.id)]
+  );
+  let bonus = 0;
+  if (Number(completedCount.rows[0]?.count || 0) === 3 && !cycleState.cycle.bonus_completed_at) {
+    const claimed = await client.query(
+      `UPDATE clan_contract_cycles SET bonus_completed_at = now()
+       WHERE id = $1 AND bonus_completed_at IS NULL
+       RETURNING completion_bonus`,
+      [Number(cycleState.cycle.id)]
+    );
+    bonus = Number(claimed.rows[0]?.completion_bonus || 0);
+    if (bonus > 0) {
+      await changeClanContractWallet(client, clan.id, playerId, bonus, "cycle_complete", "cycle", cycleState.cycle.id, { cycleKey: String(cycleState.cycle.cycle_key) });
+    }
+  }
+  if (completed.length || bonus) {
+    await auditGameEvent(client, {
+      playerId, clanId: clan.id, clanName: clan.name, eventType: "clan_contract_progress", category: "clan",
+      description: "Обновлён прогресс ежедневных контрактов", metadata: { matchInstanceId, completed, bonus }
+    });
+  }
+  return { clanId: Number(clan.id), completed, bonus };
 }
 
 function hasInventoryItem(account, item) {
@@ -11808,18 +12343,7 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   }
   if (!resolvedAccount && !isEquipmentSelectionSaveRequest(url)) account = await refreshAccountFromPostgres(account);
 
-  if (page === "staff") {
-    if (String(act || "").startsWith("cup_")) {
-      return clanCup.adminAjax(account, act, url.searchParams);
-    }
-    return staffAjaxPayload(pgPool, account, act, url.searchParams);
-  }
-
-  // Clan Cup is a new isolated HTTP contract. The CEF bridge calls this
-  // through Unity Ajax, so the browser never receives session credentials.
-  if (page === "clancup") {
-    return clanCup.playerAjax(account, act || "state", url.searchParams);
-  }
+  if (page === "staff") return staffAjaxPayload(pgPool, account, act, url.searchParams);
 
   if (page === "auth" && act === "g") {
     return ok({ user_id: String(account.id), key: account.key });
@@ -11917,6 +12441,27 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "ybest") return await yesterdayBestPayload(account);
     if (act === "rat") return await ratingPayload(account, url);
     if (act === "reset") return ok({ req: "" });
+  }
+
+  if (page === "clan_contracts") {
+    if (act === "state") return await clanContractStateResponse(account, requestOrigin);
+    if (act === "buy") {
+      return await purchaseClanContractArm(
+        account,
+        Number(url.searchParams.get("arm") || 0),
+        url.searchParams.get("rid"),
+        requestOrigin
+      );
+    }
+    if (act === "open_case") {
+      return await openClanContractCase(
+        account,
+        url.searchParams.get("case"),
+        url.searchParams.get("rid"),
+        requestOrigin
+      );
+    }
+    return { result: false, error: "unknown_contract_action" };
   }
 
   if (page === "clan") {
@@ -12534,6 +13079,11 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
         [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false]
       );
     }
+    // Contract accounting consumes only the authoritative per-session summary
+    // produced by battle-server. Death/score events intentionally do not
+    // advance this system, otherwise one elimination can be counted twice.
+    const contracts = await advanceClanContractsFromSummary(client, event, playerId, details);
+    if (contracts) details.contracts = contracts;
   }
 }
 
@@ -13518,33 +14068,6 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
-  if (url.pathname.startsWith("/battle/clan-cup/")) {
-    if (req.method !== "POST") {
-      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
-      return;
-    }
-    try {
-      const body = await readJsonBody(req, 128 * 1024);
-      if (!hasValidBattleServiceToken(req, body)) {
-        sendJson(res, { ok: false, error: "invalid_token" }, 403);
-        return;
-      }
-      let result;
-      if (url.pathname === "/battle/clan-cup/dispatch") result = await clanCup.battleDispatch(body);
-      else if (url.pathname === "/battle/clan-cup/authorize") result = await clanCup.battleAuthorize(body);
-      else if (url.pathname === "/battle/clan-cup/result") result = await clanCup.battleResult(body);
-      else {
-        sendJson(res, { ok: false, error: "not_found" }, 404);
-        return;
-      }
-      const { status, ...payload } = result;
-      sendJson(res, payload, status || (payload.ok ? 200 : 400));
-    } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "clan_cup_battle_failed" }, serviceErrorStatus(error));
-    }
-    return;
-  }
-
   if (url.pathname === "/battle/social") {
     if (req.method !== "POST") {
       sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
@@ -13660,7 +14183,7 @@ async function handleHttpRequest(req, res) {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
       schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/clan_cups/clan_cup_entries/clan_cup_entry_players/clan_cup_matches/clan_cup_match_players/clan_cup_awards/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_reports/player_staff_roles/player_staff_chat_messages/player_staff_actions"
+        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_reports/player_staff_roles/player_staff_chat_messages/player_staff_actions"
         : "accounts-json",
       accounts: Object.keys(store.accounts).length,
       databaseUrlConfigured: Boolean(DATABASE_URL)
