@@ -7363,9 +7363,13 @@ function isProjectileWeaponType(type) {
   return weaponType === 8 || weaponType === 9 || weaponType === 15;
 }
 
-function isArcingProjectileWeaponType(type) {
+function isProjectileImpactAllowedWithoutTrackedLaunch(type) {
   const weaponType = Number(type);
-  return weaponType === 9 || weaponType === 15;
+  // The client emits the terminal SHOT for every launcher with the timestamp
+  // of its LAUNCH. A point-blank RPG has an almost-zero flight time, so its
+  // terminal SHOT may reach this UDP server before the launch is recorded.
+  // Grenade and bomb already use this recovery path; RPG must use it too.
+  return weaponType === 8 || weaponType === 9 || weaponType === 15;
 }
 
 function isProjectileLaunchShot(state, launchMode) {
@@ -7947,7 +7951,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
     const impact = consumeProjectileImpact(state, data, now);
     if (impact.ok) return { ok: true, reason: impact.reason, intervalMs };
     if (
-      isArcingProjectileWeaponType(state.type) &&
+      isProjectileImpactAllowedWithoutTrackedLaunch(state.type) &&
       impact.reason === "projectile-missing-launch" &&
       shotTimestampKey(data)
     ) {
