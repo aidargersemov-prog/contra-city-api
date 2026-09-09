@@ -25,7 +25,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-09-clan-wars-v315";
+const BUILD_ID = "battle-server-2026-09-09-clan-wars-v316";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -14323,16 +14323,21 @@ console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 if (process.env.CLAN_WARS_ENABLED === "1") {
-  const warHost = String(process.env.CLAN_WARS_HOST || "").trim();
-  const warPort = Number(process.env.CLAN_WARS_PORT || 5055);
-  const verifiedMaps = String(process.env.CLAN_WARS_VERIFIED_MAPS || "").split(",").map((value) => value.trim()).filter((value) => CLAN_WAR_MAPS.includes(value));
-  if (!API_TOKEN || warHost !== PUBLIC_HOST || !PORTS.includes(warPort) || !verifiedMaps.length) {
-    console.error("[clan-wars] disabled: require token, matching explicit CLAN_WARS_HOST/PORT and CLAN_WARS_VERIFIED_MAPS");
+  const warHost = String(process.env.CLAN_WARS_HOST || PUBLIC_HOST).trim();
+  const warPort = Number(process.env.CLAN_WARS_PORT || PRIMARY_BATTLE_PORT);
+  const verifiedMaps = process.env.CLAN_WARS_VERIFIED_MAPS === undefined
+    ? [...CLAN_WAR_MAPS]
+    : String(process.env.CLAN_WARS_VERIFIED_MAPS).split(",").map((value) => value.trim()).filter((value) => CLAN_WAR_MAPS.includes(value));
+  // systemd supplies STATE_DIRECTORY automatically; direct runs keep the old path.
+  const warStateDirectory = String(process.env.STATE_DIRECTORY || "").split(":")[0];
+  const warOutboxDirectory = process.env.CLAN_WARS_OUTBOX_DIR || require("path").join(warStateDirectory || require("path").join(__dirname, "data"), "clan-wars-outbox");
+  if (!API_TOKEN || warHost !== PUBLIC_HOST || !Number.isInteger(warPort) || warPort < 1 || warPort > 65535 || !PORTS.includes(warPort) || warPort === GAME_MASTER_PORT || SOCIAL_MASTER_PORTS.has(warPort) || !verifiedMaps.length) {
+    console.error("[clan-wars] disabled: check existing service token, battle endpoint and optional war overrides");
   } else {
     try {
       clanWarsBattle = createClanWarsBattle({
         serverId: String(process.env.CLAN_WARS_SERVER_ID || "clan-wars-1"), host: warHost, port: warPort, maps: verifiedMaps,
-        outboxDirectory: process.env.CLAN_WARS_OUTBOX_DIR || require("path").join(__dirname, "data", "clan-wars-outbox"),
+        outboxDirectory: warOutboxDirectory,
         findRoom: (name) => rooms.get(name), createRoom: ensureRoom,
         deleteRoom: (room) => deleteEmptyRoom(room, "war-terminal"),
         post: async (body) => {
