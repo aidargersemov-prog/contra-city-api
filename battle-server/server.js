@@ -25,7 +25,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-09-clan-wars-v316";
+const BUILD_ID = "battle-server-2026-09-09-clan-contracts-v317";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -5263,6 +5263,7 @@ function tryDeliverCtfFlag(session, channel, source = "move") {
   if (!carriedHome) return false;
 
   Object.assign(carried, carriedHome, { bearer: -1, state: 0 });
+  recordContractFlag(session, "flagsCaptured");
   session.points = numberOr(session.points, 0) + 1;
   const flagExp = awardBattleExp(session, BATTLE_EXP_PER_FLAG, "flag-deliver", {
     eventBonusPercent: hasSelectedEnhancer(session.loadedProfile, ENHANCER_TYPE.CLAN_FLAG_EXP) ? 100 : 0,
@@ -5279,8 +5280,8 @@ function updateCtfOnMove(session, channel) {
   if (tryDeliverCtfFlag(session, channel, "move")) return;
   for(const flag of room.flags.values()) {
     if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
-      if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); sendReliableToWholeRoom(room,makeFlagEvent(3,flag),channel,{requireGameState:false}); console.log(`[flag] returned actor=${session.actorId} flagTeam=${flag.team}`); }
-      else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; sendReliableToWholeRoom(room,makeFlagEvent(0,flag),channel,{requireGameState:false}); console.log(`[flag] captured actor=${session.actorId} flagTeam=${flag.team} pos=${fmtPoint(session.lastTransform)}`); }
+      if(flag.team===session.team && flag.state!==0) { flag.state=0; Object.assign(flag,CTF_MAPS[mapKey(room.map)].find(x=>x.team===flag.team)); recordContractFlag(session, "flagsReturned"); sendReliableToWholeRoom(room,makeFlagEvent(3,flag),channel,{requireGameState:false}); console.log(`[flag] returned actor=${session.actorId} flagTeam=${flag.team}`); }
+      else if(flag.team!==session.team) { flag.bearer=session.actorId; flag.state=1; recordContractFlag(session, "flagsTaken"); sendReliableToWholeRoom(room,makeFlagEvent(0,flag),channel,{requireGameState:false}); console.log(`[flag] captured actor=${session.actorId} flagTeam=${flag.team} pos=${fmtPoint(session.lastTransform)}`); }
     }
   }
 }
@@ -6468,6 +6469,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   session.damageContributors = new Map();
   session.kamikazeTriggered = false;
   session.spawned = true;
+  if (!session.contractParticipatedAt && session.matchStartedAt) session.contractParticipatedAt = Date.now();
   session.dead = false;
   session.moveSeen = false;
   session.moveCount = 0;
@@ -7361,6 +7363,11 @@ function isProjectileWeaponType(type) {
   return weaponType === 8 || weaponType === 9 || weaponType === 15;
 }
 
+function isArcingProjectileWeaponType(type) {
+  const weaponType = Number(type);
+  return weaponType === 9 || weaponType === 15;
+}
+
 function isProjectileLaunchShot(state, launchMode) {
   return isProjectileWeaponType(state?.type) && Number(launchMode ?? 0) === LAUNCH_MODE.LAUNCH;
 }
@@ -7940,14 +7947,10 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
     const impact = consumeProjectileImpact(state, data, now);
     if (impact.ok) return { ok: true, reason: impact.reason, intervalMs };
     if (
-      isProjectileWeaponType(state.type) &&
+      isArcingProjectileWeaponType(state.type) &&
       impact.reason === "projectile-missing-launch" &&
       shotTimestampKey(data)
     ) {
-      // RocketTracer.Blow() always sends the final SHOT Event97 with the
-      // original launch timestamp. A dropped/missed LAUNCH packet must not
-      // suppress this original client impact: its self echo drives
-      // EffectManager.launcherEffect() and CharacterMotor.SetExplosionForce.
       return { ok: true, reason: "projectile-impact-untracked", intervalMs };
     }
     return { ok: false, reason: impact.reason, intervalMs };
@@ -8666,6 +8669,7 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
     targetSession.energy = targetCurrent.energy - energyDamage;
     targetSession.health = targetCurrent.health - healthDamage;
     recordDamageContribution(targetSession, deadSession, healthDamage + energyDamage);
+    recordContractDamage(deadSession, targetSession, healthDamage);
     result.impactEvents.push(makePlayerImpactEvent(
       deadSession,
       targetSession.actorId,
@@ -8683,6 +8687,7 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
     resetZombieInfectionProgress(targetSession);
     targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
     targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
+    recordContractKill(deadSession, targetSession, 203, 996, 0);
     deadSession.kills = numberOr(deadSession.kills, 0) + 1;
     deadSession.points = numberOr(deadSession.points, 0) + 1;
     deadSession.matchKills = numberOr(deadSession.matchKills, 0) + 1;
@@ -8783,6 +8788,7 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   let expAwarded = 0;
   let exp2clanAwarded = 0;
   let fragInfo = null;
+  recordContractKill(shooter, targetSession, context.weaponType, context.weaponId, context.hitZone);
 
   if (targetSession !== shooter) {
     shooter.kills = numberOr(shooter.kills, 0) + 1;
@@ -8943,6 +8949,7 @@ function applyImpactDotDamage(effect, targetSession) {
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
   recordDamageContribution(targetSession, effect.shooter, healthDamage + energyDamage);
+  recordContractDamage(effect.shooter, targetSession, healthDamage);
   return {
     targetCurrent,
     requestedDamage,
@@ -8966,6 +8973,7 @@ function impactDotSourceStillValid(effect, targetSession) {
 
 function applyImpactDotKill(effect, targetSession, damage) {
   const shooter = effect.shooter;
+  recordContractKill(shooter, targetSession, effect.weaponType, effect.weaponId, 0);
   targetSession.dead = true;
   targetSession.waitingSelfSpawnMove = false;
   resetZombieInfectionProgress(targetSession);
@@ -9289,6 +9297,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
   recordDamageContribution(targetSession, shooter, healthDamage + energyDamage);
+  recordContractDamage(shooter, targetSession, healthDamage);
 
   result.energyDamage = energyDamage;
   result.healthDamage = healthDamage;
@@ -9296,6 +9305,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
 
   if (targetCurrent.health > 0 && targetSession.health <= 0) {
+    recordContractKill(shooter, targetSession, weaponType, damageState?.weaponId, hitZone);
     targetSession.dead = true;
     targetSession.waitingSelfSpawnMove = false;
     resetZombieInfectionProgress(targetSession);
@@ -10099,6 +10109,124 @@ function queueSelfSpawnRetry(session, reliableCommand, spawnSeq, reason) {
   }
 }
 
+// Clan quest accounting is server-only; it does not alter Photon scores or damage.
+// BEGIN CLAN CONTRACT METRICS
+const contractPreviousMatches = new Map();
+const CONTRACT_PREVIOUS_MATCH_LIMIT = 10000;
+
+function recordContractSummaryChain(session) {
+  const playerId = String(session.playerId || "");
+  const matchId = String(session.matchInstanceId || "");
+  if (!playerId || !matchId) return;
+  contractPreviousMatches.delete(playerId);
+  contractPreviousMatches.set(playerId, matchId);
+  if (contractPreviousMatches.size > CONTRACT_PREVIOUS_MATCH_LIMIT) {
+    contractPreviousMatches.delete(contractPreviousMatches.keys().next().value);
+  }
+}
+
+function newContractMetrics() {
+  return {
+    kills: 0, deaths: 0, damage: 0, headshots: 0, groinKills: 0,
+    lowHealthKills: { 10: 0, 25: 0, 50: 0 }, maxKillStreak: 0, firstBlood: 0,
+    killsByClass: {}, headshotsByClass: {}, groinKillsByClass: {}, weaponKinds: {},
+    doubleKills: 0, tripleKills: 0, quadKills: 0,
+    maxHeadshotStreak: 0, maxGroinStreak: 0,
+    flagsTaken: 0, flagsCaptured: 0, flagsReturned: 0, flagCarrierKills: 0,
+  };
+}
+
+function contractMetricsFor(session) {
+  if (!session || !session.room || !session.matchStartedAt || session.matchStatsPosted) return null;
+  if (!session.contractMetrics) session.contractMetrics = newContractMetrics();
+  return session.contractMetrics;
+}
+
+function contractEnemy(shooter, target) {
+  return Boolean(shooter && target && shooter !== target && shooter.room && shooter.room === target.room
+    && !sessionsAreAllies(shooter, target));
+}
+
+function recordContractDamage(shooter, target, healthDamage) {
+  if (!contractEnemy(shooter, target)) return;
+  const metrics = contractMetricsFor(shooter);
+  if (metrics) metrics.damage += Math.max(0, Math.trunc(numberOr(healthDamage, 0)));
+}
+
+function recordContractFlag(session, metric) {
+  if (!isCtfRoom(session?.room) || isRoundPausedSession(session)) return;
+  if (!["flagsTaken", "flagsCaptured", "flagsReturned"].includes(metric)) return;
+  const metrics = contractMetricsFor(session);
+  if (metrics) metrics[metric] += 1;
+}
+
+function recordContractKill(shooter, target, weaponType, weaponId, hitZone, now = Date.now()) {
+  const victimMetrics = contractMetricsFor(target);
+  if (victimMetrics) victimMetrics.deaths += 1;
+  // Death resets the survival challenge, not the client's timed multikill chain.
+  if (target) target.contractSurvivalStreak = 0;
+  if (!contractEnemy(shooter, target)) return;
+  const metrics = contractMetricsFor(shooter);
+  if (!metrics) return;
+  metrics.kills += 1;
+  const weaponClass = Math.trunc(numberOr(weaponType, 0));
+  const kind = Math.trunc(numberOr(weaponId, weaponClass));
+  const increment = (map, key) => { if (key > 0) map[key] = numberOr(map[key], 0) + 1; };
+  increment(metrics.killsByClass, weaponClass);
+  increment(metrics.weaponKinds, kind);
+  const head = Number(hitZone) === HIT_ZONE_CABIN;
+  const groin = Number(hitZone) === HIT_ZONE_ENGINE;
+  if (head) { metrics.headshots += 1; increment(metrics.headshotsByClass, weaponClass); }
+  if (groin) { metrics.groinKills += 1; increment(metrics.groinKillsByClass, weaponClass); }
+  const health = numberOr(shooter.health, 0);
+  if (!shooter.dead && health > 0) {
+    for (const threshold of [10, 25, 50]) if (health <= threshold) metrics.lowHealthKills[threshold] += 1;
+    shooter.contractSurvivalStreak = numberOr(shooter.contractSurvivalStreak, 0) + 1;
+    metrics.maxKillStreak = Math.max(metrics.maxKillStreak, shooter.contractSurvivalStreak);
+  }
+  // PlayerManager.CheckKillStreak: strictly <10000ms between adjacent kills;
+  // Double/Triple/KillingFour fire at exactly 2/3/4, not sliding pairs/triples.
+  const chained = Number.isFinite(shooter.contractLastKillAt) && now >= shooter.contractLastKillAt
+    && now - shooter.contractLastKillAt < 10000;
+  shooter.contractTimedStreak = chained ? numberOr(shooter.contractTimedStreak, 0) + 1 : 1;
+  if (shooter.contractTimedStreak === 2) metrics.doubleKills += 1;
+  if (shooter.contractTimedStreak === 3) metrics.tripleKills += 1;
+  if (shooter.contractTimedStreak === 4) metrics.quadKills += 1;
+  shooter.contractHeadStreak = head ? (chained ? numberOr(shooter.contractHeadStreak, 0) : 0) + 1 : 0;
+  shooter.contractGroinStreak = groin ? (chained ? numberOr(shooter.contractGroinStreak, 0) : 0) + 1 : 0;
+  metrics.maxHeadshotStreak = Math.max(metrics.maxHeadshotStreak, shooter.contractHeadStreak);
+  metrics.maxGroinStreak = Math.max(metrics.maxGroinStreak, shooter.contractGroinStreak);
+  shooter.contractLastKillAt = now;
+  const room = shooter.room;
+  // The room marker survives disconnects and cannot award a second first blood
+  // when the first killer leaves. A new real round changes its sequence.
+  const round = `${numberOr(room.standardRoundSeq, 0)}:${numberOr(room.zombieRoundSeq, 0)}`;
+  if (room.contractFirstBloodRound !== round) {
+    room.contractFirstBloodRound = round;
+    metrics.firstBlood = 1;
+  }
+  if (isCtfRoom(room) && Array.from(room.flags.values()).some((flag) => flag.team !== shooter.team && flag.bearer === shooter.actorId)) {
+    metrics.flagCarrierKills += 1;
+  }
+}
+
+function snapshotContractMetrics(session, completed, endedAt = Date.now()) {
+  const metrics = session.contractMetrics || newContractMetrics();
+  return {
+    ...metrics,
+    lowHealthKills: { ...metrics.lowHealthKills }, killsByClass: { ...metrics.killsByClass },
+    headshotsByClass: { ...metrics.headshotsByClass }, groinKillsByClass: { ...metrics.groinKillsByClass },
+    weaponKinds: { ...metrics.weaponKinds },
+    version: 2,
+    completed: completed === true && Boolean(session.spawned) && Number(session.team) !== -1,
+    previousMatchInstanceId: contractPreviousMatches.get(String(session.playerId || "")) || "",
+    startedAt: new Date(session.matchStartedAt).toISOString(),
+    endedAt: new Date(endedAt).toISOString(),
+    playedSeconds: session.contractParticipatedAt ? Math.max(0, Math.floor((endedAt - session.contractParticipatedAt) / 1000)) : 0,
+  };
+}
+// END CLAN CONTRACT METRICS
+
 function resetSessionMatchStats(session) {
   if (!session) return;
   session.matchStartedAt = 0;
@@ -10113,6 +10241,13 @@ function resetSessionMatchStats(session) {
   session.matchDomination = 0;
   session.matchRevenge = 0;
   session.matchExp = 0;
+  session.contractMetrics = newContractMetrics();
+  session.contractSurvivalStreak = 0;
+  session.contractTimedStreak = 0;
+  session.contractHeadStreak = 0;
+  session.contractGroinStreak = 0;
+  session.contractLastKillAt = null;
+  session.contractParticipatedAt = 0;
 }
 
 function beginSessionMatchStats(session) {
@@ -10171,6 +10306,7 @@ function postSessionBattleSummary(session, reason = "leave", outcome = {}) {
     maxDomination: numberOr(session.maxDomination, 0),
     maxRevenge: numberOr(session.maxRevenge, 0),
     ...(outcome && typeof outcome.eventData === "object" ? outcome.eventData : {}),
+    contractMetrics: snapshotContractMetrics(session, outcome?.completed === true),
   };
   const summary = {
     matchInstanceId: String(session.matchInstanceId || ""),
@@ -10188,6 +10324,7 @@ function postSessionBattleSummary(session, reason = "leave", outcome = {}) {
     eventData,
   };
   if (outcome && Object.prototype.hasOwnProperty.call(outcome, "won")) summary.won = Boolean(outcome.won);
+  recordContractSummaryChain(session);
   postBattleEvent(session, "summary", summary);
   return true;
 }
@@ -10200,7 +10337,7 @@ function postStandardRoundBattleSummaries(room, winner, reason = "round-end") {
   const teamMode = mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CAPTURE_THE_FLAG || mode === MAP_MODE_CONTROL_POINTS;
   let posted = 0;
   for (const playerSession of zombieRoomPlayers(room)) {
-    const outcome = { eventData: { roundWinner: normalizedWinner } };
+    const outcome = { completed: true, eventData: { roundWinner: normalizedWinner } };
     if (hasWinner) {
       outcome.won = teamMode
         ? Number(playerSession.team || 0) === normalizedWinner
@@ -10218,7 +10355,7 @@ function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round
   for (const playerSession of zombieRoomPlayers(room)) {
     if (!playerSession.spawned || ![ZOMBIE_TEAM, HUMAN_TEAM].includes(Number(playerSession.team))) continue;
     const won = Number(playerSession.team || 0) === normalizedWinner;
-    if (postSessionBattleSummary(playerSession, reason, { won, eventData: { roundWinner: normalizedWinner } })) posted += 1;
+    if (postSessionBattleSummary(playerSession, reason, { completed: true, won, eventData: { roundWinner: normalizedWinner } })) posted += 1;
   }
   return posted;
 }
@@ -13909,6 +14046,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     const firstMoveAfterSpawn = !session.moveSeen;
     session.spawned = true;
+    if (!session.contractParticipatedAt && session.matchStartedAt) session.contractParticipatedAt = Date.now();
     session.moveSeen = true;
     session.moveCount = (Number(session.moveCount) || 0) + 1;
     session.waitingSelfSpawnMove = false;
