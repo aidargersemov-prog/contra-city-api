@@ -7,6 +7,7 @@ import { URL, fileURLToPath } from "node:url";
 import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
+import { createClanWars } from "./clan-wars.js";
 import {
   executeBattleStaffAction,
   legacyPermissionPayload,
@@ -22,7 +23,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-07-clan-contracts-v110";
+const API_BUILD_ID = "railway-api-2026-09-09-clan-wars-v112";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -523,6 +524,17 @@ const CLAN_ARM_ITEM_TYPE = 5;
 // Contracts are intentionally guarded by a separate rollout flag. The CEF
 // toggle only changes presentation; it must never create a second economy.
 const CLAN_CONTRACTS_ENABLED = process.env.CLAN_CONTRACTS_ENABLED === "1";
+const CLAN_BANNERS_ENABLED = process.env.CLAN_BANNERS_ENABLED === "1";
+const CLAN_BANNER_PRODUCTS = Object.freeze([
+  Object.freeze({ id: "default", title: "Классический", price: 0, animated: false }),
+  Object.freeze({ id: "peaks", title: "Тихие вершины", price: 300, animated: false }),
+  Object.freeze({ id: "sunset", title: "Золотой час", price: 300, animated: false }),
+  Object.freeze({ id: "coast", title: "Морской бриз", price: 300, animated: false }),
+  Object.freeze({ id: "rain", title: "После дождя", price: 900, animated: true }),
+  Object.freeze({ id: "aurora", title: "Северное сияние", price: 900, animated: true }),
+  Object.freeze({ id: "embers", title: "Тёплый пепел", price: 900, animated: true })
+]);
+const CLAN_BANNER_PRODUCT_BY_ID = new Map(CLAN_BANNER_PRODUCTS.map((product) => [product.id, product]));
 const CLAN_CONTRACT_RESET_HOUR_MOSCOW = 5;
 const CLAN_CONTRACTS_TIMEZONE = "Europe/Moscow";
 const CLAN_CONTRACT_ARM_PRODUCTS = Object.freeze([
@@ -1945,6 +1957,18 @@ function saveStore(store) {
 }
 
 let pgPool = null;
+const clanWarPort = Number(process.env.CLAN_WARS_PORT || 5055);
+const clanWarHost = String(process.env.CLAN_WARS_HOST || BATTLE_HOST).trim();
+const clanWarPorts = String(process.env.CLIENT_BATTLE_PORTS || process.env.BATTLE_PORTS || "5055,5056,5255").split(",").map(Number);
+const clanWars = createClanWars({
+  getPool: () => pgPool,
+  enabled: process.env.CLAN_WARS_ENABLED === "1",
+  verifiedMaps: String(process.env.CLAN_WARS_VERIFIED_MAPS || "").split(",").map(value => value.trim()),
+  endpoint: clanWarHost === BATTLE_HOST && clanWarPorts.includes(clanWarPort) && Number.isInteger(clanWarPort)
+    ? { serverId: process.env.CLAN_WARS_SERVER_ID || "clan-wars-1", host: clanWarHost, port: clanWarPort } : null
+});
+let clanBannerAppearanceReady = false;
+let clanBannerSchemaReady = false;
 let pgSaveChain = Promise.resolve();
 const viewSelectionSaveVersions = new Map();
 const weaponSelectionSaveVersions = new Map();
@@ -2162,6 +2186,7 @@ async function loadLegacyPostgresStore() {
 }
 
 async function loadPostgresStore() {
+  await refreshClanBannerSchema(pgPool);
   const players = await pgPool.query("SELECT * FROM players ORDER BY id");
   const inventory = await pgPool.query("SELECT player_id, item_data FROM player_inventory ORDER BY player_id, created_at, item_key");
   const abilities = await pgPool.query("SELECT player_id, ability_id, ability_level FROM player_abilities ORDER BY player_id, ability_id");
@@ -2299,6 +2324,18 @@ async function loadPostgresStore() {
     if (!clan) continue;
     const item = jsonValue(row.item_data, {});
     if (item && typeof item === "object") clan.inventory.push({ ...item, itemKey: row.item_key });
+  }
+
+  // The legacy snapshot rewrites `clans`. Appearance is deliberately loaded
+  // from its independent table after reconstructing that snapshot.
+  if (clanBannerAppearanceReady) {
+    const appearances = await pgPool.query("SELECT clan_id, banner_id, revision FROM clan_banner_appearance");
+    for (const row of appearances.rows) {
+      const clan = clanStore.byId[String(row.clan_id)];
+      if (!clan || clan.deletedAt) continue;
+      clan.bannerId = normalizeClanBannerId(row.banner_id);
+      clan.bannerRevision = normalizeClanBannerRevision(row.revision);
+    }
   }
 
   return normalizeStore({ accounts, clans: clanStore });
@@ -8304,6 +8341,8 @@ function normalizeClanSummary(clan) {
     t: String(clan.t ?? clan.tag ?? ""),
     tc: String(clan.tc ?? clan.tagColor ?? ""),
     aid: Number(clan.aid ?? clan.armId ?? 1),
+    bannerId: normalizeClanBannerId(clan.bannerId),
+    bannerRevision: normalizeClanBannerRevision(clan.bannerRevision),
     h: String(clan.h ?? clan.homepage ?? ""),
     d: String(clan.d ?? clan.desc ?? ""),
     vc: Number(clan.vc ?? clan.money ?? 0),
@@ -8374,6 +8413,8 @@ function normalizeClanRecord(raw = {}) {
     exp: Number(raw.exp ?? raw.e ?? 0),
     money: Number(raw.money ?? raw.vc ?? 0),
     armId: Number(raw.armId ?? raw.aid ?? 1),
+    bannerId: normalizeClanBannerId(raw.bannerId),
+    bannerRevision: normalizeClanBannerRevision(raw.bannerRevision),
     tagColor: String(raw.tagColor ?? raw.tc ?? ""),
     homepage: String(raw.homepage ?? raw.h ?? ""),
     desc: String(raw.desc ?? raw.description ?? raw.d ?? ""),
@@ -9022,6 +9063,8 @@ function clanPayload(clan, options = {}) {
     t: String(clan.tag || ""),
     tc: String(clan.tagColor || ""),
     aid: Number(clan.armId || 0),
+    bannerId: normalizeClanBannerId(clan.bannerId),
+    bannerRevision: normalizeClanBannerRevision(clan.bannerRevision),
     vc: Number(clan.money || 0)
   };
   if (full) {
@@ -10263,6 +10306,17 @@ async function deleteClanPostgres(account, clanId) {
         await client.query("DELETE FROM clan_contract_wallets WHERE clan_id = $1", [Number(clanId)]);
         await client.query("DELETE FROM clan_contract_cycles WHERE clan_id = $1", [Number(clanId)]);
       }
+      // Clean cosmetics even when their rollout flag is off. Never run this
+      // cleanup from savePostgresStore's snapshot replacement.
+      if (clanBannerSchemaReady) {
+        await client.query("DELETE FROM clan_banner_ownership WHERE clan_id = $1", [Number(clanId)]);
+        if (!CLAN_CONTRACTS_ENABLED) {
+          await client.query("DELETE FROM clan_contract_operations WHERE clan_id = $1 AND operation_kind IN ('buy_banner', 'equip_banner')", [Number(clanId)]);
+        }
+      }
+      if (clanBannerAppearanceReady) {
+        await client.query("DELETE FROM clan_banner_appearance WHERE clan_id = $1", [Number(clanId)]);
+      }
       await client.query("DELETE FROM clan_invites WHERE clan_id = $1", [Number(clanId)]);
       await client.query("DELETE FROM clan_members WHERE clan_id = $1", [Number(clanId)]);
       const deletedClanResult = await client.query(
@@ -10629,6 +10683,7 @@ async function routeClan(account, url, act, requestOrigin = null) {
     case "g":
       return clanListPayload(url, account);
     case "gextra":
+      await refreshClanBannerAppearance(url.searchParams.get("cid"));
       return clanExtraPayload(account, url.searchParams.get("cid"));
     case "src": {
       const value = clanFormValue(url, "v").toLowerCase();
@@ -10759,6 +10814,180 @@ function withPurchasedDuration(item, duration, existingItem = null, now = curren
   const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
   itemData.eD = base + seconds;
   return itemData;
+}
+
+function normalizeClanBannerId(value) {
+  const id = String(value || "default");
+  return CLAN_BANNER_PRODUCT_BY_ID.has(id) ? id : "default";
+}
+
+function normalizeClanBannerRevision(value) {
+  const revision = Number(value || 0);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+}
+
+async function refreshClanBannerSchema(client) {
+  const schema = await client.query(`SELECT
+    to_regclass('public.clan_banner_appearance') AS appearance,
+    to_regclass('public.clan_banner_ownership') AS ownership,
+    EXISTS (SELECT 1 FROM pg_constraint
+      WHERE conrelid = to_regclass('public.clan_contract_operations')
+        AND conname = 'clan_contract_operations_operation_kind_check'
+        AND pg_get_constraintdef(oid) LIKE '%buy_banner%'
+        AND pg_get_constraintdef(oid) LIKE '%equip_banner%') AS operations_ready`);
+  clanBannerAppearanceReady = Boolean(schema.rows[0]?.appearance);
+  clanBannerSchemaReady = Boolean(clanBannerAppearanceReady && schema.rows[0]?.ownership && schema.rows[0]?.operations_ready);
+}
+
+function clanBannersAvailable() {
+  return Boolean(CLAN_BANNERS_ENABLED && clanBannerSchemaReady && clanContractsAvailable());
+}
+
+function applyClanBannerAppearance(clanId, appearance) {
+  const clan = clanById(clanId);
+  if (!clan || !appearance || normalizeClanBannerRevision(appearance.revision) < normalizeClanBannerRevision(clan.bannerRevision)) return;
+  clan.bannerId = normalizeClanBannerId(appearance.selectedId);
+  clan.bannerRevision = normalizeClanBannerRevision(appearance.revision);
+  for (const playerId of Object.keys(clan.members || {})) {
+    const account = accountById(Number(playerId));
+    if (account) refreshAccountClan(account);
+  }
+}
+
+async function readClanBannerAppearance(client, clan) {
+  if (!clanBannerAppearanceReady) {
+    return { selectedId: normalizeClanBannerId(clan.bannerId), revision: normalizeClanBannerRevision(clan.bannerRevision) };
+  }
+  const result = await client.query("SELECT banner_id, revision FROM clan_banner_appearance WHERE clan_id = $1", [Number(clan.id)]);
+  return {
+    selectedId: normalizeClanBannerId(result.rows[0]?.banner_id),
+    revision: normalizeClanBannerRevision(result.rows[0]?.revision)
+  };
+}
+
+async function refreshClanBannerAppearance(clanId) {
+  const clan = clanById(clanId);
+  if (!clan || !pgPool || !clanBannerAppearanceReady) return;
+  try {
+    applyClanBannerAppearance(clan.id, await readClanBannerAppearance(pgPool, clan));
+  } catch (error) {
+    // An optional cosmetic refresh must not make legacy clan views unusable.
+    console.error(`[clan-banners] appearance refresh failed clan=${clan.id} code=${error.code || "unknown"}`);
+  }
+}
+
+async function clanBannerState(client, clan) {
+  const appearance = await readClanBannerAppearance(client, clan);
+  const ownedRows = clanBannerSchemaReady
+    ? await client.query("SELECT banner_id FROM clan_banner_ownership WHERE clan_id = $1", [Number(clan.id)])
+    : { rows: [] };
+  const owned = new Set(["default", ...ownedRows.rows.map((row) => String(row.banner_id))]);
+  const enabled = clanBannersAvailable();
+  return {
+    state: { enabled, clanId: Number(clan.id), ...appearance },
+    catalog: CLAN_BANNER_PRODUCTS.map((product) => ({ ...product, owned: owned.has(product.id), available: enabled }))
+  };
+}
+
+async function mutateClanBanner(account, action, bannerId, requestId, clanId, expectedRevision, requestOrigin) {
+  if (!clanBannersAvailable()) return { result: false, error: "banners_disabled" };
+  const product = CLAN_BANNER_PRODUCT_BY_ID.get(String(bannerId || ""));
+  const requestedClanId = Number(clanId);
+  const revision = Number(expectedRevision);
+  const clan = playerClanRecord(account.id);
+  if (!clan || !Number.isSafeInteger(requestedClanId) || requestedClanId <= 0 || requestedClanId !== Number(clan.id)) {
+    return { result: false, error: "banner_clan_changed" };
+  }
+  if (!product || !validClanContractRequestId(requestId) || !["buy_banner", "equip_banner"].includes(action)) {
+    return { result: false, error: "invalid_banner_request" };
+  }
+  if (action === "equip_banner" && (expectedRevision === null || expectedRevision === "" || !Number.isSafeInteger(revision) || revision < 0)) {
+    return { result: false, error: "invalid_banner_revision" };
+  }
+  return enqueuePostgresMutation(async () => {
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      // Lock before reading the receipt so concurrent requests for this clan
+      // on another API instance serialize too. Recheck actual membership.
+      const owner = await client.query(
+        `SELECT c.owner_player_id FROM clans c
+         JOIN clan_members m ON m.clan_id = c.id AND m.player_id = $2
+         WHERE c.id = $1 AND c.deleted_at IS NULL FOR UPDATE OF c`,
+        [requestedClanId, Number(account.id)]
+      );
+      if (!owner.rows[0] || Number(owner.rows[0].owner_player_id) !== Number(account.id)) throw new Error("clan_owner_required");
+      const currentClan = playerClanRecord(account.id);
+      if (!currentClan || Number(currentClan.id) !== requestedClanId) throw new Error("banner_clan_changed");
+      const previous = await client.query(
+        `SELECT clan_id, actor_player_id, operation_kind, product_key, result_data
+         FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`, [requestId]
+      );
+      const operation = previous.rows[0];
+      const productKey = `banner:${product.id}`;
+      if (operation) {
+        if (Number(operation.clan_id) !== requestedClanId || Number(operation.actor_player_id) !== Number(account.id)
+          || operation.operation_kind !== action || operation.product_key !== productKey) throw new Error("contract_request_collision");
+        const contracts = await clanContractState(client, account, currentClan, requestOrigin);
+        await client.query("COMMIT");
+        applyClanBannerAppearance(requestedClanId, contracts.banners);
+        return ok({ contracts, replayed: true });
+      }
+
+      await client.query("INSERT INTO clan_banner_appearance (clan_id) VALUES ($1) ON CONFLICT (clan_id) DO NOTHING", [requestedClanId]);
+      const selected = await client.query("SELECT banner_id, revision FROM clan_banner_appearance WHERE clan_id = $1 FOR UPDATE", [requestedClanId]);
+      const appearance = selected.rows[0];
+      const ownership = await client.query("SELECT banner_id FROM clan_banner_ownership WHERE clan_id = $1 AND banner_id = $2", [requestedClanId, product.id]);
+      const owned = product.id === "default" || Boolean(ownership.rows[0]);
+      let amount = 0;
+      if (action === "buy_banner" && !owned) {
+        amount = product.price;
+        await changeClanContractWallet(client, requestedClanId, account.id, -amount, "shop_banner", "banner", product.id, { price: amount });
+        await client.query(
+          "INSERT INTO clan_banner_ownership (clan_id, banner_id, purchased_by) VALUES ($1, $2, $3)",
+          [requestedClanId, product.id, Number(account.id)]
+        );
+        await client.query("UPDATE clan_banner_appearance SET revision = revision + 1, updated_by = $2, updated_at = now() WHERE clan_id = $1", [requestedClanId, Number(account.id)]);
+      }
+      if (action === "equip_banner") {
+        if (!owned) throw new Error("banner_not_owned");
+        if (appearance.banner_id !== product.id) {
+          if (normalizeClanBannerRevision(appearance.revision) !== revision) throw new Error("banner_revision_conflict");
+          await client.query(
+            "UPDATE clan_banner_appearance SET banner_id = $2, revision = revision + 1, updated_by = $3, updated_at = now() WHERE clan_id = $1",
+            [requestedClanId, product.id, Number(account.id)]
+          );
+        }
+      }
+      const result = { bannerId: product.id, alreadyOwned: owned, amount };
+      await client.query(
+        `INSERT INTO clan_contract_operations (clan_id, actor_player_id, request_id, operation_kind, product_key, amount, result_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+        [requestedClanId, Number(account.id), requestId, action, productKey, amount, JSON.stringify(result)]
+      );
+      const contracts = await clanContractState(client, account, currentClan, requestOrigin);
+      await auditGameEvent(client, {
+        playerId: account.id, clanId: requestedClanId, clanName: currentClan.name, category: "clan",
+        eventType: action === "buy_banner" ? "clan_banner_purchase" : "clan_banner_equip",
+        description: action === "buy_banner" ? `Клан получил баннер «${product.title}» за ${amount} знаков` : `Установлен баннер «${product.title}»`,
+        metadata: { bannerId: product.id, requestId, amount, revision: contracts.banners.revision }
+      });
+      await client.query("COMMIT");
+      // Never expose an uncommitted appearance through the in-memory snapshot.
+      applyClanBannerAppearance(requestedClanId, contracts.banners);
+      return ok({ contracts });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      const allowed = new Set(["clan_owner_required", "banner_clan_changed", "contract_request_collision", "banner_not_owned", "banner_revision_conflict"]);
+      const errorCode = error.code === "INSUFFICIENT_CONTRACT_MARKS" ? "insufficient_contract_marks"
+        : error.code === "23505" ? "contract_request_collision"
+          : allowed.has(error.message) ? error.message : "banner_operation_failed";
+      if (errorCode === "banner_operation_failed") console.error(`[clan-banners] mutation failed clan=${requestedClanId} code=${error.code || "unknown"}`);
+      return { result: false, error: errorCode };
+    } finally {
+      client.release();
+    }
+  });
 }
 
 function clanContractsAvailable() {
@@ -11016,6 +11245,7 @@ async function clanContractState(client, account, clan, requestOrigin) {
     [Number(clan.id)]
   );
   const isOwner = isClanOwner(account, clan);
+  const banners = await clanBannerState(client, clan);
   return {
     enabled: true,
     timezone: CLAN_CONTRACTS_TIMEZONE,
@@ -11053,7 +11283,8 @@ async function clanContractState(client, account, clan, requestOrigin) {
         }))
       };
     }),
-    catalog: { arms: contractArmCatalog(clan, requestOrigin), cases: contractCaseCatalog() },
+    banners: banners.state,
+    catalog: { arms: contractArmCatalog(clan, requestOrigin), cases: contractCaseCatalog(), banners: banners.catalog },
     history: recent.rows.map((row) => ({
       reason: String(row.reason || ""),
       amount: Number(row.amount || 0),
@@ -11073,14 +11304,19 @@ async function clanContractState(client, account, clan, requestOrigin) {
 }
 
 async function clanContractStateResponse(account, requestOrigin) {
-  if (!clanContractsAvailable()) return ok({ contracts: { enabled: false } });
   const clan = playerClanRecord(account.id);
   if (!clan) return ok({ contracts: { enabled: false, reason: "no_clan" } });
+  if (!clanContractsAvailable()) {
+    const banners = await clanBannerState(pgPool, clan);
+    applyClanBannerAppearance(clan.id, banners.state);
+    return ok({ contracts: { enabled: false, banners: banners.state, catalog: { banners: banners.catalog } } });
+  }
   const client = await pgPool.connect();
   try {
     await client.query("BEGIN");
     const contracts = await clanContractState(client, account, clan, requestOrigin);
     await client.query("COMMIT");
+    applyClanBannerAppearance(clan.id, contracts.banners);
     return ok({ contracts });
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
@@ -11101,11 +11337,12 @@ async function purchaseClanContractArm(account, armId, requestId, requestOrigin)
     try {
       await client.query("BEGIN");
       const previous = await client.query(
-        `SELECT clan_id, actor_player_id, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
+        `SELECT clan_id, actor_player_id, operation_kind, product_key, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
         [requestId]
       );
       if (previous.rows[0]) {
-        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)) throw new Error("contract_request_collision");
+        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)
+          || previous.rows[0].operation_kind !== "buy_arm" || previous.rows[0].product_key !== `arm:${product.armId}`) throw new Error("contract_request_collision");
         const contracts = await clanContractState(client, account, clan, requestOrigin);
         await client.query("COMMIT");
         return ok({ contracts, grantedArmId: Number(jsonValue(previous.rows[0].result_data, {}).grantedArmId || 0), replayed: true });
@@ -11148,11 +11385,12 @@ async function openClanContractCase(account, caseKey, requestId, requestOrigin) 
     try {
       await client.query("BEGIN");
       const previous = await client.query(
-        `SELECT clan_id, actor_player_id, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
+        `SELECT clan_id, actor_player_id, operation_kind, product_key, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
         [requestId]
       );
       if (previous.rows[0]) {
-        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)) throw new Error("contract_request_collision");
+        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)
+          || previous.rows[0].operation_kind !== "open_case" || previous.rows[0].product_key !== definition.key) throw new Error("contract_request_collision");
         const result = jsonValue(previous.rows[0].result_data, {});
         const contracts = await clanContractState(client, account, clan, requestOrigin);
         await client.query("COMMIT");
@@ -12344,6 +12582,7 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   if (!resolvedAccount && !isEquipmentSelectionSaveRequest(url)) account = await refreshAccountFromPostgres(account);
 
   if (page === "staff") return staffAjaxPayload(pgPool, account, act, url.searchParams);
+  if (page === "clan_wars") return clanWars.ajax(Number(account.id), act || "state", url.searchParams);
 
   if (page === "auth" && act === "g") {
     return ok({ user_id: String(account.id), key: account.key });
@@ -12445,6 +12684,10 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
 
   if (page === "clan_contracts") {
     if (act === "state") return await clanContractStateResponse(account, requestOrigin);
+    if (act === "buy_banner" || act === "equip_banner") {
+      return await mutateClanBanner(account, act, url.searchParams.get("banner"), url.searchParams.get("rid"),
+        url.searchParams.get("cid"), url.searchParams.get("revision"), requestOrigin);
+    }
     if (act === "buy") {
       return await purchaseClanContractArm(
         account,
@@ -14064,6 +14307,25 @@ async function handleHttpRequest(req, res) {
       sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/clan-wars") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      const result = await clanWars.service(body);
+      sendJson(res, result, result.ok ? 200 : 409);
+    } catch (error) {
+      sendJson(res, { ok: false, error: "clan_wars_unavailable" }, serviceErrorStatus(error));
     }
     return;
   }
