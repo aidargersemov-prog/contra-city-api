@@ -8,6 +8,7 @@ import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
 import { createClanWars, WAR_MAPS } from "./clan-wars.js";
+import { buildQuestSet, questPresentation, advanceQuest } from "./clan-contract-quests.js";
 import {
   executeBattleStaffAction,
   legacyPermissionPayload,
@@ -23,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-09-clan-wars-v113";
+const API_BUILD_ID = "railway-api-2026-09-09-clan-contract-quests-v114";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -11068,7 +11069,7 @@ async function ensureClanContractCycle(client, clan) {
   );
   const cycle = cycleResult.rows[0];
   const existing = await client.query(
-    `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at
+    `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at, objective_spec, objective_state
      FROM clan_contract_entries
      WHERE cycle_id = $1
      ORDER BY slot
@@ -11076,21 +11077,19 @@ async function ensureClanContractCycle(client, clan) {
     [Number(cycle.id)]
   );
   if (existing.rows.length === 0) {
-    const lockedConfig = CLAN_CONTRACT_TIER_CONFIG[Number(cycle.tier)] || config;
-    const objectives = clanContractObjectiveOrder(clan.id, window.cycleKey);
+    const objectives = buildQuestSet(clan.id, window.cycleKey);
     for (let index = 0; index < objectives.length; index += 1) {
-      const key = objectives[index];
-      const definition = lockedConfig.objectives[key];
+      const definition = objectives[index];
       await client.query(
-        `INSERT INTO clan_contract_entries (cycle_id, slot, objective_key, target_value, reward)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [Number(cycle.id), index + 1, key, Number(definition[0]), Number(definition[1])]
+        `INSERT INTO clan_contract_entries (cycle_id, slot, objective_key, target_value, reward, objective_spec)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [Number(cycle.id), index + 1, definition.key, definition.target, definition.reward, JSON.stringify(definition.spec)]
       );
     }
   }
   const entries = existing.rows.length === 0
     ? await client.query(
-      `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at
+      `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at, objective_spec, objective_state
        FROM clan_contract_entries WHERE cycle_id = $1 ORDER BY slot FOR UPDATE`,
       [Number(cycle.id)]
     )
@@ -11278,6 +11277,7 @@ async function clanContractState(client, account, clan, requestOrigin) {
         key: entry.objective_key,
         title: CLAN_CONTRACT_OBJECTIVES[entry.objective_key]?.title || entry.objective_key,
         text: CLAN_CONTRACT_OBJECTIVES[entry.objective_key]?.text || "Выполните задачу вместе с командой.",
+        ...questPresentation(entry),
         target: Number(entry.target_value),
         progress: Number(entry.current_value),
         reward: Number(entry.reward),
@@ -11437,8 +11437,15 @@ async function advanceClanContractsFromSummary(client, event, playerId, details)
   if (!clanContractsAvailable() || event.contractEligible !== true) return null;
   const matchInstanceId = String(event.matchInstanceId || "");
   if (!validClanContractRequestId(matchInstanceId)) return null;
+  const metricEnd = event.eventData?.contractMetrics?.endedAt;
+  if (event.eventData?.contractMetrics?.version === 2) {
+    const ended = new Date(metricEnd);
+    if (!Number.isFinite(ended.getTime()) || clanContractCycleWindow(ended).cycleKey !== clanContractCycleWindow().cycleKey) return null;
+  }
   const clan = playerClanRecord(playerId);
   if (!clan || clan.deletedAt) return null;
+  // Match state/shop lock order: wallet -> cycle -> entries.
+  await ensureClanContractWallet(client, clan.id);
   const cycleState = await ensureClanContractCycle(client, clan);
   const receipt = await client.query(
     `INSERT INTO clan_contract_match_receipts (clan_id, player_id, match_instance_id, cycle_id)
@@ -11456,7 +11463,11 @@ async function advanceClanContractsFromSummary(client, event, playerId, details)
   };
   const completed = [];
   for (const entry of cycleState.entries) {
-    const offered = Number(deltas[entry.objective_key] || 0);
+    const advanced = entry.objective_spec?.version === 2 ? advanceQuest(entry, event, playerId) : null;
+    if (advanced && !entry.completed_at) {
+      await client.query('UPDATE clan_contract_entries SET objective_state=$2::jsonb WHERE id=$1', [Number(entry.id), JSON.stringify(advanced.state)]);
+    }
+    const offered = advanced ? Math.max(0, advanced.progress - Number(entry.current_value || 0)) : Number(deltas[entry.objective_key] || 0);
     if (offered <= 0 || entry.completed_at) continue;
     const before = Number(entry.current_value || 0);
     const target = Number(entry.target_value || 0);
