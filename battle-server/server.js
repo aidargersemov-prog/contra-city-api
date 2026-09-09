@@ -3,6 +3,8 @@ const net = require("net");
 const crypto = require("crypto");
 const { TextDecoder } = require("util");
 const { monitorEventLoopDelay } = require("perf_hooks");
+const { createClanWarsBattle, MAPS: CLAN_WAR_MAPS } = require("./clan-wars-battle.cjs");
+let clanWarsBattle = null;
 
 function boundedEnvInt(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = Number(process.env[name]);
@@ -23,7 +25,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-07-clan-contracts-v314";
+const BUILD_ID = "battle-server-2026-09-09-clan-wars-v315";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -2718,6 +2720,10 @@ function makeRoomSettingsRaw(settings) {
   if (settings.guestMode) {
     entries.push({ key: rawString("guest_mode"), value: rawShort(shortRoomValue(settings.guestMode, 0)) });
   }
+  if (settings.clanWar) {
+    entries.push({ key: rawString("clan_war_id"), value: rawString(String(settings.clanWar.war.id)) });
+    entries.push({ key: rawString("clan_war_attempt"), value: rawString(String(settings.clanWar.war.attemptId)) });
+  }
   return rawHashtable(entries);
 }
 
@@ -4591,6 +4597,10 @@ function clearStaffFlightState(session, reason = "clear") {
 }
 
 function handleStaffFlightRequest(session, parsed) {
+  if (session?.room?.clanWar) {
+    clearStaffFlightState(session, "clan-war-disabled");
+    return [];
+  }
   const data = eventDataHash(parsed);
   const requested = Number(htGet(data, 1)?.value || 0) === 1;
   const cinematic = Number(htGet(data, 2)?.value || 0) === 1;
@@ -6253,6 +6263,8 @@ function hasTeamDamageMode(mode) {
 }
 
 function normalizeTeamForRoom(session, requestedTeam = null) {
+  const warTeam = clanWarsBattle?.fixedTeam(session);
+  if (warTeam != null) return warTeam;
   const mode = roomMode(session);
   const team = Number(requestedTeam);
 
@@ -6368,6 +6380,7 @@ function makeScorePlayerRaw(session, team, options = {}) {
 }
 
 function teamScorePoints(session, team) {
+  if (session?.room?.clanWar) return clanWarsBattle.score(session.room)[Number(team) - 1] || 0;
   if (isControlPointsRoom(session?.room)) {
     return Math.max(0, numberOr(session.room.controlPointScores?.[team], 0));
   }
@@ -6580,6 +6593,7 @@ function isStandardRoundRoom(room) {
 }
 
 function isStandardRoundPaused(room) {
+  if (room?.clanWar) return !clanWarsBattle.active(room);
   return isStandardRoundRoom(room) && room?.standardRoundState === "pause";
 }
 
@@ -6714,6 +6728,7 @@ function scheduleStandardRoundLimit(room, channel = 0) {
 }
 
 function startStandardRound(room, channel = 0, reason = "sync") {
+  if (room?.clanWar) return 0; // API-owned roster/countdown, never first join.
   if (!isStandardRoundRoom(room) || room.standardRoundState === "pause" || room.standardRoundState === "active") return 0;
   room.standardRoundSeq = Number(room.standardRoundSeq || 0) + 1;
   room.standardRoundState = "active";
@@ -6743,6 +6758,7 @@ function beginNextStandardRound(room, roundSeq, channel = 0) {
 }
 
 function scheduleStandardRestart(room, channel = 0) {
+  if (room?.clanWar) return;
   clearStandardRestartTimer(room);
   const roundSeq = Number(room.standardRoundSeq || 0);
   room.standardRestartTimer = setTimeout(() => {
@@ -6793,6 +6809,7 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
 }
 
 function maybeFinishStandardRound(room, reason = "state", channel = 0, currentSession = null, currentResponses = null) {
+  if (room?.clanWar) return 0; // Wars are timed: no ordinary frag cap.
   if (!isStandardRoundRoom(room) || room.standardRoundState !== "active") return 0;
   const fragLimit = Math.max(1, numberOr(room.fragLimit, 50));
   if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
@@ -8605,6 +8622,7 @@ function kamikazeDistanceCoefficient(distance) {
 
 function applyKamikazeExplosion(deadSession, channel = 0) {
   const result = { impactEvents: [], killEvents: [], scoreEvents: [], killedSessions: [], summaries: [] };
+  if (deadSession?.room?.clanWar && isRoundPausedSession(deadSession)) return result;
   if (!deadSession?.room || !deadSession.dead || deadSession.kamikazeTriggered) return result;
   if (!hasSelectedEnhancer(deadSession.loadedProfile, ENHANCER_TYPE.KAMIKAZE)) return result;
   const origin = deadSession.lastTransform;
@@ -9046,6 +9064,10 @@ function scheduleImpactDotTick(effect, targetSession, delayMs) {
 }
 
 function applyImpactDotTick(effect, targetSession) {
+  if (targetSession?.room?.clanWar && isRoundPausedSession(targetSession)) {
+    clearImpactDotState(targetSession, effect.type);
+    return;
+  }
   const timers = targetSession?.impactTimers;
   if (!timers || timers.get(Number(effect.type)) !== effect) return;
   effect.timer = null;
@@ -9156,6 +9178,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     summary: `${Number.isFinite(targetActorId) ? targetActorId : "?"}:skip`,
   };
 
+  if (shooter?.room?.clanWar && isRoundPausedSession(shooter)) return result;
   if (!ENABLE_BATTLE_DAMAGE) {
     result.summary = `${Number.isFinite(targetActorId) ? targetActorId : "?"}:damage=off`;
     return result;
@@ -9794,6 +9817,7 @@ function makeRoomListRaw() {
   const entries = [];
   for (const room of rooms.values()) {
     if (!room?.name) continue;
+    if (room.clanWar) continue;
     if (roomPlayableOccupancy(room) <= 0) continue;
     entries.push({
       key: rawString(room.name),
@@ -9805,7 +9829,7 @@ function makeRoomListRaw() {
 
 function roomListSummary() {
   return Array.from(rooms.values())
-    .filter((room) => room?.name && roomPlayableOccupancy(room) > 0)
+    .filter((room) => room?.name && !room.clanWar && roomPlayableOccupancy(room) > 0)
     .map((room) => `${room.name}:${room.map}:${roomPlayableOccupancy(room)}/${room.maxUsers || 8}`)
     .join(",") || "empty";
 }
@@ -10241,6 +10265,7 @@ function resetSessionRoomProgress(session) {
 
 function deleteEmptyRoom(room, reason = "empty") {
   if (!room?.name || (room.players?.size || 0) > 0) return false;
+  if (clanWarsBattle?.retain(room)) return false;
   if (rooms.get(room.name) !== room) return false;
   clearZombieTimers(room);
   if (room.expeditionReservationTimer) {
@@ -10309,6 +10334,7 @@ function sameAuthenticatedCcid(left, right) {
 
 function removeRoomPlayer(room, actorId, playerSession, reason = "leave", options = {}) {
   if (!room?.players || room.players.get(actorId) !== playerSession) return false;
+  clanWarsBattle?.snapshot(room, playerSession);
   playerSession.room = room;
   const peers = broadcastReliableToRoom(
     playerSession,
@@ -11315,6 +11341,7 @@ function cancelRoomKickVoteForDeparture(room, actorId, channel = 0, reason = "le
 }
 
 async function handleRoomKickVoteStartRequest(session, data, channel = 0) {
+  if (session?.room?.clanWar) return []; // Fixed rated roster; service moderation remains separate.
   const targetPlayerId = Number(htGet(data, 1)?.value || 0);
   const targetActorId = Number(htGet(data, 5)?.value || 0);
   const reasonCode = Number(htGet(data, 9)?.value || 0);
@@ -11415,6 +11442,7 @@ async function handleRoomKickVoteStartRequest(session, data, channel = 0) {
 }
 
 async function handleRoomKickVoteBallotRequest(session, data, channel = 0) {
+  if (session?.room?.clanWar) return [];
   const targetPlayerId = Number(htGet(data, 1)?.value || 0);
   const targetActorId = Number(htGet(data, 5)?.value || 0);
   const ballot = htGet(data, 2)?.value;
@@ -13483,6 +13511,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     const requestedName = roomNameParam?.value || DEFAULT_ROOM;
 
     if (String(requestedName).includes("list_lobby")) {
+      if (session.room?.clanWar) detachSessionFromRoom(session, "war-to-lobby");
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
@@ -13519,6 +13548,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const plainLobbyJoin = !roomPropsParam || !parsed.params.has(242) || !parsed.params.has(250);
     if (plainLobbyJoin) {
+      if (session.room?.clanWar) detachSessionFromRoom(session, "war-to-plain-lobby");
       session.room = ensureRoom({ name: DEFAULT_ROOM, map: DEFAULT_MAP, mode: FORCE_TEAM_MODE ? 2 : 1, maxUsers: 8 });
       session.roomRaw = makeRoomSettingsRaw(session.room);
       session.actorRaw = actorParam?.raw || session.actorRaw || rawHashtable([]);
@@ -13542,10 +13572,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const settings = roomSettingsFrom(roomPropsParam);
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
+    const warPreflightError = clanWarsBattle?.admission(settings, Number(htGet(actorParam, 241)?.value || 0), null, port);
+    if (warPreflightError) return [rawOperationResponse(255, [], -17, warPreflightError)];
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved)) {
-        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved) deleteEmptyRoom(joinRoom, "stale-name-join");
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar)) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar) deleteEmptyRoom(joinRoom, "stale-name-join");
         console.log(`[state] room join rejected reason=missing-room name=${settings.name} requested=${requestedName}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
@@ -13589,10 +13621,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       console.log(`[staff] room create rejected player=${profile.authId} role=${normalizeStaffRole(profile.staffRole)} reason=private-room-role`);
       return [rawOperationResponse(255, [], -17, "staff-role-required")];
     }
+    const warAdmissionError = clanWarsBattle?.admission(settings, profile.authId, profile.clan?.cid || 0, port);
+    if (warAdmissionError) return [rawOperationResponse(255, [], -17, warAdmissionError)];
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved)) {
-        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar)) {
+        if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
         console.log(`[state] room join rejected reason=missing-room-after-profile name=${settings.name}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
       }
@@ -13655,6 +13689,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     }
     removeDuplicatePlayerSessionsFromAllRooms(session, "room-join-duplicate");
     session.room = ensureRoom(settings);
+    clanWarsBattle?.attach(session);
+    if (session.room.clanWar) clearStaffFlightState(session, "clan-war-join");
     session.roomRaw = makeRoomSettingsRaw(session.room);
     session.actorId = nextRoomActorId(session.room);
     updateActorWireData(session, actorParam, profile, channel);
@@ -14285,6 +14321,59 @@ console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
 console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} packet=${VOICE_OPUS_FRAME_MS}ms max=${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
+
+if (process.env.CLAN_WARS_ENABLED === "1") {
+  const warHost = String(process.env.CLAN_WARS_HOST || "").trim();
+  const warPort = Number(process.env.CLAN_WARS_PORT || 5055);
+  const verifiedMaps = String(process.env.CLAN_WARS_VERIFIED_MAPS || "").split(",").map((value) => value.trim()).filter((value) => CLAN_WAR_MAPS.includes(value));
+  if (!API_TOKEN || warHost !== PUBLIC_HOST || !PORTS.includes(warPort) || !verifiedMaps.length) {
+    console.error("[clan-wars] disabled: require token, matching explicit CLAN_WARS_HOST/PORT and CLAN_WARS_VERIFIED_MAPS");
+  } else {
+    try {
+      clanWarsBattle = createClanWarsBattle({
+        serverId: String(process.env.CLAN_WARS_SERVER_ID || "clan-wars-1"), host: warHost, port: warPort, maps: verifiedMaps,
+        outboxDirectory: process.env.CLAN_WARS_OUTBOX_DIR || require("path").join(__dirname, "data", "clan-wars-outbox"),
+        findRoom: (name) => rooms.get(name), createRoom: ensureRoom,
+        deleteRoom: (room) => deleteEmptyRoom(room, "war-terminal"),
+        post: async (body) => {
+          const response = await fetchWithTimeout(`${API_BASE_URL}/battle/clan-wars`, {
+            method: "POST", headers: { "content-type": "application/json", "x-battle-token": API_TOKEN }, body: JSON.stringify(body),
+          }, 4000);
+          if (!response?.ok) throw new Error(`clan-wars-http-${response?.status || "unavailable"}`);
+          return response.json();
+        },
+        onStart: (room, elapsedMs) => {
+          clearStandardRoundTimers(room);
+          room.startedAt = Math.max(0, photonNow() - elapsedMs);
+          room.standardRoundSeq += 1;
+          room.standardRoundState = "active";
+          room.standardRoundWinner = 0;
+          for (const player of zombieRoomPlayers(room)) resetStandardPlayerForNextRound(player);
+          sendStandardPayloadToReadyRoom(room, makeStandardNewGameEvent(room));
+        },
+        onFinish: (room, score) => finishStandardRound(room, score[0] === score[1] ? 0 : score[0] > score[1] ? 1 : 2, "clan-war-time-limit"),
+        onStop: (room, reason) => {
+          clearStandardRoundTimers(room);
+          for (const player of zombieRoomPlayers(room)) {
+            clearSessionWeaponReloadTimers(player);
+            clearSessionActiveShotLedgers(player);
+            clearSessionImpactTimers(player);
+            clearSpawnSelfRetryTimers(player);
+            clearPeerSpawnTimers(player);
+          }
+          room.standardRoundState = "pause";
+          room.startedAt = photonNow();
+          const source = standardReadyPlayers(room)[0];
+          if (source) sendStandardPayloadToReadyRoom(room, makeScoreUpdateEvent(source));
+          sendStandardPayloadToReadyRoom(room, makeStandardTimeOverEvent(room));
+          console.log(`[clan-wars] technical-stop room=${room.name} reason=${reason}`);
+        },
+      });
+      clanWarsBattle.start();
+      console.log(`[clan-wars] enabled server=${clanWarsBattle.identity.serverId} endpoint=${warHost}:${warPort} maps=${verifiedMaps.join(",")}`);
+    } catch (error) { console.error(`[clan-wars] disabled initialization-failed error=${error.message}`); }
+  }
+}
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
