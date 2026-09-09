@@ -7,7 +7,7 @@ import { URL, fileURLToPath } from "node:url";
 import { createAdminLogsApi } from "./admin-logs/admin-api.js";
 import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
-import { createClanWars } from "./clan-wars.js";
+import { createClanWars, WAR_MAPS } from "./clan-wars.js";
 import {
   executeBattleStaffAction,
   legacyPermissionPayload,
@@ -23,7 +23,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-09-clan-wars-v112";
+const API_BUILD_ID = "railway-api-2026-09-09-clan-wars-v113";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
@@ -1957,13 +1957,20 @@ function saveStore(store) {
 }
 
 let pgPool = null;
-const clanWarPort = Number(process.env.CLAN_WARS_PORT || 5055);
 const clanWarHost = String(process.env.CLAN_WARS_HOST || BATTLE_HOST).trim();
-const clanWarPorts = String(process.env.CLIENT_BATTLE_PORTS || process.env.BATTLE_PORTS || "5055,5056,5255").split(",").map(Number);
+const clanWarMasterPorts = new Set([Number(process.env.GAME_MASTER_PORT || 5058),
+  ...String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057").split(",").map(Number)]);
+const clanWarPorts = String(process.env.CLIENT_BATTLE_PORTS || process.env.BATTLE_PORTS || "5055,5056,5255")
+  .split(",").map(Number).filter(port => Number.isInteger(port) && port > 0 && port <= 65535 && !clanWarMasterPorts.has(port));
+const clanWarPort = Number(process.env.CLAN_WARS_PORT || clanWarPorts[0]);
+// One public switch. Optional legacy overrides remain available for operators.
+const clanWarMaps = process.env.CLAN_WARS_VERIFIED_MAPS === undefined
+  ? WAR_MAPS.map(map => map.id)
+  : String(process.env.CLAN_WARS_VERIFIED_MAPS).split(",").map(value => value.trim());
 const clanWars = createClanWars({
   getPool: () => pgPool,
   enabled: process.env.CLAN_WARS_ENABLED === "1",
-  verifiedMaps: String(process.env.CLAN_WARS_VERIFIED_MAPS || "").split(",").map(value => value.trim()),
+  verifiedMaps: clanWarMaps,
   endpoint: clanWarHost === BATTLE_HOST && clanWarPorts.includes(clanWarPort) && Number.isInteger(clanWarPort)
     ? { serverId: process.env.CLAN_WARS_SERVER_ID || "clan-wars-1", host: clanWarHost, port: clanWarPort } : null
 });
