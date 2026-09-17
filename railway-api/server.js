@@ -24,8 +24,9 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-09-clan-contract-quests-v114";
+const API_BUILD_ID = "railway-api-2026-09-17-batch-account-links-v115";
 const CREATE_CODE = process.env.CREATE_CODE || "";
+const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
 const API_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -1914,20 +1915,33 @@ function newAccountKey(id) {
   return `${DEFAULT_KEY}-${id}-${crypto.randomUUID()}`.slice(0, 128);
 }
 
-async function createNewAccount(name) {
-  const id = nextAccountId();
-  const account = starterAccount(name, id, newAccountKey(id));
-  account.namePending = true;
-  store.accounts[String(id)] = account;
-  await saveStore(store);
-  if (pgPool) {
-    const saved = await loadPostgresAccount(id);
-    if (!saved || saved.key !== account.key) {
-      throw new Error(`created account ${id} was not saved to postgres`);
-    }
-    store.accounts[String(id)] = saved;
+async function createNewAccounts(name, count) {
+  const total = Number(count);
+  if (!Number.isSafeInteger(total) || total < 1 || total > CREATE_BATCH_MAX) {
+    throw new RangeError(`account batch size must be between 1 and ${CREATE_BATCH_MAX}`);
   }
-  return account;
+
+  const accounts = [];
+  try {
+    // Allocate the whole batch synchronously so concurrent HTTP requests cannot
+    // receive the same IDs. Persist once: saveStore writes one atomic Postgres
+    // snapshot instead of rewriting it for every generated tester account.
+    for (let index = 0; index < total; index += 1) {
+      const id = nextAccountId();
+      const account = starterAccount(name, id, newAccountKey(id));
+      account.namePending = true;
+      store.accounts[String(id)] = account;
+      accounts.push(account);
+    }
+
+    await saveStore(store);
+    return accounts;
+  } catch (error) {
+    for (const account of accounts) {
+      delete store.accounts[String(account.id)];
+    }
+    throw error;
+  }
 }
 
 function ensureStoreDir() {
@@ -12788,7 +12802,9 @@ function sendHtml(res, html, status = 200, headers = {}) {
 
 async function createAccountPage(url, requestOrigin = null) {
   const code = url.searchParams.get("code") || "";
+  const submitted = url.searchParams.has("name") || url.searchParams.has("count");
   const name = cleanName(url.searchParams.get("name") || "");
+  const requestedCount = Number(url.searchParams.get("count") || 1);
   if (code && !safeTokenEquals(code, CREATE_CODE)) {
     return {
       status: 403,
@@ -12796,40 +12812,59 @@ async function createAccountPage(url, requestOrigin = null) {
     };
   }
 
-  if (safeTokenEquals(code, CREATE_CODE) && name) {
-    let account;
-    try {
-      account = await createNewAccount(name);
-    } catch (error) {
-      console.error("[game-link] create failed", error);
+  if (safeTokenEquals(code, CREATE_CODE) && submitted) {
+    if (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > CREATE_BATCH_MAX) {
       return {
-        status: 500,
-        html: "<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d</h1><p>\u0417\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u0430\u0437\u0443 \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043b\u043e\u0433 API.</p>"
+        status: 400,
+        html: `<h1>\u041d\u0435\u0432\u0435\u0440\u043d\u043e\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e</h1><p>\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0446\u0435\u043b\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442 1 \u0434\u043e ${CREATE_BATCH_MAX}.</p>`
       };
     }
-    const session = sessionPayload(account, requestOrigin);
-    console.log(`[game-link] create player=${account.id} name=${account.name} link=${session.loginLink}`);
+
+    let accounts;
+    try {
+      accounts = await createNewAccounts(name, requestedCount);
+    } catch (error) {
+      console.error(`[game-link] batch create failed count=${requestedCount}`, error);
+      return {
+        status: 500,
+        html: "<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442\u044b \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u044b</h1><p>\u041f\u0430\u043a\u0435\u0442\u043d\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u0430\u0437\u0443 \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043b\u043e\u0433 API.</p>"
+      };
+    }
+
+    const created = accounts.map((account) => ({
+      account,
+      session: sessionPayload(account, requestOrigin)
+    }));
+    const firstId = accounts[0]?.id || 0;
+    const lastId = accounts[accounts.length - 1]?.id || 0;
+    console.log(`[game-link] batch created count=${accounts.length} ids=${firstId}-${lastId}`);
+    const links = created.map(({ session }) => session.loginLink).join("\n");
+    const rows = created.map(({ account, session }, index) =>
+      `<li><b>${index + 1}. #${account.id}</b> \u2014 <a href="${escapeHtml(session.loginLink)}">${escapeHtml(session.loginLink)}</a></li>`
+    ).join("\n");
     return {
       status: 200,
-      html: `<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0441\u043e\u0437\u0434\u0430\u043d</h1>
-<p>\u041d\u0438\u043a: <b>${escapeHtml(account.name)}</b></p>
-<p>\u0421\u0442\u0430\u0440\u0442: \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${account.level}, \u043c\u043e\u043d\u0435\u0442\u044b ${account.money}, \u043e\u043f\u044b\u0442 ${account.exp}</p>
-<p>\u0418\u0433\u0440\u043e\u0432\u0430\u044f \u0441\u0441\u044b\u043b\u043a\u0430:</p>
-<p><code>${escapeHtml(session.loginLink)}</code></p>
-<p>SessionAuth:</p>
-<p><code>${escapeHtml(session.sessionAuth)}</code></p>
-<p>\u0412 \u043a\u043b\u0438\u0435\u043d\u0442\u0435 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0432\u0445\u043e\u0434 \u0447\u0435\u0440\u0435\u0437 \u043f\u043e\u043b\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443, \u0432\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u044d\u0442\u0443 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 "\u0412\u043e\u0439\u0442\u0438".</p>`
+      html: `<main style="font:16px/1.45 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 20px">
+<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u043e \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432: ${accounts.length}</h1>
+<p>\u0412\u0441\u0435 \u0438\u0433\u0440\u043e\u0432\u044b\u0435 \u0441\u0441\u044b\u043b\u043a\u0438 \u043f\u043e \u043e\u0434\u043d\u043e\u0439 \u043d\u0430 \u0441\u0442\u0440\u043e\u043a\u0435. \u041a\u043b\u0438\u043a\u043d\u0438\u0442\u0435 \u0432 \u043f\u043e\u043b\u0435, \u043d\u0430\u0436\u043c\u0438\u0442\u0435 Ctrl+A, \u0437\u0430\u0442\u0435\u043c Ctrl+C.</p>
+<textarea readonly rows="${Math.min(30, Math.max(4, accounts.length))}" style="box-sizing:border-box;width:100%;font:13px/1.5 ui-monospace,monospace;padding:12px">${escapeHtml(links)}</textarea>
+<ol style="padding-left:24px;overflow-wrap:anywhere">${rows}</ol>
+<p><a href="/create?code=${encodeURIComponent(code)}">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0435\u0449\u0451 \u043e\u0434\u0438\u043d \u043f\u0430\u043a\u0435\u0442</a></p>
+</main>`
     };
   }
 
   return {
     status: 200,
-    html: `<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430 Contra City</h1>
+    html: `<main style="font:16px/1.45 system-ui,sans-serif;max-width:680px;margin:32px auto;padding:0 20px">
+<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432 Contra City</h1>
 <form method="GET" action="/create">
-  <label>\u041a\u043e\u0434<br><input name="code" value="${escapeHtml(code)}" style="width:320px"></label><br><br>
-  <label>\u041d\u0438\u043a<br><input name="name" value="ContraCity" maxlength="24" style="width:320px"></label><br><br>
-  <button type="submit">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0430\u043a\u043a\u0430\u0443\u043d\u0442</button>
-</form>`
+  <label>\u041a\u043e\u0434<br><input name="code" value="${escapeHtml(code)}" required style="box-sizing:border-box;width:100%;padding:8px"></label><br><br>
+  <label>\u0421\u0442\u0430\u0440\u0442\u043e\u0432\u044b\u0439 \u043d\u0438\u043a<br><input name="name" value="ContraCity" maxlength="24" required style="box-sizing:border-box;width:100%;padding:8px"></label><br><br>
+  <label>\u0421\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0441\u044b\u043b\u043e\u043a \u0441\u043e\u0437\u0434\u0430\u0442\u044c (1\u2013${CREATE_BATCH_MAX})<br><input type="number" name="count" value="1" min="1" max="${CREATE_BATCH_MAX}" step="1" required style="box-sizing:border-box;width:100%;padding:8px"></label><br><br>
+  <button type="submit" style="padding:10px 18px">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0441\u0441\u044b\u043b\u043a\u0438</button>
+</form>
+</main>`
   };
 }
 
