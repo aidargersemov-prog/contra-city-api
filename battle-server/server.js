@@ -2989,8 +2989,8 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
   [14, ENHANCER_TYPE.ANTI_BIOHAZARD],
 ]);
 //life - дальность полета ; velocity - скорость granadelauncher , граната лаунчер, ворчун, гранатин
-const ARCING_LAUNCHER_VELOCITY = 4;
-const ARCING_LAUNCHER_LIFE = 1000;
+const ARCING_LAUNCHER_VELOCITY = 7;
+const ARCING_LAUNCHER_LIFE = 1300;
 const ARCING_LAUNCHER_DISTANCE = 10;
 
 const WEAPON_STAT_OVERRIDES = {
