@@ -25,7 +25,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-09-clan-contracts-v317";
+const BUILD_ID = "battle-server-2026-09-18-actor-wears-infection-feedback-v318";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -5056,12 +5056,9 @@ function mandatoryLoadoutActorCandidates(incomingActor, profile, sharedOptions =
     { label: "full", options: { weaponSlotLimit: maxSlots, logCompact: false } },
     { label: "no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false } },
     { label: "no-weapon-extra-no-actor-optional", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
-    { label: "no-wears", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false } },
-    { label: "no-wears-no-weapon-extra", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false } },
-    { label: "no-wears-no-weapon-extra-no-enhancers", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeWeaponAdditional: false, includeEnhancers: false } },
-    { label: "required-actor", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeEnhancers: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
-    { label: "required-actor-no-taunts", options: { weaponSlotLimit: maxSlots, logCompact: false, includeWears: false, includeEnhancers: false, includeTaunts: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
-    { label: "required-actor-no-taunts-6slots", options: { weaponSlotLimit: Math.min(6, maxSlots), logCompact: false, includeWears: false, includeEnhancers: false, includeTaunts: false, includeWeaponAdditional: false, includeActorOptionalFields: false } },
+    // Wears (actor[96][30]) and weapon slots are required client state.
+    // Oversized actors use the existing reliable ENet fragmentation below;
+    // dropping wears makes other clients permanently select default clothes.
   ].map((candidate) => ({
     label: candidate.label,
     slotLimit: candidate.options.weaponSlotLimit,
@@ -9409,6 +9406,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
   let shotCrit = false;
   const summaries = [];
   const stats = { shots: 1, hits: 0, playerTargets: 0, headHits: 0, nutsHits: 0, kills: 0 };
+  const infectionShot = isZombiePlayerSession(session) && Number(weaponType) === 1;
 
   if (shouldForceExplicitProjectileLaunchMode(data, weaponType, launchMode)) {
     replacements.set(16, rawByte(LAUNCH_MODE.LAUNCH));
@@ -9418,6 +9416,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
     const damageState = shotDamageState(session, weaponType, state);
     if (!damageState) {
       summaries.push("damage-state=missing");
+      if (infectionShot) replacements.set(86, rawTypedArray(0x68, []));
     } else {
       const targetBodies = damageTargetItems.map((target, index) => {
         const damage = applyShotDamageToTarget(session, data, damageState, weaponType, launchMode, target, index);
@@ -9439,6 +9438,9 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
         }
         if (damage.killed) stats.kills += 1;
         summaries.push(damage.summary);
+        // Infection advances a hit counter instead of subtracting HP. Keep
+        // accepted zero-damage targets, but do not echo rejected targets as hits.
+        if (infectionShot && !damage.hit) return null;
         return hashtableBodyWithReplacements(target, new Map([
           [92, rawDamageShort(damage.healthDamage)],
           [93, rawDamageShort(damage.energyDamage)],
@@ -9456,7 +9458,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
           summaries.push(`kamikaze:${deadSession.actorId}=${kamikaze.impactEvents.length}/${kamikaze.killEvents.length}`);
         }
       }
-      replacements.set(86, rawTypedArray(0x68, targetBodies));
+      replacements.set(86, rawTypedArray(0x68, targetBodies.filter((target) => target !== null)));
       if (recoveredMeleeTargetBodies) {
         summaries.unshift(`melee-segment-recovered=${recoveredMeleeTargetBodies.length}`);
       }
