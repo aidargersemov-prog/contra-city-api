@@ -7,9 +7,11 @@ const crypto = require("crypto");
 
 const MAPS = Object.freeze(["Arena_3lvl", "ArenaRing", "Bit_map", "LegoTurnament", "Inferno"]);
 const TERMINAL = new Set(["completed", "cancelled", "forfeit"]);
+const DURATIONS = new Set([10, 15, 20]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const timestamp = (value) => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0;
 const integer = (value) => Math.max(0, Math.trunc(Number(value) || 0));
+const teamSize = (war) => Number.isInteger(war?.teamSize) && war.teamSize >= 2 && war.teamSize <= 7 ? war.teamSize : 5;
 
 class ResultOutbox {
   constructor(directory, io = fs) {
@@ -68,17 +70,18 @@ function createClanWarsBattle(options) {
   const serviceNow = () => now() + serverOffset;
 
   function roster(war) {
+    const size = teamSize(war);
     const result = new Map();
     for (const [index, side] of [war.challenger, war.defender].entries()) {
       const players = (side?.players || []).filter((player) => ["accepted", "ineligible"].includes(player.status));
-      if (players.length !== 5) return null;
+      if (players.length !== size) return null;
       for (const player of players) {
         const id = Number(player.playerId);
         if (!Number.isInteger(id) || id <= 0 || result.has(id)) return null;
         result.set(id, { team: index + 1, clanId: Number(side.clanId), eligible: player.status === "accepted" });
       }
     }
-    return result.size === 10 ? result : null;
+    return result.size === size * 2 ? result : null;
   }
 
   function snapshot(room, session) {
@@ -179,21 +182,22 @@ function createClanWarsBattle(options) {
     const fixedRoster = roster(war);
     if (!fixedRoster) return null;
     const duration = Number(war.durationMinutes);
-    if (!Number.isInteger(duration) || duration < 10 || duration > 15) return null;
+    if (!DURATIONS.has(duration)) return null;
+    const size = teamSize(war);
     let record = existing;
     if (!record) {
       if (options.findRoom(war.roomName)) return null;
-      const room = options.createRoom({ name: war.roomName, map: war.map, mode: 2, maxUsers: 10, friendlyFire: false, timeLimit: duration, fragLimit: 1000, lvlMin: 1, lvlMax: 99, hasFullSettings: true });
-      record = { war, room, roster: fixedRoster, ledger: new Map(), leaseUntil: 0, started: false, stopped: false, finished: false, terminal: false };
+      const room = options.createRoom({ name: war.roomName, map: war.map, mode: 2, maxUsers: size * 2, friendlyFire: false, timeLimit: duration, fragLimit: 1000, lvlMin: 1, lvlMax: 99, hasFullSettings: true });
+      record = { war, room, roster: fixedRoster, teamSize: size, ledger: new Map(), leaseUntil: 0, started: false, stopped: false, finished: false, terminal: false };
       room.clanWar = record;
       room.standardRoundState = "pause";
       records.set(String(war.id), record);
-      log(`[clan-wars] reserved war=${war.id} attempt=${war.attemptId} room=${war.roomName}`);
+      log(`[clan-wars] reserved war=${war.id} attempt=${war.attemptId} room=${war.roomName} format=${size}x${size} duration=${duration}`);
     }
     if (record.stopped || record.finished) return record;
     // Roster is immutable after assignment: a differing reply is not permission.
     const identities = (value) => JSON.stringify(Array.from(value, ([id, entry]) => [id, entry.team, entry.clanId]));
-    if (identities(record.roster) !== identities(fixedRoster)) { stop(record, "roster-changed-after-assignment"); return record; }
+    if (record.teamSize !== size || identities(record.roster) !== identities(fixedRoster)) { stop(record, "roster-changed-after-assignment"); return record; }
     record.roster = fixedRoster;
     record.war = war;
     const lease = Math.min(30000, Math.max(0, Number(leaseSeconds || 30) * 1000));
@@ -246,7 +250,7 @@ function createClanWarsBattle(options) {
             return;
           }
           accept(heartbeat.war, heartbeat.leaseSeconds);
-          if (!record.stopped && !record.finished && record.war.status === "gathering" && body.readyPlayerIds.length === 10) {
+          if (!record.stopped && !record.finished && record.war.status === "gathering" && body.readyPlayerIds.length === record.teamSize * 2) {
             const start = await request("start", body);
             if (start?.ok) accept(start.war, start.leaseSeconds);
           }
