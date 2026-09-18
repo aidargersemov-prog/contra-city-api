@@ -25,7 +25,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-18-actor-wears-infection-feedback-v318";
+const BUILD_ID = "battle-server-2026-09-18-armor-overflow-decay-v319";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -644,6 +644,8 @@ const ITEM_TYPES = {
   AMMO: 99,
 };
 const ARMOR_PICKUP_CAP = 100;
+const ARMOR_OVERFLOW_DECAY_AMOUNT = 3;
+const ARMOR_OVERFLOW_DECAY_INTERVAL_MS = 1000;
 const SMALL_PICKUP_PERCENT = 50;
 const FULL_PICKUP_PERCENT = 100;
 
@@ -1314,6 +1316,7 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     visibleItemIds: new Set(),
     activeItemShots: new Map(),
     impactTimers: new Map(),
+    armorOverflowDecayTimer: null,
     damageContributors: new Map(),
     kamikazeTriggered: false,
     spawnSeq: 0,
@@ -6477,6 +6480,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   resetSessionWeaponStatesForSpawn(session, wasDead ? "respawn" : reason);
   clearSessionActiveShotLedgers(session);
   clearSessionImpactTimers(session);
+  clearArmorOverflowDecay(session);
   invalidatePeerWeaponConfirm(session.room, session.actorId);
   const maxHealth = sessionMaxHealth(session, stats);
   session.health = maxHealth;
@@ -6545,6 +6549,53 @@ function makePlayerHealthEnergyEvent(session) {
       { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP))) },
     ]) },
   ]);
+}
+
+function makePlayerEnergyEvent(session) {
+  const stats = sessionRuntimeStats(session);
+  return rawEvent(85, [
+    { key: 254, value: rawInt(session.actorId) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP))) },
+    ]) },
+  ]);
+}
+
+function clearArmorOverflowDecay(session) {
+  if (!session?.armorOverflowDecayTimer) return;
+  clearTimeout(session.armorOverflowDecayTimer);
+  session.armorOverflowDecayTimer = null;
+}
+
+function scheduleArmorOverflowDecay(session) {
+  clearArmorOverflowDecay(session);
+  if (!session?.room || !session.spawned || session.dead || !session.gameStateRequested) return false;
+
+  const stats = sessionRuntimeStats(session);
+  const permanentCap = Math.round(clampNumber(stats.maxEnergy, 0, ARMOR_PICKUP_CAP));
+  const currentEnergy = Math.round(clampNumber(session.energy ?? permanentCap, 0, ARMOR_PICKUP_CAP));
+  if (currentEnergy <= permanentCap) return false;
+
+  const room = session.room;
+  const actorId = session.actorId;
+  const spawnSeq = Number(session.spawnSeq || 0);
+  session.armorOverflowDecayTimer = setTimeout(() => {
+    session.armorOverflowDecayTimer = null;
+    if (session.room !== room || room.players?.get(actorId) !== session) return;
+    if (Number(session.spawnSeq || 0) !== spawnSeq || !session.spawned || session.dead || !session.gameStateRequested) return;
+
+    const liveStats = sessionRuntimeStats(session);
+    const livePermanentCap = Math.round(clampNumber(liveStats.maxEnergy, 0, ARMOR_PICKUP_CAP));
+    const before = Math.round(clampNumber(session.energy ?? livePermanentCap, 0, ARMOR_PICKUP_CAP));
+    if (before <= livePermanentCap) return;
+
+    session.energy = Math.max(livePermanentCap, before - ARMOR_OVERFLOW_DECAY_AMOUNT);
+    const sent = sendReliableToSession(session, makePlayerEnergyEvent(session), session.lastChannel || 0);
+    console.log(`[armor] overflow-decay actor=${actorId} en=${before}->${session.energy}/${livePermanentCap} sent=${sent ? 1 : 0}`);
+    if (session.energy > livePermanentCap) scheduleArmorOverflowDecay(session);
+  }, ARMOR_OVERFLOW_DECAY_INTERVAL_MS);
+  if (typeof session.armorOverflowDecayTimer.unref === "function") session.armorOverflowDecayTimer.unref();
+  return true;
 }
 
 function zombieRoomPlayers(room) {
@@ -6691,6 +6742,7 @@ function resetStandardPlayerForNextRound(playerSession) {
   clearSessionWeaponReloadTimers(playerSession);
   clearSessionActiveShotLedgers(playerSession);
   clearSessionImpactTimers(playerSession);
+  clearArmorOverflowDecay(playerSession);
   clearPeerSpawnTimers(playerSession);
   clearPickupSpawnRepairTimers(playerSession);
   clearSpawnStallRecovery(playerSession);
@@ -6788,6 +6840,7 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
     clearSessionWeaponReloadTimers(playerSession);
     clearSessionActiveShotLedgers(playerSession);
     clearSessionImpactTimers(playerSession);
+    clearArmorOverflowDecay(playerSession);
     clearPeerSpawnTimers(playerSession);
     clearPickupSpawnRepairTimers(playerSession);
     clearSpawnStallRecovery(playerSession);
@@ -6846,6 +6899,7 @@ function resetZombieParticipantForHumanStart(playerSession) {
   const stats = sessionRuntimeStats(playerSession);
   playerSession.health = stats.maxHealth;
   playerSession.energy = stats.maxEnergy;
+  clearArmorOverflowDecay(playerSession);
   playerSession.dead = false;
 }
 
@@ -6902,6 +6956,7 @@ function resetZombiePlayerForNextRound(playerSession) {
   clearSessionWeaponReloadTimers(playerSession);
   clearSessionActiveShotLedgers(playerSession);
   clearSessionImpactTimers(playerSession);
+  clearArmorOverflowDecay(playerSession);
   clearPeerSpawnTimers(playerSession);
   clearPickupSpawnRepairTimers(playerSession);
   clearSpawnStallRecovery(playerSession);
@@ -6970,6 +7025,7 @@ function finishZombieRound(room, winnerTeam, reason = "unknown", channel = 0, cu
     clearSessionWeaponReloadTimers(playerSession);
     clearSessionActiveShotLedgers(playerSession);
     clearSessionImpactTimers(playerSession);
+    clearArmorOverflowDecay(playerSession);
     clearPeerSpawnTimers(playerSession);
     clearPickupSpawnRepairTimers(playerSession);
     clearSpawnStallRecovery(playerSession);
@@ -7092,6 +7148,7 @@ function beginZombieMain(room, roundSeq, channel = 0) {
   clearSessionWeaponReloadTimers(bossSession);
   clearSessionActiveShotLedgers(bossSession);
   clearSessionImpactTimers(bossSession);
+  clearArmorOverflowDecay(bossSession);
 
   const modeEvent = makeZombieModeEvent(room.zombieMode);
   const bossEvent = makeZombiePlayerUpdateEvent(bossSession);
@@ -8665,6 +8722,7 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
     const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
     targetSession.energy = targetCurrent.energy - energyDamage;
     targetSession.health = targetCurrent.health - healthDamage;
+    if (targetSession.energy <= targetCurrent.stats.maxEnergy) clearArmorOverflowDecay(targetSession);
     recordDamageContribution(targetSession, deadSession, healthDamage + energyDamage);
     recordContractDamage(deadSession, targetSession, healthDamage);
     result.impactEvents.push(makePlayerImpactEvent(
@@ -8825,6 +8883,7 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   const stats = sessionRuntimeStats(targetSession);
   targetSession.health = sessionMaxHealth(targetSession, stats);
   targetSession.energy = stats.maxEnergy;
+  clearArmorOverflowDecay(targetSession);
   const updateRepairs = queueZombiePlayerUpdateRepair(targetSession, targetSession.lastChannel || shooter.lastChannel || 0, "zombie-infect");
 
   postBattleEvent(targetSession, "death", {
@@ -8945,6 +9004,7 @@ function applyImpactDotDamage(effect, targetSession) {
   const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
+  if (targetSession.energy <= targetCurrent.stats.maxEnergy) clearArmorOverflowDecay(targetSession);
   recordDamageContribution(targetSession, effect.shooter, healthDamage + energyDamage);
   recordContractDamage(effect.shooter, targetSession, healthDamage);
   return {
@@ -9293,6 +9353,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
+  if (targetSession.energy <= targetCurrent.stats.maxEnergy) clearArmorOverflowDecay(targetSession);
   recordDamageContribution(targetSession, shooter, healthDamage + energyDamage);
   recordContractDamage(shooter, targetSession, healthDamage);
 
@@ -9628,11 +9689,13 @@ function takeRoomItem(session, item, reason, context = {}) {
     session.health = currentHealth + pickValue;
     detail = ` hp=${session.health}/${maxHealth} add=${pickValue}`;
   } else if (item.type === ITEM_TYPES.ARMOR) {
+    const stats = sessionRuntimeStats(session);
     const currentEnergy = clampNumber(numberOr(session.energy, 0), 0, ARMOR_PICKUP_CAP);
     const amount = Math.floor(ARMOR_PICKUP_CAP * pickupPercent(item) / 100);
     pickValue = Math.min(Math.max(0, ARMOR_PICKUP_CAP - currentEnergy), amount);
     session.energy = currentEnergy + pickValue;
-    detail = ` en=${session.energy}/${ARMOR_PICKUP_CAP} add=${pickValue}`;
+    const decayScheduled = scheduleArmorOverflowDecay(session);
+    detail = ` en=${session.energy}/${ARMOR_PICKUP_CAP} permanent=${stats.maxEnergy} add=${pickValue} decay=${decayScheduled ? `${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms` : "off"}`;
   }
 
   const positionDetail = Number.isFinite(context.distance)
@@ -10378,6 +10441,7 @@ function resetSessionRoomProgress(session) {
   clearJoinRoomTimers(session);
   clearSessionWeaponReloadTimers(session);
   clearSessionImpactTimers(session);
+  clearArmorOverflowDecay(session);
   session.gameStateRequested = false;
   session.lastGameStateResponseAt = 0;
   session.knownActorIds = new Set();
@@ -10552,6 +10616,7 @@ function resetTransportForReconnect(session, reason) {
   session.peerWeaponConfirmKeys = new Map();
   clearSessionActiveShotLedgers(session);
   clearSessionImpactTimers(session);
+  clearArmorOverflowDecay(session);
   session.health = playerRuntimeStats(null).maxHealth;
   session.energy = playerRuntimeStats(null).maxEnergy;
   session.dead = false;
@@ -13815,6 +13880,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.peerWeaponConfirmKeys = new Map();
     clearSessionActiveShotLedgers(session);
     clearSessionImpactTimers(session);
+    clearArmorOverflowDecay(session);
     session.dead = staffSpectator;
     session.kills = 0;
     session.deaths = 0;
@@ -14451,7 +14517,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
 console.log(`[config] enhancers active=${Array.from(PASSIVE_BATTLE_ENHANCER_IDS).join(",")} clientVisible=${Array.from(CLIENT_VISIBLE_ENHANCER_IDS).join(",")} expAssist=${BATTLE_EXP_PER_ASSIST} expFlag=${BATTLE_EXP_PER_FLAG} expControl=${BATTLE_EXP_PER_CONTROL_POINT} kamikaze=${ENHANCER_KAMIKAZE_DAMAGE}@${ENHANCER_KAMIKAZE_FULL_RADIUS}/${ENHANCER_KAMIKAZE_ZERO_RADIUS}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
 console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms outbox=${UDP_OUTBOX_FLUSH_MS}ms/${UDP_OUTBOX_MAX_COMMANDS}cmd/${UDP_OUTBOX_MAX_BYTES}bytes packetMax=${MAX_UDP_PACKET_BYTES} atomicProfileJoin=required`);
@@ -14503,6 +14569,7 @@ if (process.env.CLAN_WARS_ENABLED === "1") {
             clearSessionWeaponReloadTimers(player);
             clearSessionActiveShotLedgers(player);
             clearSessionImpactTimers(player);
+            clearArmorOverflowDecay(player);
             clearSpawnSelfRetryTimers(player);
             clearPeerSpawnTimers(player);
           }
