@@ -2,6 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 
 const MINUTE = 60000;
 const TERMINAL = new Set(['completed', 'cancelled', 'forfeit']);
+const WAR_DURATIONS = new Set([10, 15, 20]);
+const MIN_TEAM_SIZE = 2;
+const MAX_TEAM_SIZE = 7;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const WAR_MAPS = Object.freeze([
   { id: 'Arena_3lvl', name: 'Ангар, задний двор' }, { id: 'ArenaRing', name: 'Форпост' },
@@ -12,14 +15,16 @@ const iso = value => new Date(value).toISOString();
 const time = value => Date.parse(value);
 const clone = value => JSON.parse(JSON.stringify(value));
 const active = side => side.players.filter(p => !['replaced', 'ineligible'].includes(p.status));
-const accepted = side => active(side).length === 5 && active(side).every(p => p.status === 'accepted');
+const validTeamSize = value => Number.isInteger(value) && value >= MIN_TEAM_SIZE && value <= MAX_TEAM_SIZE;
+const warTeamSize = war => validTeamSize(war?.teamSize) ? war.teamSize : 5;
+const accepted = (side, war) => active(side).length === warTeamSize(war) && active(side).every(p => p.status === 'accepted');
 const ids = war => [war.challenger.clanId, war.defender.clanId];
 const sides = war => [war.challenger, war.defender];
 const MESSAGES = Object.freeze({
   clan_wars_disabled: 'Клановые войны отключены', invalid_opponent: 'Выберите другой существующий клан',
-  map_not_verified: 'Эта карта ещё не допущена к клановым войнам', invalid_duration: 'Продолжительность: от 10 до 15 минут',
+  map_not_verified: 'Эта карта ещё не допущена к клановым войнам', invalid_duration: 'Продолжительность: 10, 15 или 20 минут',
   invalid_utc_time: 'Некорректное время войны', invalid_schedule: 'Назначьте войну от часа до семи дней вперёд',
-  five_unique_players_required: 'Выберите ровно пять разных участников', owner_required: 'Действие доступно только главе клана',
+  invalid_team_size: 'Размер состава: от 2 до 7 игроков', team_size_players_required: 'Выберите указанное количество разных участников', owner_required: 'Действие доступно только главе клана',
   player_not_in_clan: 'Игрок больше не состоит в этом клане', clan_required: 'Для вызова нужно состоять в клане',
   clan_schedule_overlap: 'У одного из кланов уже назначена война на это время', player_schedule_overlap: 'Участник занят в другой войне',
   revision_conflict: 'Состав или состояние изменились. Обновите данные и повторите действие',
@@ -40,22 +45,25 @@ const fingerprint = value => createHash('sha256').update(JSON.stringify(stable(v
 const publicWar = war => { const copy = clone(war); delete copy.server; return copy; };
 export function overlaps(a, b) {
   // Reserve the maximum round even when the selected match is only 10m:
-  // gathering 5m + countdown 5s + round 15m + post-match buffer 5m.
-  const reservedAfterStart = 25 * MINUTE + 5000;
+  // gathering 5m + countdown 5s + round 20m + post-match buffer 5m.
+  const reservedAfterStart = 30 * MINUTE + 5000;
   return time(a.lockAt) < time(b.scheduledAt) + reservedAfterStart &&
     time(b.lockAt) < time(a.scheduledAt) + reservedAfterStart;
 }
 export function validateCreate(data, now, maps) {
+  const requestedTeamSize = data.teamSize === undefined ? 5 : data.teamSize;
   assert(Number.isSafeInteger(data.opponentClanId) && data.opponentClanId > 0, 'invalid_opponent');
   assert(maps.some(m => m.id === data.map), 'map_not_verified');
-  assert(Number.isInteger(data.durationMinutes) && data.durationMinutes >= 10 && data.durationMinutes <= 15, 'invalid_duration');
+  assert(WAR_DURATIONS.has(data.durationMinutes), 'invalid_duration');
+  assert(validTeamSize(requestedTeamSize), 'invalid_team_size');
   const scheduled = time(data.scheduledAt);
   assert(Number.isFinite(scheduled) && /Z$/.test(data.scheduledAt), 'invalid_utc_time');
   assert(scheduled >= now + 60 * MINUTE && scheduled <= now + 7 * 24 * 60 * MINUTE, 'invalid_schedule');
-  validateRoster(data.playerIds);
+  validateRoster(data.playerIds, requestedTeamSize);
 }
-function validateRoster(list) {
-  assert(Array.isArray(list) && list.length === 5 && new Set(list).size === 5 && list.every(n => Number.isSafeInteger(n) && n > 0), 'five_unique_players_required');
+function validateRoster(list, size) {
+  assert(validTeamSize(size), 'invalid_team_size');
+  assert(Array.isArray(list) && list.length === size && new Set(list).size === size && list.every(n => Number.isSafeInteger(n) && n > 0), 'team_size_players_required');
 }
 
 /** All decisions use a PostgreSQL clock and a single short transaction lock.
@@ -101,8 +109,8 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
   function owner(ctx, pid, cid) {
     assert(ctx.clans.some(c => Number(c.id) === cid && Number(c.owner_player_id) === pid) && memberOf(ctx, pid, cid), 'owner_required');
   }
-  function roster(ctx, cid, list) {
-    validateRoster(list);
+  function roster(ctx, cid, list, size) {
+    validateRoster(list, size);
     return list.map(pid => {
       const m = ctx.members.find(m => Number(m.clan_id) === cid && Number(m.player_id) === pid);
       assert(m, 'player_not_in_clan');
@@ -132,14 +140,14 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
             if (!memberOf(ctx, p.playerId, side.clanId)) { p.status = 'ineligible'; p.ready = false; p.presence = p.presence && p.presence !== 'offline' ? 'disconnected' : 'offline'; }
           }
           if (ctx.now >= time(war.lockAt) && !['locked', 'gathering'].includes(war.status)) {
-            if (war.status === 'scheduled' && sides(war).every(accepted)) war.status = 'locked';
+            if (war.status === 'scheduled' && sides(war).every(side => accepted(side, war))) war.status = 'locked';
             else terminal(war, 'cancelled', 'rosters_not_confirmed', ctx.now);
           }
           if (war.status === 'locked' && ctx.now >= time(war.scheduledAt)) war.status = 'gathering';
           if (war.status === 'gathering' && ctx.now >= time(war.gatherUntil)) {
             if (!war.server || ctx.now > time(war.server.leaseUntil)) terminal(war, 'cancelled', 'infrastructure_unavailable', ctx.now);
             else {
-              const ready = sides(war).map(s => accepted(s) && active(s).every(p => p.ready));
+              const ready = sides(war).map(s => accepted(s, war) && active(s).every(p => p.ready));
               terminal(war, ready[0] !== ready[1] ? 'forfeit' : 'cancelled', ready[0] !== ready[1] ? 'team_no_show' : 'gathering_expired', ctx.now);
               if (ready[0] !== ready[1]) war.winnerClanId = ready[0] ? war.challenger.clanId : war.defender.clanId;
             }
@@ -220,8 +228,8 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
           const side = c => ({ clanId: Number(c.id), name: c.name, tag: c.tag, players: [] });
           war = { id: randomUUID(), revision: 0, status: 'preparing', map: data.map, scheduledAt: iso(time(data.scheduledAt)),
             lockAt: iso(time(data.scheduledAt) - 10 * MINUTE), gatherUntil: iso(time(data.scheduledAt) + 5 * MINUTE),
-            durationMinutes: data.durationMinutes, challenger: side(own), defender: side(other), score: [0, 0], ratingDelta: 0, rated: false };
-          war.challenger.players = roster(ctx, war.challenger.clanId, data.playerIds);
+            durationMinutes: data.durationMinutes, teamSize: data.teamSize === undefined ? 5 : data.teamSize, challenger: side(own), defender: side(other), score: [0, 0], ratingDelta: 0, rated: false };
+          war.challenger.players = roster(ctx, war.challenger.clanId, data.playerIds, warTeamSize(war));
           checkOverlap(ctx, war); ctx.wars.push(war);
         } else {
           assert(UUID.test(data.warId || ''), 'invalid_war_id');
@@ -242,7 +250,7 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
               owner(ctx, pid, side.clanId);
               if (action === 'accept') {
                 assert(side === war.defender && war.status === 'challenged', 'challenge_not_pending');
-                war.defender.players = roster(ctx, side.clanId, data.playerIds); war.status = 'assembling';
+                war.defender.players = roster(ctx, side.clanId, data.playerIds, warTeamSize(war)); war.status = 'assembling';
               } else if (action === 'decline') {
                 assert(side === war.defender && war.status === 'challenged', 'challenge_not_pending');
                 terminal(war, 'cancelled', 'challenge_declined', ctx.now);
@@ -257,8 +265,8 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
                 if (war.status === 'scheduled') war.status = 'assembling';
               }
             }
-            if (war.status === 'preparing' && accepted(war.challenger)) war.status = 'challenged';
-            if (war.status === 'assembling' && sides(war).every(accepted)) war.status = 'scheduled';
+            if (war.status === 'preparing' && accepted(war.challenger, war)) war.status = 'challenged';
+            if (war.status === 'assembling' && sides(war).every(side => accepted(side, war))) war.status = 'scheduled';
             if (!TERMINAL.has(war.status)) checkOverlap(ctx, war);
           }
         }
@@ -320,14 +328,15 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
         if (body.action === 'result') return finish(ctx, war, body);
         if (TERMINAL.has(war.status)) return { ok: false, error: 'war_terminal', war: clone(war) };
         assert(ctx.now < time(war.server.leaseUntil), 'lease_expired');
-        assert(Array.isArray(body.readyPlayerIds) && body.readyPlayerIds.length <= 10 && body.readyPlayerIds.every(Number.isSafeInteger), 'invalid_ready_players');
+        const maximumPlayers = warTeamSize(war) * 2;
+        assert(Array.isArray(body.readyPlayerIds) && body.readyPlayerIds.length <= maximumPlayers && body.readyPlayerIds.every(Number.isSafeInteger), 'invalid_ready_players');
         // A member can become ineligible between two heartbeats. Accept that
         // known actor ID but clear readiness below, so battle receives the new
         // admission list instead of losing its lease to a stale readiness list.
         const allowed = sides(war).flatMap(s => s.players.filter(p => p.status !== 'replaced').map(p => p.playerId));
         assert(body.readyPlayerIds.every(id => allowed.includes(id)), 'invalid_ready_players');
         const connected = body.connectedPlayerIds === undefined ? body.readyPlayerIds : body.connectedPlayerIds;
-        assert(Array.isArray(connected) && connected.length <= 10 && connected.every(id => Number.isSafeInteger(id) && allowed.includes(id)), 'invalid_connected_players');
+        assert(Array.isArray(connected) && connected.length <= maximumPlayers && connected.every(id => Number.isSafeInteger(id) && allowed.includes(id)), 'invalid_connected_players');
         assert(body.readyPlayerIds.every(id => connected.includes(id)), 'ready_player_not_connected');
         war.server.leaseUntil = iso(ctx.now + 30000);
         sides(war).forEach(s => s.players.forEach(p => {
@@ -338,7 +347,7 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
         }));
         if (body.action === 'start' && war.status !== 'running') {
           assert(war.status === 'gathering' && ctx.now < time(war.gatherUntil), 'not_gathering');
-          assert(sides(war).every(s => accepted(s) && active(s).every(p => p.ready)), 'ten_loaded_players_required');
+          assert(sides(war).every(s => accepted(s, war) && active(s).every(p => p.ready)), 'full_lineups_required');
           war.status = 'running'; war.startAt = iso(ctx.now + 5000); war.endAt = iso(ctx.now + 5000 + war.durationMinutes * MINUTE);
         }
         if (war.status === 'running' && body.score !== undefined) {

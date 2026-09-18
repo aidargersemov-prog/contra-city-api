@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-17-batch-account-links-v115";
+const API_BUILD_ID = "railway-api-2026-09-18-variable-clan-war-teams-v116";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -1124,7 +1124,8 @@ function workshopUpgradeContract(weaponId) {
   const impactType = /тип[а]?\s*[\"«]?огонь|урон\s+от\s+огн|горени|поражения\s+огнем/.test(text) ? "fire"
     : (/тип[а]?\s*[\"«]?кров|кровотеч/.test(text) ? "blood"
       : (/тип[а]?\s*[\"«]?яд|урон\s+от\s+яда/.test(text) ? "poison"
-        : (/замороз|замедлен/.test(text) ? "frost" : "")));
+        : (/замедлен/.test(text) ? "slow"
+          : (/замороз/.test(text) ? "frost" : ""))));
   return {
     text,
     damageShort,
@@ -1159,7 +1160,9 @@ function upgradedWeaponItem(item) {
     sc: timedCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
     workshopImpactType: contract.impactType,
     workshopImpactDamagePercent: contract.impactDamage ? 25 : 0,
-    workshopImpactTicksBonus: contract.impactDuration ? 2 : 0
+    // Slowing is a distinct non-damaging effect.  It has no DoT ticks;
+    // `GL_Milkor` duration is enforced by the battle server at three seconds.
+    workshopImpactTicksBonus: contract.impactDuration && contract.impactType !== "slow" ? 2 : 0
   };
   if (contract.rapidity) upgraded.rap = Math.max(60, scaledStat(base.rap, 0.9, 100));
   if (contract.accuracy) upgraded.dev = Math.max(0, scaledStat(base.dev, 0.9, 0));
