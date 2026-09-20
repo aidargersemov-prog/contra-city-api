@@ -5,6 +5,8 @@ const TERMINAL = new Set(['completed', 'cancelled', 'forfeit']);
 const WAR_DURATIONS = new Set([10, 15, 20]);
 const MIN_TEAM_SIZE = 2;
 const MAX_TEAM_SIZE = 7;
+export const CLAN_WAR_MIN_LEAD_MINUTES = 10;
+export const CLAN_WAR_ROSTER_LOCK_LEAD_MINUTES = 0;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const WAR_MAPS = Object.freeze([
   { id: 'Arena_3lvl', name: 'Ангар, задний двор' }, { id: 'ArenaRing', name: 'Форпост' },
@@ -13,6 +15,14 @@ export const WAR_MAPS = Object.freeze([
 ]);
 const iso = value => new Date(value).toISOString();
 const time = value => Date.parse(value);
+export function clanWarScheduleTimes(scheduledAt) {
+  const scheduled = time(scheduledAt);
+  return {
+    scheduledAt: iso(scheduled),
+    lockAt: iso(scheduled - CLAN_WAR_ROSTER_LOCK_LEAD_MINUTES * MINUTE),
+    gatherUntil: iso(scheduled + 5 * MINUTE)
+  };
+}
 const clone = value => JSON.parse(JSON.stringify(value));
 const active = side => side.players.filter(p => !['replaced', 'ineligible'].includes(p.status));
 const validTeamSize = value => Number.isInteger(value) && value >= MIN_TEAM_SIZE && value <= MAX_TEAM_SIZE;
@@ -23,7 +33,7 @@ const sides = war => [war.challenger, war.defender];
 const MESSAGES = Object.freeze({
   clan_wars_disabled: 'Клановые войны отключены', invalid_opponent: 'Выберите другой существующий клан',
   map_not_verified: 'Эта карта ещё не допущена к клановым войнам', invalid_duration: 'Продолжительность: 10, 15 или 20 минут',
-  invalid_utc_time: 'Некорректное время войны', invalid_schedule: 'Назначьте войну от часа до семи дней вперёд',
+  invalid_utc_time: 'Некорректное время войны', invalid_schedule: 'Назначьте войну от 10 минут до семи дней вперёд',
   invalid_team_size: 'Размер состава: от 2 до 7 игроков', team_size_players_required: 'Выберите указанное количество разных участников', owner_required: 'Действие доступно только главе клана',
   player_not_in_clan: 'Игрок больше не состоит в этом клане', clan_required: 'Для вызова нужно состоять в клане',
   clan_schedule_overlap: 'У одного из кланов уже назначена война на это время', player_schedule_overlap: 'Участник занят в другой войне',
@@ -58,7 +68,7 @@ export function validateCreate(data, now, maps) {
   assert(validTeamSize(requestedTeamSize), 'invalid_team_size');
   const scheduled = time(data.scheduledAt);
   assert(Number.isFinite(scheduled) && /Z$/.test(data.scheduledAt), 'invalid_utc_time');
-  assert(scheduled >= now + 60 * MINUTE && scheduled <= now + 7 * 24 * 60 * MINUTE, 'invalid_schedule');
+  assert(scheduled >= now + CLAN_WAR_MIN_LEAD_MINUTES * MINUTE && scheduled <= now + 7 * 24 * 60 * MINUTE, 'invalid_schedule');
   validateRoster(data.playerIds, requestedTeamSize);
 }
 function validateRoster(list, size) {
@@ -226,8 +236,8 @@ export function createClanWars({ getPool, enabled = false, verifiedMaps = [], en
           const own = clanFor(ctx, pid); assert(own, 'clan_required'); owner(ctx, pid, Number(own.id));
           const other = ctx.clans.find(c => Number(c.id) === data.opponentClanId); assert(other && Number(other.id) !== Number(own.id), 'invalid_opponent');
           const side = c => ({ clanId: Number(c.id), name: c.name, tag: c.tag, players: [] });
-          war = { id: randomUUID(), revision: 0, status: 'preparing', map: data.map, scheduledAt: iso(time(data.scheduledAt)),
-            lockAt: iso(time(data.scheduledAt) - 10 * MINUTE), gatherUntil: iso(time(data.scheduledAt) + 5 * MINUTE),
+          const schedule = clanWarScheduleTimes(data.scheduledAt);
+          war = { id: randomUUID(), revision: 0, status: 'preparing', map: data.map, ...schedule,
             durationMinutes: data.durationMinutes, teamSize: data.teamSize === undefined ? 5 : data.teamSize, challenger: side(own), defender: side(other), score: [0, 0], ratingDelta: 0, rated: false };
           war.challenger.players = roster(ctx, war.challenger.clanId, data.playerIds, warTeamSize(war));
           checkOverlap(ctx, war); ctx.wars.push(war);

@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-18-variable-clan-war-teams-v116";
+const API_BUILD_ID = "railway-api-2026-09-20-clan-war-ten-minute-schedule-v119";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -1849,11 +1849,11 @@ const maps = [
   mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(13, "Zombi_2", MAP_MODE_DM_ZOMBIE),
   mapEntry(14, "Zombi", MAP_MODE_DM_ZOMBIE),
-  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
+  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CONTROL_POINTS),
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
+  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH | MAP_MODE_ROGUELIKE),
+  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
@@ -7417,6 +7417,7 @@ function clone(value) {
 }
 
 const playerStatKeys = ["k", "d", "s", "hs", "ns", "pt", "w", "l", "dhs", "dns", "do", "re", "mdo", "mre", "sh", "hi"];
+const STATISTIC_RESET_COST = 30;
 
 function statNumber(value, fallback = 0) {
   const number = Number(value);
@@ -8100,6 +8101,108 @@ function statsBlock(account) {
     md: JSON.stringify(gameModeStatItems(account)),
     mad: JSON.stringify(mapStatItems(account))
   };
+}
+
+function isSupportedStatisticResetType(type) {
+  return type === 1 || type === 2;
+}
+
+function applyStatisticResetToAccount(account, type) {
+  if (type === 1) {
+    account.weaponStats = [];
+    return "weapon";
+  }
+  if (type === 2) {
+    account.stats = {};
+    return "common";
+  }
+  return "";
+}
+
+async function resetStatisticPostgres(account, type) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query(
+        "SELECT cckey, money FROM players WHERE id = $1 FOR UPDATE",
+        [Number(account.id)]
+      );
+      const row = player.rows[0];
+      if (!row || row.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const money = Number(row.money || 0);
+      if (money < STATISTIC_RESET_COST) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [2] };
+      }
+
+      const scope = type === 1 ? "weapon" : "common";
+      if (type === 1) {
+        await client.query("DELETE FROM player_weapon_stats WHERE player_id = $1", [Number(account.id)]);
+      } else {
+        await client.query(
+          "UPDATE players SET stats = '{}'::jsonb WHERE id = $1",
+          [Number(account.id)]
+        );
+      }
+
+      const nextMoney = money - STATISTIC_RESET_COST;
+      await client.query(
+        "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+        [Number(account.id), nextMoney]
+      );
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "statistics_reset",
+        category: "statistics",
+        description: scope === "weapon" ? "Сброшена статистика оружия" : "Сброшена общая статистика",
+        oldValue: { balance: money },
+        newValue: { balance: nextMoney, type, scope },
+        metadata: { cost: STATISTIC_RESET_COST, type, scope }
+      });
+      await client.query("COMMIT");
+
+      const fresh = await loadPostgresAccount(account.id);
+      if (fresh) store.accounts[String(fresh.id)] = fresh;
+      account.money = nextMoney;
+      if (type === 1) account.weaponStats = [];
+      else account.stats = {};
+      console.log(`[stats-reset] pg player=${account.id} type=${type} scope=${scope} before=${money} after=${nextMoney}`);
+      return ok({ req: "", vcur: nextMoney });
+    } catch (error) {
+      if (client) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // Preserve the original failure for diagnostics.
+        }
+      }
+      console.error("[postgres] statistics reset failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function resetStatistic(account, url) {
+  const type = Number(url.searchParams.get("t") || 0);
+  if (!isSupportedStatisticResetType(type)) return { result: false, err: [1] };
+  if (pgPool) return resetStatisticPostgres(account, type);
+  if (Number(account.money || 0) < STATISTIC_RESET_COST) return { result: false, err: [2] };
+
+  const money = Number(account.money || 0);
+  const scope = applyStatisticResetToAccount(account, type);
+  account.money = money - STATISTIC_RESET_COST;
+  persist(account);
+  console.log(`[stats-reset] json player=${account.id} type=${type} scope=${scope} before=${money} after=${account.money}`);
+  return ok({ req: "", vcur: account.money });
 }
 
 function usesProfileObjectLoadout(account, url) {
@@ -12714,7 +12817,7 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "league") return await leaguePayload(account);
     if (act === "ybest") return await yesterdayBestPayload(account);
     if (act === "rat") return await ratingPayload(account, url);
-    if (act === "reset") return ok({ req: "" });
+    if (act === "reset") return await resetStatistic(account, url);
   }
 
   if (page === "clan_contracts") {
@@ -12974,6 +13077,20 @@ function tryServeLauncherRelease(req, res, url) {
   }
 
   const stat = fs.statSync(filePath);
+  // update.json is signed byte-for-byte. Some deployment paths append a final
+  // line break to text files, so publish the canonical JSON bytes that the
+  // release signer produced. The signature file itself is trimmed by the
+  // launcher after download and does not need normalization here.
+  let canonicalManifest = null;
+  if (manifestRequest) {
+    canonicalManifest = fs.readFileSync(filePath);
+    let canonicalLength = canonicalManifest.length;
+    while (canonicalLength > 0 && (canonicalManifest[canonicalLength - 1] === 0x0a || canonicalManifest[canonicalLength - 1] === 0x0d)) {
+      canonicalLength -= 1;
+    }
+    canonicalManifest = canonicalManifest.subarray(0, canonicalLength);
+  }
+  const responseSize = canonicalManifest ? canonicalManifest.length : stat.size;
   const headers = {
     ...securityHeaders(),
     "content-type": contentType,
@@ -12985,32 +13102,36 @@ function tryServeLauncherRelease(req, res, url) {
   if (fixedRuntimeMatch) headers["content-disposition"] = `attachment; filename="${fixedRuntimeMatch[2]}"`;
 
   let start = 0;
-  let end = stat.size - 1;
+  let end = responseSize - 1;
   let status = 200;
   const range = String(req.headers.range || "").trim();
   if (range) {
     const match = /^bytes=(\d+)-(\d*)$/.exec(range);
     if (!match) {
-      res.writeHead(416, { ...headers, "content-range": `bytes */${stat.size}`, "content-length": "0" });
+      res.writeHead(416, { ...headers, "content-range": `bytes */${responseSize}`, "content-length": "0" });
       res.end();
       return true;
     }
     start = Number(match[1]);
     end = match[2] ? Number(match[2]) : end;
-    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= stat.size || end < start) {
-      res.writeHead(416, { ...headers, "content-range": `bytes */${stat.size}`, "content-length": "0" });
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= responseSize || end < start) {
+      res.writeHead(416, { ...headers, "content-range": `bytes */${responseSize}`, "content-length": "0" });
       res.end();
       return true;
     }
-    end = Math.min(end, stat.size - 1);
+    end = Math.min(end, responseSize - 1);
     status = 206;
-    headers["content-range"] = `bytes ${start}-${end}/${stat.size}`;
+    headers["content-range"] = `bytes ${start}-${end}/${responseSize}`;
   }
 
   headers["content-length"] = String(end - start + 1);
   res.writeHead(status, headers);
   if (req.method === "HEAD") {
     res.end();
+    return true;
+  }
+  if (canonicalManifest) {
+    res.end(canonicalManifest.subarray(start, end + 1));
     return true;
   }
   fs.createReadStream(filePath, { start, end }).pipe(res);
