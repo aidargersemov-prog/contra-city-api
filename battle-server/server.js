@@ -25,7 +25,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-19-hit-registration-v324";
+const BUILD_ID = "battle-server-2026-09-19-ctf-solo-abuse-guard-v325";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -5293,6 +5293,17 @@ function makeGameStateRaw(session) {
 }
 
 function isCtfRoom(room) { return Number(room?.mode) === MAP_MODE_CAPTURE_THE_FLAG && Boolean(CTF_MAPS[mapKey(room?.map)]?.length); }
+function ctfActiveParticipantCount(room) {
+  if (!room?.players) return 0;
+  let count = 0;
+  for (const playerSession of room.players.values()) {
+    if (!playerSession || playerSession.isGuest || playerSession.transportDisconnected) continue;
+    if (playerSession.room !== room || !playerSession.gameStateRequested) continue;
+    count += 1;
+  }
+  return count;
+}
+function ctfHasMinimumParticipants(room) { return ctfActiveParticipantCount(room) >= 2; }
 function makeFlagState(mapName) { return new Map((CTF_MAPS[mapKey(mapName)] || []).map((p) => [p.team, {...p, bearer:-1, state:0}])); }
 function makeFlagRaw(flag) { return rawHashtable([{key:rawByte(64),value:rawShort(flag.team)},{key:rawByte(65),value:makeTransformRaw(flag)},{key:rawByte(62),value:rawInt(flag.state)},{key:rawByte(63),value:rawInt(flag.bearer)}]); }
 function makeFlagsRaw(room) { return isCtfRoom(room) ? rawHashtable(Array.from(room.flags.values()).map((f)=>({key:rawShort(f.team),value:makeFlagRaw(f)}))) : null; }
@@ -5310,6 +5321,10 @@ function ctfPlayerAtBase(session, team) {
 function tryDeliverCtfFlag(session, channel, source = "move") {
   const room = session?.room;
   if (!isCtfRoom(room) || !session.spawned || session.dead || isRoundPausedSession(session)) return false;
+  if (!ctfHasMinimumParticipants(room)) {
+    resetCtfFlagsForInsufficientPlayers(room, channel, `deliver-${source}`);
+    return false;
+  }
   const home = room.flags.get(session.team);
   if (!home || home.bearer >= 0 || home.state !== 0 || !ctfPlayerAtBase(session, session.team)) return false;
   const carried = Array.from(room.flags.values()).find((flag) => flag.team !== session.team && flag.bearer === session.actorId);
@@ -5332,6 +5347,10 @@ function tryDeliverCtfFlag(session, channel, source = "move") {
 }
 function updateCtfOnMove(session, channel) {
   const room=session.room; if(!isCtfRoom(room)||!session.spawned||session.dead) return;
+  if (!ctfHasMinimumParticipants(room)) {
+    resetCtfFlagsForInsufficientPlayers(room, channel, "move");
+    return;
+  }
   if (tryDeliverCtfFlag(session, channel, "move")) return;
   for(const flag of room.flags.values()) {
     if(flag.bearer<0 && ctfDistance(session.lastTransform,flag)<=8) {
@@ -5343,6 +5362,20 @@ function updateCtfOnMove(session, channel) {
 function resetCtfFlag(room, flag, type, channel) {
   const home=(CTF_MAPS[mapKey(room.map)]||[]).find((item)=>item.team===flag.team); if(!home)return;
   Object.assign(flag,home,{bearer:-1,state:0}); sendReliableToWholeRoom(room,makeFlagEvent(type,flag),channel,{requireGameState:false});
+}
+function resetCtfFlagsForInsufficientPlayers(room, channel = 0, reason = "state") {
+  const participants = ctfActiveParticipantCount(room);
+  if (!isCtfRoom(room) || participants >= 2) return 0;
+  let resetCount = 0;
+  for (const flag of room.flags.values()) {
+    if (flag.bearer < 0 && flag.state === 0) continue;
+    resetCtfFlag(room, flag, 4, channel);
+    resetCount += 1;
+  }
+  if (resetCount > 0) {
+    console.log(`[flag] solo reset room=${room.name} participants=${participants} flags=${resetCount} reason=${reason}`);
+  }
+  return resetCount;
 }
 function dropCtfFlagsForSession(session, type=2, channel=0) {
   const room=session?.room; if(!isCtfRoom(room))return;
@@ -10763,6 +10796,7 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
     { requireGameState: false },
   );
   room.players.delete(actorId);
+  resetCtfFlagsForInsufficientPlayers(room, options.channel || 0, `leave-${reason}`);
   // The Unity AI host may leave mid-wave. Transfer authority only after the
   // actor is removed, so election is deterministically the lowest active id.
   if (room.expedition && room.expedition.phase !== "finished" && Number(room.expedition.authorityActorId || 0) === Number(actorId)) {
