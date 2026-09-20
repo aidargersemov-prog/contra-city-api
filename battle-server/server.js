@@ -24,8 +24,8 @@ const CONFIGURED_PUBLIC_HOST = String(process.env.PUBLIC_HOST || "").trim();
 const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRED_PUBLIC_HOST
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
-const SERVER_NAME = process.env.SERVER_NAME || "Contra City";
-const BUILD_ID = "battle-server-2026-09-19-ctf-solo-abuse-guard-v325";
+const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
+const BUILD_ID = "battle-server-2026-09-20-chopcrosses-jump-total-25-v329";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -301,6 +301,7 @@ const SHOTGUN_RECOIL_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_JUMP_BONUS |
 const SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS || 6);
 const BIG_SHOTGUN_RECOIL_JUMP_BONUS = Number(process.env.BIG_SHOTGUN_RECOIL_JUMP_BONUS || 8);
 const SHOTGUN_RECOIL_HUGE_JUMP_BONUS = Number(process.env.SHOTGUN_RECOIL_HUGE_JUMP_BONUS || 12);
+const CHOPCROSSES_SHOTGUN_JUMP_BONUS = Number(process.env.CHOPCROSSES_SHOTGUN_JUMP_BONUS || 10);
 const MAX_PLAYER_ENERGY = Math.max(0, Number(process.env.MAX_PLAYER_ENERGY || 100));
 const MAX_PLAYER_JUMP = Math.max(1, Number(process.env.MAX_PLAYER_JUMP || 32));
 // Original client default is SMOOTH_LINEAR_IN_EX=3; it consumes live Move99 key4/key5 as pitch/yaw.
@@ -2995,10 +2996,15 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
   [13, ENHANCER_TYPE.ANTI_ELECTRO],
   [14, ENHANCER_TYPE.ANTI_BIOHAZARD],
 ]);
-//life - дальность полета ; velocity - скорость granadelauncher , граната лаунчер, ворчун, гранатин
-const ARCING_LAUNCHER_VELOCITY = 7;
-const ARCING_LAUNCHER_LIFE = 1950;
-const ARCING_LAUNCHER_DISTANCE = 10;
+// Arcing launchers expose four separate controls to the updated client:
+// movement speed, maximum trajectory distance, fuse/lifetime and blast radius.
+// Outer key 90 remains a compatible fallback for clients without the optional
+// weapon-additional keys 77 (flight distance) and 74 (lifetime milliseconds).
+const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 7)));
+const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 500)));
+const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 2500)));
+const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 2);
+const ARCING_LAUNCHER_EXPLOSION_RADIUS = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_EXPLOSION_RADIUS, 10)));
 
 const WEAPON_STAT_OVERRIDES = {
   ohca_basebalbat: {
@@ -3006,14 +3012,15 @@ const WEAPON_STAT_OVERRIDES = {
     ammo: 0,
     ammo_tot: 0,
     rad: 8,
+    rap: 650,
     ang: 2.05
   },
   ohca_candy: {
-    w_id: 72, id: 72, wt: 1, ws: 1, sn: "ohca_candy", vel: 100, rad: 8, ang: 2.05, rap: 330, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 10, dev: 2,
+    w_id: 72, id: 72, wt: 1, ws: 1, sn: "ohca_candy", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 10, dev: 2,
     smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15
   },
   ohca_candy2: {
-    w_id: 71, id: 71, wt: 1, ws: 1, sn: "ohca_candy2", vel: 100, rad: 8, ang: 2.05, rap: 335, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
+    w_id: 71, id: 71, wt: 1, ws: 1, sn: "ohca_candy2", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
     smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16
   },
   hg_taurus: {
@@ -3095,15 +3102,15 @@ const WEAPON_STAT_OVERRIDES = {
     smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78
   },
   gl_grenadelauncher03: {
-    w_id: 104, id: 104, wt: 9, ws: 6, sn: "gl_grenadelauncher03", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, rap: 880, rt: 4000, ammo: 3, ammo_tot: 18, lt: ARCING_LAUNCHER_LIFE, krit: 4, dev: 5,
+    w_id: 104, id: 104, wt: 9, ws: 6, sn: "gl_grenadelauncher03", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0, rap: 880, rt: 4000, ammo: 3, ammo_tot: 18, lt: ARCING_LAUNCHER_LEGACY_LIFE, flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS, krit: 4, dev: 5,
     smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62
   },
   gl_milkor: {
-    w_id: 44, id: 44, wt: 9, ws: 6, sn: "gl_milkor", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 30, lt: ARCING_LAUNCHER_LIFE, krit: 3, dev: 6,
+    w_id: 44, id: 44, wt: 9, ws: 6, sn: "gl_milkor", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 30, lt: ARCING_LAUNCHER_LEGACY_LIFE, flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS, krit: 3, dev: 6,
     smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48
   },
   gl_milkor_a: {
-    w_id: 45, id: 45, wt: 9, ws: 6, sn: "gl_milkor_a", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 36, lt: ARCING_LAUNCHER_LIFE, krit: 3, dev: 6,
+    w_id: 45, id: 45, wt: 9, ws: 6, sn: "gl_milkor_a", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 36, lt: ARCING_LAUNCHER_LEGACY_LIFE, flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS, krit: 3, dev: 6,
     smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50
   },
   sr_vintorez: {
@@ -3442,8 +3449,10 @@ function weaponAdditionalValuesRaw(item = {}) {
   const entries = [];
   const speedPercent = weaponSpeedPercent(item);
   if (speedPercent !== 0) entries.push({ key: rawByte(78), value: rawInt(speedPercent) });
+  if (numberOr(item.flightDistance, 0) > 0) entries.push({ key: rawByte(77), value: rawInt(numberOr(item.flightDistance, 0)) });
   if (numberOr(item.launch, 0) > 0) entries.push({ key: rawByte(75), value: rawInt(1) });
   if (numberOr(item.shake, 0) > 0) entries.push({ key: rawByte(76), value: rawInt(1) });
+  if (numberOr(item.projectileLifetimeMs, 0) > 0) entries.push({ key: rawByte(74), value: rawInt(numberOr(item.projectileLifetimeMs, 0)) });
   return entries.length ? rawHashtable(entries) : null;
 }
 
@@ -3861,6 +3870,10 @@ const SHOTGUN_JUMP_PERCENT_BY_BOOT = new Map(Object.entries({
   "6:gavaibootsmag": 25, // axyenno
 }));
 
+const SHOTGUN_JUMP_FLAT_BY_BOOT = new Map(Object.entries({
+  "6:sneakv201": CHOPCROSSES_SHOTGUN_JUMP_BONUS, // Чопкроссы: base 15 + 10 = 25
+}));
+
 function restoredWearBonusText(selectedWear) {
   const fallback = RESTORED_WEAR_BONUS_TEXTS.get(wearBonusKey(selectedWear));
   if (!fallback) return "";
@@ -3877,6 +3890,10 @@ function wearWithRestoredBonusText(selectedWear) {
 
 function shotgunJumpPercentForWear(selectedWear) {
   return numberOr(SHOTGUN_JUMP_PERCENT_BY_BOOT.get(wearBonusKey(selectedWear)), 0);
+}
+
+function shotgunJumpFlatForWear(selectedWear) {
+  return numberOr(SHOTGUN_JUMP_FLAT_BY_BOOT.get(wearBonusKey(selectedWear)), 0);
 }
 
 function abilityLevel(profile, abilityId) {
@@ -4226,9 +4243,11 @@ function gameplayModifiersForProfile(profile = null) {
   const selectedWearList = selectedWears(profile);
   for (const selectedWear of selectedWearList) {
     const shotgunJumpPercent = shotgunJumpPercentForWear(selectedWear);
+    const shotgunJumpFlat = shotgunJumpFlatForWear(selectedWear);
     applyWearTextBonuses(modifiers, wearWithRestoredBonusText(selectedWear), {
-      suppressShotgunJump: shotgunJumpPercent > 0,
+      suppressShotgunJump: shotgunJumpPercent > 0 || shotgunJumpFlat !== 0,
     });
+    modifiers.shotgunJumpBonus += shotgunJumpFlat;
     modifiers.jumpPercent += shotgunJumpPercent;
   }
 
@@ -6351,6 +6370,24 @@ function hasTeamDamageMode(mode) {
   return isTeamMode(mode) || isZombieModeValue(mode);
 }
 
+function makeTdmTeamKillScore() {
+  return { 1: 0, 2: 0 };
+}
+
+function resetTdmTeamKillScore(room) {
+  if (room) room.tdmTeamKillScore = makeTdmTeamKillScore();
+}
+
+function recordTdmTeamKill(session) {
+  const room = session?.room;
+  if (!room || room.clanWar || Number(room.mode) !== MAP_MODE_TEAM_DEATHMATCH) return 0;
+  const team = Number(session.team);
+  if (team !== 1 && team !== 2) return 0;
+  room.tdmTeamKillScore ||= makeTdmTeamKillScore();
+  room.tdmTeamKillScore[team] = numberOr(room.tdmTeamKillScore[team], 0) + 1;
+  return room.tdmTeamKillScore[team];
+}
+
 function normalizeTeamForRoom(session, requestedTeam = null) {
   const warTeam = clanWarsBattle?.fixedTeam(session);
   if (warTeam != null) return warTeam;
@@ -6478,6 +6515,10 @@ function teamScorePoints(session, team) {
     if (winnerTeam === ZOMBIE_TEAM || winnerTeam === HUMAN_TEAM) {
       return Number(team) === winnerTeam ? 1 : 0;
     }
+  }
+  if (roomMode(session) === MAP_MODE_TEAM_DEATHMATCH) {
+    session.room.tdmTeamKillScore ||= makeTdmTeamKillScore();
+    return Math.max(0, numberOr(session.room.tdmTeamKillScore?.[team], 0));
   }
   let total = 0;
   const players = session?.room?.players || new Map();
@@ -6886,6 +6927,7 @@ function beginNextStandardRound(room, roundSeq, channel = 0) {
   clearStandardRestartTimer(room);
   if (isCtfRoom(room)) for (const flag of room.flags.values()) resetCtfFlag(room, flag, 4, channel);
   resetControlPointsForRound(room, channel);
+  resetTdmTeamKillScore(room);
   room.startedAt = photonNow();
   room.standardRoundState = "ready";
   room.standardRoundWinner = 0;
@@ -8890,6 +8932,7 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
     recordContractKill(deadSession, targetSession, 203, 996, 0);
     deadSession.kills = numberOr(deadSession.kills, 0) + 1;
     deadSession.points = numberOr(deadSession.points, 0) + 1;
+    recordTdmTeamKill(deadSession);
     deadSession.matchKills = numberOr(deadSession.matchKills, 0) + 1;
     const fragInfo = recordKillFragState(deadSession, targetSession);
     const expAwarded = awardBattleExp(
@@ -8993,6 +9036,7 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   if (targetSession !== shooter) {
     shooter.kills = numberOr(shooter.kills, 0) + 1;
     shooter.points = numberOr(shooter.points, 0) + 1;
+    recordTdmTeamKill(shooter);
     shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
     if (context.hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
     if (context.hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
@@ -9264,6 +9308,7 @@ function applyImpactDotKill(effect, targetSession, damage) {
     assistant = resolveKillAssistant(shooter, targetSession);
     shooter.kills = numberOr(shooter.kills, 0) + 1;
     shooter.points = numberOr(shooter.points, 0) + 1;
+    recordTdmTeamKill(shooter);
     shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
     fragInfo = recordKillFragState(shooter, targetSession);
     expAwarded = awardBattleExp(
@@ -9620,6 +9665,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
       assistant = resolveKillAssistant(shooter, targetSession);
       shooter.kills = numberOr(shooter.kills, 0) + 1;
       shooter.points = numberOr(shooter.points, 0) + 1;
+      recordTdmTeamKill(shooter);
       shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
       if (hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
       if (hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
@@ -10250,6 +10296,7 @@ function ensureRoom(settings) {
       controlPointScores: makeControlPointScoreState(),
       flags: makeFlagState(requestedMap),
       controlPointTimer: null,
+      tdmTeamKillScore: makeTdmTeamKillScore(),
       zombieMode: zombieRoom ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0,
       zombieRoundSeq: 0,
       zombieBossActorId: 0,
@@ -10288,6 +10335,7 @@ function ensureRoom(settings) {
       stopControlPointTicker(room);
       room.controlPoints = makeControlPointState(room.map);
       room.controlPointScores = makeControlPointScoreState();
+      resetTdmTeamKillScore(room);
       room.flags = makeFlagState(room.map);
       room.zombieMode = room.mode === MAP_MODE_ZOMBIE ? ZOMBIE_MODE.WAIT_FOR_PLAYERS : 0;
       room.zombieRoundSeq = 0;
@@ -14768,7 +14816,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=${ARCING_LAUNCHER_VELOCITY}/${ARCING_LAUNCHER_LIFE}/${ARCING_LAUNCHER_DISTANCE}`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=velocity:${ARCING_LAUNCHER_VELOCITY},maxDistance:${ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE},lifetime:${ARCING_LAUNCHER_LIFETIME_MS}ms,explosionRadius:${ARCING_LAUNCHER_EXPLOSION_RADIUS},legacyLife:${ARCING_LAUNCHER_LEGACY_LIFE}`);
 console.log(`[config] respawnShotFence=first-move+direct-offset/${DAMAGE_DIRECT_HIT_MAX_TARGET_OFFSET} hitHistory=${DAMAGE_CLIENT_VIEW_DELAY_MS}+${DAMAGE_CLIENT_MOVE_INTERVAL_MS}+rtt/max${DAMAGE_POSITION_HISTORY_MAX_MS}ms rejectedPlayerTargets=omit segmentOriginFence=off`);
 console.log(`[config] enhancers active=${Array.from(PASSIVE_BATTLE_ENHANCER_IDS).join(",")} clientVisible=${Array.from(CLIENT_VISIBLE_ENHANCER_IDS).join(",")} expAssist=${BATTLE_EXP_PER_ASSIST} expFlag=${BATTLE_EXP_PER_FLAG} expControl=${BATTLE_EXP_PER_CONTROL_POINT} kamikaze=${ENHANCER_KAMIKAZE_DAMAGE}@${ENHANCER_KAMIKAZE_FULL_RADIUS}/${ENHANCER_KAMIKAZE_ZERO_RADIUS}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
