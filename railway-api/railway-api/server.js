@@ -1,16 +1,37 @@
-﻿import http from "node:http";
+import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { URL, fileURLToPath } from "node:url";
+import { createAdminLogsApi } from "./admin-logs/admin-api.js";
+import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.js";
+import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
+import { createClanWars, WAR_MAPS } from "./clan-wars.js";
+import { buildQuestSet, questPresentation, advanceQuest } from "./clan-contract-quests.js";
+import {
+  executeBattleStaffAction,
+  legacyPermissionPayload,
+  loadActiveStaffRole,
+  staffAjaxPayload,
+  staffProfilePayload,
+} from "./staff-system.js";
+import {
+  SUMMER_CASE_REWARDS,
+  TROPICAL_CASE_REWARDS,
+  rollSummerCaseReward,
+  rollTropicalCaseReward,
+} from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-07-08-first-name-pending-v21";
+const API_BUILD_ID = "railway-api-2026-09-19-statistics-reset-v118";
 const CREATE_CODE = process.env.CREATE_CODE || "";
+const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
 const DATA_PATH = process.env.DATA_PATH || path.join(process.cwd(), "data", "accounts.json");
 const API_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ASSET_BUNDLE_DIR = path.join(API_DIR, "assetbundles");
+const LAUNCHER_RELEASE_DIR = path.join(API_DIR, "launcher-releases");
 const ASSET_BUNDLE_NAMES = new Set([
   "arena_3lvl.unity3d",
   "zombi_2.unity3d",
@@ -18,33 +39,78 @@ const ASSET_BUNDLE_NAMES = new Set([
   "arenaring.unity3d",
   "bit_map.unity3d",
   "legoturnament.unity3d",
-  "inferno.unity3d"
+  "inferno.unity3d",
+  "promzona.unity3d"
+  //"dashguard.unity3d"
 ]);
-const MIGRATIONS_DIR = path.join(process.cwd(), "migrations");
+const REMOTE_ASSET_BUNDLE_URLS = new Map([
+  [
+    "promzona.unity3d",
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/014b6f8495d522979916984cf6d9c6ab9970b6d7/railway-api/assetbundles/promzona.unity3d"
+  ]
+]);
+const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "https://dii1ba1dxl2lq.cloudfront.net").replace(/\/+$/, "");
 const ALLOW_DYNAMIC_PUBLIC_ORIGIN = process.env.ALLOW_DYNAMIC_PUBLIC_ORIGIN === "1";
+const SUMMER_CASE_ACCESS_TTL_MS = 10 * 60 * 1000;
+const BATTLE_PASS_XP_PER_LEVEL = 1000;
+const BATTLE_PASS_TASK_CYCLE_MS = 24 * 60 * 60 * 1000;
 
 const START_MONEY = Number(process.env.START_MONEY || 1000);
 const START_LEVEL = Number(process.env.START_LEVEL || 1);
 const START_EXP = Number(process.env.START_EXP || 0);
 const START_EXP_MAX = Number(process.env.START_EXP_MAX || 1000);
 const LEVEL_EXP_STEP = Math.max(1, Number(process.env.LEVEL_EXP_STEP || START_EXP_MAX || 1000));
+// Базовая цена одежды и fallback-каталога. Цены насмешек и усилителей
+// настраиваются независимо в shop-prices.js.
 const SHOP_PRICE = 100;
-const BATTLE_HOST = process.env.BATTLE_HOST || "";
+const RETIRED_BATTLE_HOST = "54.145.212.225";
+const DEFAULT_BATTLE_HOST = "3.76.0.237";
+const CONFIGURED_BATTLE_HOST = String(process.env.BATTLE_HOST || "").trim();
+const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRED_BATTLE_HOST
+  ? DEFAULT_BATTLE_HOST
+  : CONFIGURED_BATTLE_HOST;
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
+const PROMO_ADMIN_TOKEN = process.env.PROMO_ADMIN_TOKEN || "";
+const TELEGRAM_LINK_API_TOKEN = process.env.TELEGRAM_LINK_API_TOKEN || "";
+const TELEGRAM_ADMIN_ID = Number(process.env.TELEGRAM_ADMIN_ID || 1656163678);
+const TELEGRAM_BOT_USERNAME = String(process.env.TELEGRAM_BOT_USERNAME || "ContraCityGame_Bot")
+  .trim()
+  .replace(/^@/, "");
+const CLOUDFRONT_ORIGIN_SECRET = process.env.CLOUDFRONT_ORIGIN_SECRET || "";
+const CLOUDFRONT_ORIGIN_HEADER = String(process.env.CLOUDFRONT_ORIGIN_HEADER || "x-contra-origin").toLowerCase();
+const ORIGIN_GUARD_MODE = ["off", "audit", "enforce"].includes(String(process.env.ORIGIN_GUARD_MODE || "").toLowerCase())
+  ? String(process.env.ORIGIN_GUARD_MODE).toLowerCase()
+  : (CLOUDFRONT_ORIGIN_SECRET ? "enforce" : "audit");
 const MAX_REQUEST_URL_BYTES = Math.max(1024, Number(process.env.MAX_REQUEST_URL_BYTES || 16384));
 const HTTP_REQUEST_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15000));
 const HTTP_HEADERS_TIMEOUT_MS = Math.max(5000, Number(process.env.HTTP_HEADERS_TIMEOUT_MS || 10000));
 const HTTP_KEEP_ALIVE_TIMEOUT_MS = Math.max(1000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 5000));
-const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
-const RATE_LIMIT_REQUESTS = Math.max(30, Number(process.env.RATE_LIMIT_REQUESTS || 600));
-const BATTLE_RATE_LIMIT_REQUESTS = Math.max(60000, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
-const TRUST_PROXY_HEADERS = Boolean(process.env.RAILWAY_ENVIRONMENT_ID || process.env.RAILWAY_PROJECT_ID) ||
-  process.env.TRUST_PROXY_HEADERS === "1";
+const RATE_LIMIT_WINDOW_MS = Math.max(250, Number(process.env.RATE_LIMIT_WINDOW_MS || 60000));
+const RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.RATE_LIMIT_REQUESTS || 600));
+const BATTLE_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.BATTLE_RATE_LIMIT_REQUESTS || 60000));
+const ACCOUNT_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.ACCOUNT_RATE_LIMIT_REQUESTS || 1200));
+const SESSION_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.SESSION_RATE_LIMIT_REQUESTS || 900));
+const DEVICE_RATE_LIMIT_REQUESTS = Math.max(1, Number(process.env.DEVICE_RATE_LIMIT_REQUESTS || 900));
+const RATE_LIMIT_BUCKET_CAP = Math.max(128, Number(process.env.RATE_LIMIT_BUCKET_CAP || 8192));
+const MAX_HTTP_IN_FLIGHT = Math.max(1, Number(process.env.MAX_HTTP_IN_FLIGHT || 256));
+const MAX_HTTP_IN_FLIGHT_PER_IP = Math.max(1, Number(process.env.MAX_HTTP_IN_FLIGHT_PER_IP || 32));
+const MAX_HTTP_CONNECTIONS = Math.max(16, Number(process.env.MAX_HTTP_CONNECTIONS || 512));
+const POSTGRES_POOL_MAX = Math.max(1, Number(process.env.POSTGRES_POOL_MAX || 10));
+const POSTGRES_CONNECT_TIMEOUT_MS = Math.max(250, Number(process.env.POSTGRES_CONNECT_TIMEOUT_MS || 3000));
+const POSTGRES_IDLE_TIMEOUT_MS = Math.max(1000, Number(process.env.POSTGRES_IDLE_TIMEOUT_MS || 10000));
+const POSTGRES_QUERY_TIMEOUT_MS = Math.max(250, Number(process.env.POSTGRES_QUERY_TIMEOUT_MS || 5000));
+const POSTGRES_MIGRATION_TIMEOUT_MS = Math.max(5000, Number(process.env.POSTGRES_MIGRATION_TIMEOUT_MS || 60000));
+const POSTGRES_MUTATION_QUEUE_MAX = Math.max(1, Number(process.env.POSTGRES_MUTATION_QUEUE_MAX || 256));
 const rateLimitBuckets = new Map();
+const httpInFlightByIp = new Map();
+let httpInFlight = 0;
+let postgresMutationQueueDepth = 0;
+let originGuardAuditWindowStartedAt = 0;
+let originGuardAuditCount = 0;
 const LAUNCHER_VERSION = process.env.LAUNCHER_VERSION || "1.2.0";
 const LAUNCHER_MANIFEST_URL = process.env.LAUNCHER_MANIFEST_URL || "";
 const LAUNCHER_UPDATE_KEY = process.env.LAUNCHER_UPDATE_KEY || "";
@@ -56,8 +122,100 @@ const GAME_CLASSIC_UPDATE_KEY = process.env.GAME_CLASSIC_UPDATE_KEY || "";
 const GAME_NEW_TEXTURES_UPDATE_KEY = process.env.GAME_NEW_TEXTURES_UPDATE_KEY || "";
 const LAUNCHER_SESSION_TTL_MS = Math.max(60000, Number(process.env.LAUNCHER_SESSION_TTL_MS || 6 * 60 * 60 * 1000));
 const LAUNCHER_DEVICE_CHALLENGE_TTL_MS = Math.max(30000, Number(process.env.LAUNCHER_DEVICE_CHALLENGE_TTL_MS || 3 * 60 * 1000));
+const TELEGRAM_LINK_FLOW_TTL_MS = Math.max(120000, Math.min(
+  30 * 60 * 1000,
+  Number(process.env.TELEGRAM_LINK_FLOW_TTL_MS || 10 * 60 * 1000)
+));
+const TELEGRAM_PAIRING_CODE_TTL_MS = Math.max(120000, Math.min(
+  30 * 60 * 1000,
+  Number(process.env.TELEGRAM_PAIRING_CODE_TTL_MS || 10 * 60 * 1000)
+));
+const TELEGRAM_LOGIN_REQUEST_TTL_MS = Math.max(120000, Math.min(
+  30 * 60 * 1000,
+  Number(process.env.TELEGRAM_LOGIN_REQUEST_TTL_MS || 15 * 60 * 1000)
+));
+const TELEGRAM_RESET_CONFIRM_TTL_MS = Math.max(30000, Math.min(
+  5 * 60 * 1000,
+  Number(process.env.TELEGRAM_RESET_CONFIRM_TTL_MS || 60 * 1000)
+));
+const DONATE_ORDER_TTL_MS = Math.max(5 * 60 * 1000, Math.min(
+  60 * 60 * 1000,
+  Number(process.env.DONATE_ORDER_TTL_MS || 20 * 60 * 1000)
+));
+const TELEGRAM_CLEANUP_INTERVAL_MS = Math.max(60000, Number(
+  process.env.TELEGRAM_CLEANUP_INTERVAL_MS || 5 * 60 * 1000
+));
+const TELEGRAM_PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const TELEGRAM_CLEANUP_ADVISORY_LOCK = 741963521;
+const TELEGRAM_RESET_ADVISORY_LOCK = 741963522;
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
+const revokedGameLinkKeys = new Map();
+const gameLoginSeen = new Map();
+const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 30 * 60 * 1000));
+const playerBanCache = new Map();
+const PLAYER_BAN_CACHE_TTL_MS = Math.max(1000, Number(process.env.PLAYER_BAN_CACHE_TTL_MS || 15000));
+const requestAuditContext = new AsyncLocalStorage();
+
+function currentAuditContext() {
+  return requestAuditContext.getStore() || {};
+}
+
+async function auditGameEvent(db, event) {
+  if (!db?.query) return null;
+  const context = currentAuditContext();
+  return writeAuditEvent(db, {
+    ipAddress: context.ipAddress || "",
+    device: context.device || "",
+    geo: context.geo || {},
+    source: context.source || "game_api",
+    ...event
+  });
+}
+
+async function recordPlayerAccess(account, req, kind, source) {
+  if (!pgPool || !account?.id) return;
+  const ipAddress = requestClientIp(req);
+  const geo = requestGeo(req);
+  const device = String(req.headers["user-agent"] || "").slice(0, 300);
+  try {
+    const previousResult = await pgPool.query(
+      `SELECT last_ip_address, last_device, last_geo
+       FROM player_activity
+       WHERE player_id = $1`,
+      [Number(account.id)]
+    );
+    const previous = previousResult.rows[0] || null;
+    const ipChanged = Boolean(previous?.last_ip_address && ipAddress && previous.last_ip_address !== ipAddress);
+    const deviceChanged = Boolean(previous?.last_device && device && previous.last_device !== device);
+    const previousCountry = String(previous?.last_geo?.countryCode || "");
+    const countryChanged = Boolean(previousCountry && geo.countryCode && previousCountry !== geo.countryCode);
+    await touchPlayerActivity(pgPool, { playerId: account.id, kind, ipAddress, device, source, geo });
+    await writeAuditEvent(pgPool, {
+      playerId: account.id,
+      eventType: kind === "logout" ? "player_logout" : "player_login",
+      category: "session",
+      severity: kind !== "logout" && (countryChanged || deviceChanged) ? "notice" : "info",
+      suspicious: kind !== "logout" && (countryChanged || deviceChanged),
+      description: kind === "logout" ? "Игрок вышел" : "Игрок вошёл",
+      source,
+      ipAddress,
+      device,
+      geo,
+      metadata: {
+        accessSource: source,
+        geoSource: geo.source || "socket",
+        ipChanged,
+        deviceChanged,
+        countryChanged,
+        previousIpAddress: ipChanged ? previous.last_ip_address : "",
+        previousCountryCode: countryChanged ? previousCountry : "",
+      }
+    });
+  } catch (error) {
+    console.error(`[admin-logs] player access audit failed player=${account.id} kind=${kind}`, error);
+  }
+}
 
 function safeTokenEquals(left, right) {
   const a = Buffer.from(String(left || ""), "utf8");
@@ -66,19 +224,152 @@ function safeTokenEquals(left, right) {
   return crypto.timingSafeEqual(a, b);
 }
 
+function hasValidCloudFrontOrigin(req) {
+  return Boolean(CLOUDFRONT_ORIGIN_SECRET) &&
+    safeTokenEquals(req?.headers?.[CLOUDFRONT_ORIGIN_HEADER], CLOUDFRONT_ORIGIN_SECRET);
+}
+
+async function recordGameLoginOnce(account, req) {
+  if (!account?.id) return;
+  const now = Date.now();
+  const ip = requestClientIp(req);
+  const deviceKey = stableIdentityHash(req.headers["user-agent"] || "unknown");
+  const key = `${account.id}:${ip}:${deviceKey}`;
+  const previous = Number(gameLoginSeen.get(key) || 0);
+  if (now - previous < GAME_LOGIN_DEDUPE_TTL_MS) return;
+  if (gameLoginSeen.has(key)) gameLoginSeen.delete(key);
+  gameLoginSeen.set(key, now);
+  while (gameLoginSeen.size > 10000) gameLoginSeen.delete(gameLoginSeen.keys().next().value);
+  await recordPlayerAccess(account, req, "login", "game_api_login");
+}
+
+function decodeCloudFrontHeader(value, maxLength = 160) {
+  const raw = String(value || "").slice(0, maxLength * 3);
+  try {
+    return decodeURIComponent(raw).slice(0, maxLength);
+  } catch {
+    return raw.slice(0, maxLength);
+  }
+}
+
+function addressWithoutPort(value) {
+  const address = String(value || "").trim().slice(0, 160);
+  if (!address || address.length > 160) return "";
+  if (address.startsWith("[")) {
+    const end = address.indexOf("]");
+    return end > 1 ? address.slice(1, end) : "";
+  }
+  const colon = address.lastIndexOf(":");
+  if (colon > 0 && /^\d+$/.test(address.slice(colon + 1))) return address.slice(0, colon);
+  return address.toLowerCase();
+}
+
+function cloudFrontViewerIp(req) {
+  if (!hasValidCloudFrontOrigin(req)) return "";
+  return addressWithoutPort(req.headers["cloudfront-viewer-address"]);
+}
+
 function requestClientIp(req) {
-  const forwarded = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim()
-    : "";
-  return forwarded || req.socket?.remoteAddress || "unknown";
+  // CloudFront-Viewer-Address is generated by CloudFront. X-Forwarded-For is
+  // intentionally ignored because a viewer-controlled prefix survives proxying.
+  return cloudFrontViewerIp(req) || req.socket?.remoteAddress || "unknown";
+}
+
+function launcherRequestIp(req) {
+  const trustedCloudFrontIp = cloudFrontViewerIp(req);
+  if (trustedCloudFrontIp) return trustedCloudFrontIp;
+
+  // Launcher requests are already authenticated by the device ECDSA key. In
+  // audit mode we still consume CloudFront's generated viewer address so IP
+  // re-verification works while the origin secret is being restored.
+  const forwardedCloudFrontIp = addressWithoutPort(req.headers["cloudfront-viewer-address"]);
+  if (forwardedCloudFrontIp) return forwardedCloudFrontIp;
+
+  const forwarded = String(req.headers["x-forwarded-for"] || "")
+    .split(",")
+    .map((part) => addressWithoutPort(part))
+    .find(Boolean);
+  return forwarded || addressWithoutPort(req.socket?.remoteAddress) || "unknown";
+}
+
+function launcherIpHash(req) {
+  if (!TELEGRAM_LINK_API_TOKEN) return "";
+  return crypto
+    .createHmac("sha256", TELEGRAM_LINK_API_TOKEN)
+    .update(launcherRequestIp(req), "utf8")
+    .digest("hex");
+}
+
+function requestGeo(req) {
+  const trusted = hasValidCloudFrontOrigin(req);
+  return {
+    ip: requestClientIp(req),
+    source: trusted && req.headers["cloudfront-viewer-address"] ? "cloudfront" : "socket",
+    countryCode: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country"], 8) : "",
+    country: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country-name"], 120) : "",
+    regionCode: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country-region"], 32) : "",
+    region: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-country-region-name"], 120) : "",
+    city: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-city"], 120) : "",
+    postalCode: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-postal-code"], 32) : "",
+    timeZone: trusted ? decodeCloudFrontHeader(req.headers["cloudfront-viewer-time-zone"], 80) : "",
+    asn: trusted ? Number(req.headers["cloudfront-viewer-asn"] || 0) || 0 : 0,
+  };
+}
+
+function isOriginGuardExempt(pathname) {
+  return pathname === "/health" ||
+    pathname === "/donate/catalog" ||
+    pathname.startsWith("/battle/") ||
+    pathname.startsWith("/admin/promocodes") ||
+    pathname.startsWith("/bot/telegram") ||
+    pathname === "/launcher/promo/redeem" ||
+    pathname === "/admin/device-reset" ||
+    pathname === "/db";
+}
+
+function allowPlayerFacingOrigin(req, pathname) {
+  if (ORIGIN_GUARD_MODE === "off" || isOriginGuardExempt(pathname) || hasValidCloudFrontOrigin(req)) return true;
+  if (ORIGIN_GUARD_MODE === "audit") {
+    const now = Date.now();
+    if (!originGuardAuditWindowStartedAt || now - originGuardAuditWindowStartedAt >= 60000) {
+      if (originGuardAuditCount > 0) {
+        console.warn(`[security] origin guard audit suppressed=${originGuardAuditCount} previousWindowMs=${now - originGuardAuditWindowStartedAt}`);
+      }
+      originGuardAuditWindowStartedAt = now;
+      originGuardAuditCount = 0;
+      console.warn(`[security] origin guard audit path=${pathname} remote=${req.socket?.remoteAddress || "unknown"}`);
+    } else {
+      originGuardAuditCount += 1;
+    }
+    return true;
+  }
+  return false;
 }
 
 function requestRatePolicy(pathname) {
   if (pathname === "/create") return { windowMs: 10 * 60 * 1000, limit: 10 };
+  if (pathname === "/battle-pass/case/open" || pathname === "/battle-pass/case/resolve") {
+    return { windowMs: 60000, limit: 120 };
+  }
+  if (pathname === "/admin/logs/auth/login") return { windowMs: 15 * 60 * 1000, limit: 20 };
+  if (pathname.startsWith("/admin/promocodes")) return { windowMs: 60000, limit: 120 };
+  if (pathname.startsWith("/bot/telegram")) {
+    // Every private bot request originates from the same Railway container.
+    // The service token is the perimeter; per-Telegram limits are enforced
+    // after parsing the authenticated request body.
+    return { windowMs: 60000, limit: 2400 };
+  }
+  if (pathname.startsWith("/launcher/telegram/")) {
+    // Do not let players behind the same carrier/NAT block each other.
+    // Account/session/device limits and the persisted five-attempt gate are
+    // the effective launcher boundaries.
+    return { windowMs: 60000, limit: 1200 };
+  }
+  if (pathname === "/launcher/promo/redeem") return { windowMs: 60000, limit: 20 };
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/social") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -87,22 +378,81 @@ function requestRatePolicy(pathname) {
   return { windowMs: RATE_LIMIT_WINDOW_MS, limit: RATE_LIMIT_REQUESTS };
 }
 
-function allowHttpRequest(req, pathname) {
-  const now = Date.now();
-  const policy = requestRatePolicy(pathname);
-  const bucketKey = `${requestClientIp(req)}|${pathname}`;
-  let bucket = rateLimitBuckets.get(bucketKey);
+function boundedRateBucket(key, policy, now) {
+  let bucket = rateLimitBuckets.get(key);
   if (!bucket || now - bucket.startedAt >= policy.windowMs) {
-    bucket = { startedAt: now, count: 0 };
-    rateLimitBuckets.set(bucketKey, bucket);
+    bucket = { startedAt: now, count: 0, lastSeenAt: now };
   }
-  bucket.count++;
-  if (rateLimitBuckets.size > 10000) {
-    for (const [key, value] of rateLimitBuckets) {
-      if (now - value.startedAt > 10 * 60 * 1000) rateLimitBuckets.delete(key);
-    }
+  bucket.count += 1;
+  bucket.lastSeenAt = now;
+  if (rateLimitBuckets.has(key)) rateLimitBuckets.delete(key);
+  rateLimitBuckets.set(key, bucket);
+  while (rateLimitBuckets.size > RATE_LIMIT_BUCKET_CAP) {
+    rateLimitBuckets.delete(rateLimitBuckets.keys().next().value);
   }
   return bucket.count <= policy.limit;
+}
+
+function stableIdentityHash(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 24);
+}
+
+function requestRateIdentities(req, url) {
+  const accountId = Number(url.searchParams.get("ccid") || url.searchParams.get("playerId") || url.searchParams.get("userId") || 0);
+  const session = url.searchParams.get("sessionAuth") || url.searchParams.get("token") || req.headers["x-session-token"] || "";
+  const device = req.headers["x-device-key-id"] || req.headers["x-launcher-device"] || url.searchParams.get("deviceKeyId") || "";
+  return {
+    account: Number.isInteger(accountId) && accountId > 0 ? String(accountId) : "",
+    session: stableIdentityHash(session),
+    device: stableIdentityHash(device),
+  };
+}
+
+function allowRequestIdentityBucket(req, key, policy, now = Date.now()) {
+  if (!key) return true;
+  if (!(req.securityRateKeys instanceof Set)) req.securityRateKeys = new Set();
+  if (req.securityRateKeys.has(key)) return true;
+  req.securityRateKeys.add(key);
+  return boundedRateBucket(key, policy, now);
+}
+
+function allowResolvedIdentityRequest(req, account, body = {}) {
+  const now = Date.now();
+  const accountId = Number(account?.id || body?.ccid || body?.playerId || 0);
+  const session = stableIdentityHash(body?.token || body?.sessionToken || body?.sessionAuth || "");
+  const device = stableIdentityHash(body?.deviceKeyId || body?.launcherDevice || "");
+  if (Number.isInteger(accountId) && accountId > 0 && !allowRequestIdentityBucket(req, `account:${accountId}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: ACCOUNT_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (session && !allowRequestIdentityBucket(req, `session:${session}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: SESSION_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (device && !allowRequestIdentityBucket(req, `device:${device}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: DEVICE_RATE_LIMIT_REQUESTS }, now)) return false;
+  return true;
+}
+
+function allowTelegramIdentityRequest(req, telegramUserId, action, {
+  windowMs = 60000,
+  limit = 120
+} = {}) {
+  const id = Number(telegramUserId || 0);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  return allowRequestIdentityBucket(
+    req,
+    `telegram:${id}:${String(action || "request")}`,
+    { windowMs, limit },
+    Date.now()
+  );
+}
+
+function allowHttpRequest(req, url) {
+  const now = Date.now();
+  const pathname = url.pathname;
+  const policy = requestRatePolicy(pathname);
+  if (!boundedRateBucket(`ip:${requestClientIp(req)}|${pathname}`, policy, now)) return false;
+  const identities = requestRateIdentities(req, url);
+  if (identities.account && !allowRequestIdentityBucket(req, `account:${identities.account}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: ACCOUNT_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (identities.session && !allowRequestIdentityBucket(req, `session:${identities.session}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: SESSION_RATE_LIMIT_REQUESTS }, now)) return false;
+  if (identities.device && !allowRequestIdentityBucket(req, `device:${identities.device}`, { windowMs: RATE_LIMIT_WINDOW_MS, limit: DEVICE_RATE_LIMIT_REQUESTS }, now)) return false;
+  return true;
 }
 
 function hasValidBattleServiceToken(req, body) {
@@ -112,6 +462,16 @@ function hasValidBattleServiceToken(req, body) {
 
 function hasValidAdminToken(req) {
   return Boolean(ADMIN_API_TOKEN) && safeTokenEquals(req.headers["x-admin-token"], ADMIN_API_TOKEN);
+}
+
+function hasValidPromoAdminToken(req) {
+  return Boolean(PROMO_ADMIN_TOKEN) &&
+    safeTokenEquals(req.headers["x-promo-admin-token"], PROMO_ADMIN_TOKEN);
+}
+
+function hasValidTelegramLinkApiToken(req) {
+  return Boolean(TELEGRAM_LINK_API_TOKEN) &&
+    safeTokenEquals(req.headers["x-telegram-link-token"], TELEGRAM_LINK_API_TOKEN);
 }
 
 const CLAN_CREATE_LEVEL = 30;
@@ -163,10 +523,59 @@ const CLAN_ARM_ID_SET = new Set(CLAN_ARM_IDS);
 const CLAN_DEFAULT_ARM_ID_SET = new Set(CLAN_DEFAULT_ARM_IDS);
 const CLAN_ARM_ASSET_DIR = path.join(API_DIR, "assets");
 const CLAN_ARM_ITEM_TYPE = 5;
-const PLAYER_ENHANCER_IDS = Object.freeze([1, 2, 3, 4, 5, 30, 31, 32, 33, 34, 35, 36]);
-const CLAN_ENHANCER_IDS = Object.freeze([10, 11, 12, 13, 150, 151, 152, 153, 154, 155, 156, 159, 160, 205, 208, 209]);
+// Contracts are intentionally guarded by a separate rollout flag. The CEF
+// toggle only changes presentation; it must never create a second economy.
+const CLAN_CONTRACTS_ENABLED = process.env.CLAN_CONTRACTS_ENABLED === "1";
+const CLAN_BANNERS_ENABLED = process.env.CLAN_BANNERS_ENABLED === "1";
+const CLAN_BANNER_PRODUCTS = Object.freeze([
+  Object.freeze({ id: "default", title: "Классический", price: 0, animated: false }),
+  Object.freeze({ id: "peaks", title: "Тихие вершины", price: 300, animated: false }),
+  Object.freeze({ id: "sunset", title: "Золотой час", price: 300, animated: false }),
+  Object.freeze({ id: "coast", title: "Морской бриз", price: 300, animated: false }),
+  Object.freeze({ id: "rain", title: "После дождя", price: 900, animated: true }),
+  Object.freeze({ id: "aurora", title: "Северное сияние", price: 900, animated: true }),
+  Object.freeze({ id: "embers", title: "Тёплый пепел", price: 900, animated: true })
+]);
+const CLAN_BANNER_PRODUCT_BY_ID = new Map(CLAN_BANNER_PRODUCTS.map((product) => [product.id, product]));
+const CLAN_CONTRACT_RESET_HOUR_MOSCOW = 5;
+const CLAN_CONTRACTS_TIMEZONE = "Europe/Moscow";
+const CLAN_CONTRACT_ARM_PRODUCTS = Object.freeze([
+  Object.freeze({ armId: 2, minLevel: 1, price: 600 }),
+  Object.freeze({ armId: 3, minLevel: 1, price: 600 }),
+  Object.freeze({ armId: 4, minLevel: 5, price: 720 }),
+  Object.freeze({ armId: 5, minLevel: 5, price: 720 }),
+  Object.freeze({ armId: 8, minLevel: 10, price: 1000 })
+]);
+const CLAN_CONTRACT_ARM_PRODUCT_BY_ID = new Map(
+  CLAN_CONTRACT_ARM_PRODUCTS.map((item) => [item.armId, item])
+);
+const CLAN_CONTRACT_CASES = Object.freeze({
+  field: Object.freeze({ key: "field", name: "Оперативный кейс", price: 180, armChance: 35, enhancerSeconds: 24 * 60 * 60 }),
+  command: Object.freeze({ key: "command", name: "Командный кейс", price: 420, armChance: 60, enhancerSeconds: 72 * 60 * 60 })
+});
+const CLAN_CONTRACT_TIER_CONFIG = Object.freeze({
+  1: Object.freeze({ completionBonus: 12, objectives: Object.freeze({ battles: [3, 8], eliminations: [40, 12], headshots: [8, 14], victories: [2, 16] }) }),
+  2: Object.freeze({ completionBonus: 17, objectives: Object.freeze({ battles: [4, 12], eliminations: [70, 17], headshots: [15, 19], victories: [3, 23] }) }),
+  3: Object.freeze({ completionBonus: 24, objectives: Object.freeze({ battles: [5, 16], eliminations: [110, 22], headshots: [25, 26], victories: [4, 30] }) })
+});
+const CLAN_CONTRACT_OBJECTIVES = Object.freeze({
+  battles: Object.freeze({ title: "Боевой выезд", text: "Проведите бои до завершения." }),
+  eliminations: Object.freeze({ title: "Работа по цели", text: "Устраните противников в бою." }),
+  headshots: Object.freeze({ title: "Точный огонь", text: "Совершите точные устранения." }),
+  victories: Object.freeze({ title: "Взять рубеж", text: "Приведите команду к победе." })
+});
+// Enhancers 3 ("Лёгкое приземление") and 36 ("Меркурий") are deliberately
+// hidden from the ordinary shop. Existing inventory rows are preserved, but
+// new listing/buying is disabled and the battle server ignores both IDs.
+const priceConfigIds = (config) => Object.freeze(Object.keys(config).map(Number));
+const PLAYER_ENHANCER_IDS = priceConfigIds(PLAYER_ENHANCER_PRICES);
+const CLAN_ENHANCER_IDS = priceConfigIds(CLAN_ENHANCER_PRICES);
 const SHOP_ENHANCER_IDS = Object.freeze([...PLAYER_ENHANCER_IDS, ...CLAN_ENHANCER_IDS]);
 const CLAN_ENHANCER_ID_SET = new Set(CLAN_ENHANCER_IDS);
+const ENHANCER_PRICES = Object.freeze({
+  ...PLAYER_ENHANCER_PRICES,
+  ...CLAN_ENHANCER_PRICES
+});
 
 const cost = (id, value = 100) => ({
   sc_id: String(id),
@@ -182,21 +591,34 @@ const permanentCost = (id, value = 100) => ({
   tPp: 0
 });
 
-const timedPermanentCost = (id, value = 100) => ({
-  sc_id: String(id),
-  t1v: value,
-  t1r: 0,
-  t1p: 0,
-  t7v: value,
-  t7r: 0,
-  t7p: 0,
-  t30v: value,
-  t30r: 0,
-  t30p: 0,
-  tPv: value,
-  tPr: 0,
-  tPp: 0
-});
+const TIMED_PRICE_FIELDS = Object.freeze([
+  ["day", "t1v", "t1r", "t1p"],
+  ["week", "t7v", "t7r", "t7p"],
+  ["month", "t30v", "t30r", "t30p"]
+]);
+
+function timedCost(id, configuredPrices = 100) {
+  const prices = typeof configuredPrices === "number"
+    ? {
+        day: configuredPrices,
+        week: configuredPrices,
+        month: configuredPrices
+      }
+    : configuredPrices;
+  const result = { sc_id: String(id) };
+
+  for (const [configKey, vcurKey, rcurrencyKey, pvpCurrencyKey] of TIMED_PRICE_FIELDS) {
+    const value = prices?.[configKey];
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`Invalid timed shop price: sc_id=${id} duration=${configKey} value=${value}`);
+    }
+    result[vcurKey] = value;
+    result[rcurrencyKey] = 0;
+    result[pvpCurrencyKey] = 0;
+  }
+
+  return result;
+}
 
 const weaponTitleById = {
   1: "Бита",
@@ -331,14 +753,15 @@ function weapon(id, wt, slot, sname, price, extra = {}) {
     sn: sname,
     name: weaponTitleById[id] || `Оружие ${id}`,
     nlvl: 1,
-    iS: 1,
+    iS: 0,
     sc: cost(1000 + id, price),
     ...extra
   };
 }
 
-function wear(id, wt, sname, price = 50, slot = null) {
+function wear(id, wt, sname, price = 50, slot = null, extra = {}) {
   const text = wearTextFor(slot, sname);
+
   return {
     itype: 3,
     id,
@@ -347,13 +770,14 @@ function wear(id, wt, sname, price = 50, slot = null) {
     sname,
     sn: sname,
     nlvl: 1,
-    iS: 1,
+    iS: 0,
     sc: cost(2000 + id, price),
-    ...text
+    ...text,
+    ...extra
   };
 }
 
-function taunt(id, price = 100) {
+function taunt(id, prices = 100) {
   return {
     itype: 4,
     t_id: id,
@@ -361,7 +785,7 @@ function taunt(id, price = 100) {
     sn: `taunt_${id}`,
     nlvl: 1,
     iS: 1,
-    sc: timedPermanentCost(3000 + id, price)
+    sc: timedCost(3000 + id, prices)
   };
 }
 
@@ -369,7 +793,7 @@ function isClanEnhancerId(id) {
   return CLAN_ENHANCER_ID_SET.has(Number(id));
 }
 
-function enhancer(id, price = 120) {
+function enhancer(id, prices = 120) {
   return {
     itype: 2,
     e_id: id,
@@ -378,7 +802,7 @@ function enhancer(id, price = 120) {
     nlvl: 1,
     iS: 1,
     iC: isClanEnhancerId(id) ? 1 : 0,
-    sc: timedPermanentCost(4000 + id, price)
+    sc: timedCost(4000 + id, prices)
   };
 }
 
@@ -393,38 +817,44 @@ const defaultWeapons = [
 ];
 
 const rebuiltShopWeaponCatalog = [
-  { id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0 },
-  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0 },
-  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0 },
+  //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0, iS: 0 },
+  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
+  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
+  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 6 },
+  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 8 },
 
-  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38 },
-  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45 },
-  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42 },
-  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42 },
-  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108 },
 
-  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175 },
-  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210 },
-  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180 },
-  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132 },
-  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168 },
+  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38, iS: 0, nlvl: 40 },
+  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45, iS: 0 },
+  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 45 },
+  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 30 },
+  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108, iS: 0, nlvl: 22 },
 
-  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270 },
-  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300 },
+  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175, iS: 0, nlvl: 50 },
+  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210, iS: 0 },
+  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180, iS: 0, nlvl: 40 },
+  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132, iS: 0 },
+  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168, iS: 0, nlvl: 28 },
 
-  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11 },
-  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 36 },
+  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270, iS: 0 },
+  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300, iS: 0, nlvl: 32 },
 
-  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16 },
-  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30 },
-  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18 },
-  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9 },
-  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36 },
+  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11, iS: 0 },
+  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 5, ammo_tot: 24, iS: 0, nlvl: 38 },
 
-  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100 },
-  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35 },
-  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 },
-  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16 }
+  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16, iS: 0, nlvl: 24 },
+  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30, iS: 0, nlvl: 20 },
+  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18, iS: 0, nlvl: 45},
+  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9, iS: 0, nlvl: 15 },
+  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36, iS: 0, nlvl: 30 },
+
+  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100, iS: 0, nlvl: 28 },
+  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35, iS: 0, nlvl: 40 },
+  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 30 },
+  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 35 },
+  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 6, ammo_tot: 9, iS: 0, nlvl: 11},
+  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 4, iS: 0, nlvl: 4 },
+  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12, iS: 0, nlvl: 14 }
 ];
 
 const originalReloadTimeMs = {
@@ -453,23 +883,29 @@ const originalReloadTimeMs = {
   sr_vintorez: 3167,
   sr_sniperrifle03: 3667,
   sr_wildcat1: 2333,
-  sr_wildcat2: 2333
+  sr_wildcat2: 2333,
+  sr_arcticb01: 2650,
+  sr_steyr: 2333,
+  sr_arctic: 2333,
+  thca_scythe_b: 0
 };
 
 // Manual restore balance: no original damage table is available, so these
 // values follow the recovered client formulas plus the gameplay hierarchy.
 const canonicalShopWeaponStats = {
-  ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
-  ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 36, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
-
-  hg_taurus: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
-  hg_usp: { rap: 205, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
-  hg_desertb01: { rap: 280, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
-  hg_desert: { rap: 260, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
+  ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 35, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
+  ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 35, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
+  ohca_crowbar: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 5, ammo: 0, ammo_tot: 0, smindam: 15, smaxdam: 22, mmindam: 10, mmaxdam: 19, lmindam: 5, lmaxdam: 8 },
+  thca_scythe_b: { rap: 1111, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 12, ammo: 0, ammo_tot: 0, smindam: 34, smaxdam: 48, mmindam: 24, mmaxdam: 36, lmindam: 14, lmaxdam: 24 },
+  
+  hg_taurus: { rap: 460, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
+  hg_usp: { rap: 240, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
+  hg_desertb01: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
+  hg_desert: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
   hg_glockb01_s: { rap: 150, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
 
   mg_assaultrifle02: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26 },
+  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
   mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 30, ammo_tot: 180, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_aug5_o: { rap: 135, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
   mg_aug4_o: { rap: 130, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
@@ -499,7 +935,7 @@ const canonicalShopWeaponStats = {
     wsp: 15,
     shake: 1
   },
-  sg_spas: { rap: 650, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
+  sg_spas: { rap: 860, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
 
   rl_m202a1: {
     desc: "Карающая длань Четырех Вождей Красного Фронта.",
@@ -527,12 +963,15 @@ const canonicalShopWeaponStats = {
   gl_milkor: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 30, smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48 },
   gl_grenadelauncher03: { rap: 880, rt: 4000, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 5, krit: 4, ammo: 3, ammo_tot: 18, smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62 },
   rl_rpg7b02: { rap: 900, rt: 2967, lt: 1150, vel: 65, rad: 28, ang: 0, dev: 6, krit: 4, ammo: 1, ammo_tot: 9, smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78 },
-  gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50 },
+  gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 36, smaxdam: 56, mmindam: 55, mmaxdam: 68, lmindam: 56, lmaxdam: 75 },
 
-  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 42, smaxdam: 58, mmindam: 48, mmaxdam: 66, lmindam: 54, lmaxdam: 74 },
-  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 54, smaxdam: 72, mmindam: 62, mmaxdam: 82, lmindam: 70, lmaxdam: 88 },
-  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 50, smaxdam: 68, mmindam: 58, mmaxdam: 78, lmindam: 66, lmaxdam: 84 },
-  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 46, smaxdam: 62, mmindam: 54, mmaxdam: 72, lmindam: 62, lmaxdam: 82 }
+  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
+  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
+  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
+  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
+  sr_arcticb01: { rap: 1120, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 4, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
+  sr_steyr: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 7, ammo: 1, ammo_tot: 4, smindam: 45, smaxdam: 55, mmindam: 60, mmaxdam: 70, lmindam: 77, lmaxdam: 98 },
+  sr_arctic: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 6, ammo_tot: 9, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
 };
 
 function withCanonicalShopWeaponStats(item) {
@@ -543,7 +982,8 @@ function withCanonicalShopWeaponStats(item) {
 }
 
 // The live weapon shop is the vetted resources.assets subset only.
-const shopWeaponCatalog = rebuiltShopWeaponCatalog.map(withCanonicalShopWeaponStats);
+const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
+const canonicalShopWeaponCatalog = rebuiltShopWeaponCatalog.map(withCanonicalShopWeaponStats);
 
 function weaponTypeForSname(sname) {
   const prefix = String(sname || "").toLowerCase().split("_")[0];
@@ -594,16 +1034,19 @@ function shopWeaponExtra(item) {
     "sp",
     "speed",
     "launch",
-    "shake"
+    "shake",
+    "nlvl",
+    "iS"
   ]) {
     if (item[key] !== undefined) extra[key] = item[key];
   }
   return extra;
 }
 
-const shopWeapons = shopWeaponCatalog.map((item) =>
+const canonicalShopWeapons = canonicalShopWeaponCatalog.map((item) =>
   weapon(item.id, weaponTypeForSname(item.sname), item.slot, item.sname, item.price ?? SHOP_PRICE, shopWeaponExtra(item))
 );
+const shopWeapons = canonicalShopWeapons.filter((item) => !hiddenShopWeaponIds.has(Number(item.w_id)));
 
 function numericField(value, fallback = 0) {
   const number = Number(value);
@@ -614,9 +1057,28 @@ function scaledStat(value, multiplier, fallback = 0) {
   return Math.max(0, Math.round(numericField(value, fallback) * multiplier));
 }
 
+const workshopPriceOverrides = Object.freeze({
+  73: 25,  // Вождь
+  75: 15,  // Шершень
+  80: 25,  // Повстанец
+  104: 25, // Ворчун
+  105: 25, // Скиф
+  107: 25, // Вымпел
+  108: 30, // Палач
+  109: 15  // Советник
+});
+
+const workshopAmmoOverrides = Object.freeze({
+  80: Object.freeze({ ammo: 35, ammo_tot: 206 }),   // Повстанец
+  104: Object.freeze({ ammo: 5, ammo_tot: 14 }),    // Ворчун
+  105: Object.freeze({ ammo: 16, ammo_tot: 48 }),   // Скиф
+  107: Object.freeze({ ammo: 8, ammo_tot: 41 }),    // Вымпел
+  109: Object.freeze({ ammo: 3, ammo_tot: 17 })     // Советник
+});
+
 function stableWorkshopPrice(weaponId) {
   const id = Math.max(0, Math.trunc(numericField(weaponId, 0)));
-  return 10 + ((id * 17 + 11) % 31);
+  return workshopPriceOverrides[id] ?? (10 + ((id * 17 + 11) % 31));
 }
 
 const workshopUpgradeTextFallbacks = {
@@ -662,7 +1124,8 @@ function workshopUpgradeContract(weaponId) {
   const impactType = /тип[а]?\s*[\"«]?огонь|урон\s+от\s+огн|горени|поражения\s+огнем/.test(text) ? "fire"
     : (/тип[а]?\s*[\"«]?кров|кровотеч/.test(text) ? "blood"
       : (/тип[а]?\s*[\"«]?яд|урон\s+от\s+яда/.test(text) ? "poison"
-        : (/замороз|замедлен/.test(text) ? "frost" : "")));
+        : (/замедлен/.test(text) ? "slow"
+          : (/замороз/.test(text) ? "frost" : ""))));
   return {
     text,
     damageShort,
@@ -694,10 +1157,12 @@ function upgradedWeaponItem(item) {
     stRa: Math.min(5, numericField(base.stRa, 1) + 1),
     stDi: Math.min(5, numericField(base.stDi, 1) + 1),
     stDa: Math.min(5, numericField(base.stDa, 1) + 1),
-    sc: timedPermanentCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
+    sc: timedCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
     workshopImpactType: contract.impactType,
     workshopImpactDamagePercent: contract.impactDamage ? 25 : 0,
-    workshopImpactTicksBonus: contract.impactDuration ? 2 : 0
+    // Slowing is a distinct non-damaging effect.  It has no DoT ticks;
+    // `GL_Milkor` duration is enforced by the battle server at three seconds.
+    workshopImpactTicksBonus: contract.impactDuration && contract.impactType !== "slow" ? 2 : 0
   };
   if (contract.rapidity) upgraded.rap = Math.max(60, scaledStat(base.rap, 0.9, 100));
   if (contract.accuracy) upgraded.dev = Math.max(0, scaledStat(base.dev, 0.9, 0));
@@ -715,6 +1180,11 @@ function upgradedWeaponItem(item) {
     if (!enabled) continue;
     upgraded[minKey] = scaledStat(base[minKey], 1.1, 0);
     upgraded[maxKey] = Math.max(upgraded[minKey], scaledStat(base[maxKey], 1.1, 0));
+  }
+  const ammoOverride = workshopAmmoOverrides[weaponId];
+  if (ammoOverride) {
+    upgraded.ammo = ammoOverride.ammo;
+    upgraded.ammo_tot = ammoOverride.ammo_tot;
   }
   return upgraded;
 }
@@ -850,26 +1320,207 @@ function wearTextFor(slot, sname) {
 }
 
 const shopWearCatalog = {
-  Hats: ["hat01", "hat02", "hat03", "helm02", "cap01", "cap02", "helm01", "vietnam", "pilothelm", "budenka", "ushmil", "ushanka", "party02", "party01", "english", "indiana02", "indiana01", "indiana03", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2"],
-  Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos"],
-  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022"],
-  Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl02", "singl03", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2"],
-  Pants: ["jeans01", "jeans02", "pant01", "pant02", "pant03", "sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032"],
-  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99"],
-  Backpacks: ["parr01", "back01", "back02", "guit01", "guit02", "turt01", "octopus", "arrows", "darts", "rocket01", "rocket02", "rec", "shield", "extinguisher", "sarcophagus", "tomb", "Morte", "Raven", "Scarecrow", "santa", "santa2", "Snowboard", "VampireBat", "infernalRaven", "frankyOctopus", "snake01", "thanos", "rec2"],
+  Hats: ["hat01", "hat02", "hat03", "cap01", "cap02", "vietnam", "indiana02", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag"],
+  Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos", "gavaibandana"],
+  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022", "gavaigloves"],
+  Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2", "gavaihoodie"],
+  Pants: ["sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai"],
+  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag"],
+  Backpacks: ["parr01", "back01", "back02", "guit01", "guit02", "turt01", "octopus", "arrows", "darts", "rocket01", "rocket02", "rec", "shield", "extinguisher", "sarcophagus", "tomb", "Morte", "Raven", "Scarecrow", "santa", "santa2", "Snowboard", "VampireBat", "infernalRaven", "frankyOctopus", "snake01", "thanos", "rec2", "popugagavai"],
   Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka"],
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
-
+const wearPrices = {
+  //biker
+  "Shirts:biker": { price: 1200, nlvl: 25, iS: 0 },
+  "Pants:jeansB02": { price: 550, nlvl: 25, iS: 0 }, 
+  "Hats:biker": { price: 250, nlvl: 25, iS: 0 },
+  "Gloves:biker": { price: 900, nlvl: 25, iS: 0 },
+  "Boots:sneakV201": { price: 600, nlvl: 25, iS: 0 },
+  //mummy
+  "Hats:pharaoh": { price: 300, nlvl: 20, iS: 0 },
+  "Shirts:mummy": { price: 300, nlvl: 20, iS: 0 },
+  "Backpacks:sarcophagus": { price: 99999, nlvl: 999, iS: 0 },
+  "Gloves:mummy": { price: 150, nlvl: 20, iS: 0 },
+  "Pants:mummy": { price: 275, nlvl: 20, iS: 0 },
+  "Boots:mummy": { price: 150, nlvl: 20, iS: 0 },
+  "Masks:mummy_H": { price: 300, nlvl: 20, iS: 0 },
+  "Others:skrab": { price: 99999, nlvl: 999, iS: 0 },
+  //dead moroz
+  "Hats:santa": { price: 300, nlvl: 14, iS: 0 },
+  "Masks:santa": { price: 300, nlvl: 14, iS: 0 },
+  "Shirts:santa": { price: 200, nlvl: 14, iS: 0 },
+  "Backpacks:santa": { price: 400, nlvl: 14, iS: 0 },
+  "Gloves:santa": { price: 350, nlvl: 14, iS: 0 },
+  "Pants:santa": { price: 200, nlvl: 14, iS: 0 },
+  "Boots:santa": { price: 350, nlvl: 14, iS: 0 },
+  "Others:santa": { price: 300, nlvl: 14, iS: 0 },
+  //zaxvatchik
+  "Shirts:tactic03": { price: 950, nlvl: 31, iS: 0 },
+  "Pants:tactic03": { price: 780, nlvl: 31, iS: 0 },
+  "Boots:boot02": { price: 390, nlvl: 31, iS: 0 },
+  "Masks:googB02": { price: 690, nlvl: 31, iS: 0 },
+  "Hats:beret01": { price: 720, nlvl: 31, iS: 0 },
+  //delta
+  "Hats:tacticalB01": { price: 600, nlvl: 40, iS: 0 },
+  "Shirts:tacticB01": { price: 925, nlvl: 40, iS: 0 },
+  "Pants:tacticB01": { price: 700, nlvl: 40, iS: 0 },
+  "Gloves:tacticalB01": { price: 400, nlvl: 40, iS: 0 },
+  "Boots:tacticalB01": { price: 500, nlvl: 40, iS: 0 },
+  "Others:smertik": { price: 550, nlvl: 40, iS: 0 },
+  //lych
+  "Shirts:hoodB08": { price: 450, nlvl: 27, iS: 0 },
+  "Pants:sportB08": { price: 300, nlvl: 27, iS: 0 },
+  "Boots:sneakV2B02": { price: 150, nlvl: 27, iS: 0 },
+  "Hats:capB08": { price: 150, nlvl: 27, iS: 0 },
+  "Masks:bandB07": { price: 525, nlvl: 27, iS: 0 },
+  //ploxish
+  "Shirts:hoodB03": { price: 925, nlvl: 35, iS: 0 },
+  "Pants:sportB03": { price: 700, nlvl: 35, iS: 0 },
+  "Others:badboy": { price: 550, nlvl: 35, iS: 0 },
+  "Boots:sneakV2B05": { price: 500, nlvl: 35, iS: 0 },
+  "Masks:maskB01": { price: 500, nlvl: 35, iS: 0 },
+  "Hats:capB04": { price: 550, nlvl: 35, iS: 0 },
+  //kislotniy voin
+  "Hats:hatB08": { price: 550, nlvl: 35, iS: 0 },
+  "Shirts:hoodB10": { price: 950, nlvl: 35, iS: 0 },
+  "Pants:sportB10": { price: 700, nlvl: 35, iS: 0 },
+  "Boots:sneakV2B06": { price: 500, nlvl: 35, iS: 0 },
+  "Masks:bandB03": { price: 525, nlvl: 35, iS: 0 },
+  //stuzha
+  "Hats:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Masks:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Shirts:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Backpacks:santa": { price: 600, nlvl: 33, iS: 0 },
+  "Gloves:santa2": { price: 350, nlvl: 33, iS: 0 },
+  "Pants:santa2": { price: 550, nlvl: 33, iS: 0 },
+  "Boots:santa2": { price: 500, nlvl: 33, iS: 0 },
+  "Others:santa2": { price: 450, nlvl: 33, iS: 0 },
+  //nekrovoin
+  "Heads:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Masks:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Shirts:franky": { price: 1000, nlvl: 35, iS: 0 },
+  "Pants:franky": { price: 500, nlvl: 35, iS: 0 },
+  "Boots:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Gloves:franky": { price: 400, nlvl: 35, iS: 0 },
+  "Others:franky": { price: 600, nlvl: 35, iS: 0 },
+  "Backpacks:frankyOctopus": { price: 700, nlvl: 35, iS: 0 },
+  //infernal
+  "Hats:infernal": { price: 500, nlvl: 42, iS: 0 },
+  "Shirts:infernal": { price: 800, nlvl: 42, iS: 0 },
+  "Pants:infernal": { price: 500, nlvl: 42, iS: 0 },
+  "Boots:infernal": { price: 500, nlvl: 42, iS: 0 },
+  "Gloves:infernal": { price: 400, nlvl: 42, iS: 0 },
+  "Masks:infernal_H": { price: 600, nlvl: 42, iS: 0 },
+  "Others:infernal": { price: 600, nlvl: 42, iS: 0 },
+  "Backpacks:infernalRaven": { price: 600, nlvl: 42, iS: 0 },
+  //kiborg
+  "Masks:maskB02": { price: 99999, nlvl: 999, iS: 0 },
+  "Shirts:hoodB05": { price: 99999, nlvl: 999, iS: 0 },
+  "Pants:sportB05": { price: 9999, nlvl: 999, iS: 0 },
+  "Boots:sneakV2B04": { price: 9999, nlvl: 999, iS: 0 },
+  //strannik
+  "Hats:hatB01": { price: 340, nlvl: 21, iS: 0 },
+  "Masks:bandB05": { price: 245, nlvl: 21, iS: 0 },
+  "Shirts:hoodB01": { price: 550, nlvl: 21, iS: 0 },
+  "Pants:sportB01": { price: 350, nlvl: 21, iS: 0 },
+  "Boots:sneakV2B10": { price: 325, nlvl: 21, iS: 0 },
+  //zmeelov
+  "Masks:bandB01": { price: 525, nlvl: 27, iS: 0 },
+  "Shirts:hoodB04": { price: 600, nlvl: 27, iS: 0 },
+  "Pants:sportB04": { price: 400, nlvl: 27, iS: 0 },
+  "Hats:capB07": { price: 575, nlvl: 27, iS: 0 },
+  "Backpacks:snake01": { price: 400, nlvl: 27, iS: 0 },
+  //prizrak
+  "Masks:klavaB01": { price: 600, nlvl: 21, iS: 0 },
+  "Shirts:prizrak": { price: 700, nlvl: 21, iS: 0 },
+  "Pants:prizrak": { price: 500, nlvl: 21, iS: 0 },
+  "Gloves:prizrak": { price: 300, nlvl: 21, iS: 0 },
+  "Boots:prizrak": { price: 400, nlvl: 21, iS: 0 },
+  //anarchist
+  "Hats:capB01": { price: 600, nlvl: 34, iS: 0 },
+  "Shirts:anarch": { price: 850, nlvl: 34, iS: 0 },
+  "Pants:jeansB03": { price: 600, nlvl: 34, iS: 0 },
+  "Gloves:wristwrapB03": { price: 600, nlvl: 34, iS: 0 },
+  "Boots:anarch": { price: 450, nlvl: 34, iS: 0 },
+  "Others:spinyellow": { price: 750, nlvl: 34, iS: 0 },
+  //zadira
+  "Hats:hatB06": { price: 800, nlvl: 30, iS: 0 },
+  "Masks:bandB04": { price: 9999, nlvl: 30, iS: 0 }, // za donat
+  "Shirts:hoodB60": { price: 1000, nlvl: 30, iS: 0 },
+  "Pants:sportB06": { price: 800, nlvl: 30, iS: 0 },
+  "Boots:zadira": { price: 800, nlvl: 30, iS: 0 },
+  "Others:burger": { price: 500, nlvl: 30, iS: 0 },
+  //thanos
+  "Heads:thanos": { price: 300, nlvl: 30, iS: 0 }, // za donat
+  "Masks:thanos": { price: 300, nlvl: 30, iS: 0 },
+  "Shirts:thanos": { price: 700, nlvl: 30, iS: 0 },
+  "Pants:thanos": { price: 500, nlvl: 30, iS: 0 },
+  "Gloves:thanos": { price: 1200, nlvl: 30, iS: 0 }, // za donat
+  "Boots:thanos": { price: 200, nlvl: 30, iS: 0 },
+  "Backpacks:thanos": { price: 300, nlvl: 30, iS: 0 },
+  //barhan
+  "Hats:milcap03": { price: 550, nlvl: 30, iS: 0 },
+  "Shirts:tactic04": { price: 825, nlvl: 30, iS: 0 },
+  "Gloves:tactical02": { price: 375, nlvl: 30, iS: 0 },
+  "Pants:tactic04": { price: 650, nlvl: 30, iS: 0 },
+  //custom
+  "Hats:capgavaimag": { price: 220000, nlvl: 299, iS: 0 },
+  "Masks:gavaibandana": { price: 220000, nlvl: 299, iS: 0 },
+  "Shirts:gavaihoodie": { price: 220000, nlvl: 299, iS: 0 },
+  "Pants:shortigavai": { price: 220000, nlvl: 299, iS: 0 },
+  "Boots:gavaibootsmag": { price: 220000, nlvl: 299, iS: 0 },
+  "Backpacks:popugagavai": { price: 220000, nlvl: 299, iS: 0 },  
+  "Gloves:gavaigloves": { price: 220000, nlvl: 299, iS: 0 },
+  //default shirts
+  "Shirts:hood05": { price: 325, nlvl: 3, iS: 0 },
+  "Shirts:hood01": { price: 210, nlvl: 3, iS: 0 },
+  "Shirts:hood02": { price: 255, nlvl: 3, iS: 0 },
+  "Shirts:shirtB08": { price: 3999, nlvl: 42, iS: 0 },
+  //default pants
+  "Pants:sport04": { price: 325, nlvl: 3, iS: 0 },
+  "Pants:sport01": { price: 310, nlvl: 3, iS: 0 }
+};
 const legacyShopWears = Object.entries(shopWearCatalog).flatMap(([slot, names]) =>
-  names.map((sname, index) => wear(10000 + wearSlotIds[slot] * 1000 + index + 1, wearSlotIds[slot], sname, SHOP_PRICE, slot))
+  names.map((sname, index) => {
+    const key = `${slot}:${sname}`;
+    const config = wearPrices[key] ?? {};
+
+    return wear(
+      10000 + wearSlotIds[slot] * 1000 + index + 1,
+      wearSlotIds[slot],
+      sname,
+      config.price ?? SHOP_PRICE,
+      slot,
+      {
+        nlvl: config.nlvl ?? 1,
+        iS: config.iS ?? 0
+      }
+    );
+  })
 );
 
-const shopWears = legacyShopWears;
+const wearSlotNamesById = new Map(Object.entries(wearSlotIds).map(([slot, id]) => [Number(id), slot]));
+const standaloneHiddenShopWearKeys = new Set([
+  "Shirts:armor01", // Работник органов
+  "Shirts:armor02", // Законник
+  "Shirts:armor03", // Жилет агента
+  "Shirts:armor04", // Комплект агента
+  "Shirts:jack01",  // Кожанка
+  "Shirts:singl05", // Натуралитет
+  "Shirts:singl06", // БезрукOFF
+  "Shirts:jack02",  // Куртка бойца
+  "Shirts:jack03",  // Байкерский куртяк
+  "Shirts:shirt01", // Кожа крокодила
+  "Shirts:shirt02", // Классика
+  "Shirts:shirt03", // Шахтерка
+  "Shirts:shirt04", // Улыбака
+  "Shirts:singl04"  // Чисточел
+]);
 
 function findWearCatalogItem(slot, sname) {
   const wt = wearSlotIds[slot];
-  const item = shopWears.find((wearItem) => Number(wearItem.wt) === Number(wt) && String(wearItem.sname) === String(sname));
+  const item = legacyShopWears.find((wearItem) => Number(wearItem.wt) === Number(wt) && String(wearItem.sname) === String(sname));
   if (!item) {
     throw new Error(`Wear catalog item not found: ${slot}:${sname}`);
   }
@@ -997,12 +1648,94 @@ const restoredAssemblageDefinitions = [
   { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"]] },
   { id: 36, code: "spy", items: [["Hats", "business"], ["Masks", "businessgoogles"], ["Shirts", "business"], ["Pants", "business"], ["Gloves", "business"], ["Boots", "business"]] },
   { id: 37, code: "contranos", items: [["Heads", "thanos"], ["Masks", "thanos"], ["Shirts", "thanos"], ["Pants", "thanos"], ["Gloves", "thanos"], ["Boots", "thanos"], ["Backpacks", "thanos"]] },
-  { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] }
+  { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] },
+  { id: 39, code: "gavai", items: [["Hats", "capgavaimag"], ["Masks", "gavaibandana"], ["Shirts", "gavaihoodie"], ["Pants", "shortigavai"], ["Gloves", "gavaigloves"], ["Boots", "gavaibootsmag"], ["Backpacks", "popugagavai"]] }
 ];
+
+const donateWearSetsById = new Map([
+  [25, {
+    id: 25,
+    items: [
+      ["Heads", "franky"],
+      ["Masks", "franky"],
+      ["Shirts", "franky"],
+      ["Pants", "franky"],
+      ["Boots", "franky"],
+      ["Gloves", "franky"],
+      ["Others", "franky"],
+      ["Backpacks", "frankyOctopus"]
+    ]
+  }],
+  [34, {
+    id: 34,
+    items: [
+      ["Hats", "avenger"],
+      ["Masks", "avenger"],
+      ["Shirts", "avenger"],
+      ["Pants", "avenger"],
+      ["Gloves", "avenger"],
+      ["Boots", "avenger"]
+    ]
+  }],
+  [35, {
+    id: 35,
+    items: [
+      ["Hats", "stalker"],
+      ["Masks", "stalkergasmask"],
+      ["Shirts", "stalker"],
+      ["Pants", "stalker"],
+      ["Gloves", "stalker"],
+      ["Boots", "stalker"]
+    ]
+  }],
+  [36, {
+    id: 36,
+    items: [
+      ["Hats", "business"],
+      ["Masks", "businessgoogles"],
+      ["Shirts", "business"],
+      ["Pants", "business"],
+      ["Gloves", "business"],
+      ["Boots", "business"]
+    ]
+  }]
+]);
+
+function donateWearSetItems(setIdValue) {
+  const definition = donateWearSetsById.get(Number(setIdValue));
+  if (!definition) return null;
+  return definition.items.map(([slot, sname]) => {
+    const item = clone(findWearCatalogItem(slot, sname));
+    item.eD = 0;
+    return item;
+  });
+}
 
 // Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
 // Keep them out of the shop response instead of exposing sets the battle server cannot complete.
-const removedAssemblageIds = new Set([4, 5]);
+// The other IDs below are intentionally retired from the live shop; their item
+// definitions stay canonical so already owned/equipped pieces remain valid.
+const removedAssemblageIds = new Set([
+  1,  // ПИКОВЫЙ ЖНЕЦ
+  2,  // ВОРОН
+  4,  // ШТУРМОВИК: исходный состав не восстановлен
+  5,  // ЭКОТЕРРОР: исходный состав не восстановлен
+  8,  // РАЗВЕД
+  10, // ВДВ
+  14, // Олимпиец
+  23, // Красная жара
+  24  // Прохладный бриз
+]);
+const hiddenAssemblageWearKeys = new Set(
+  restoredAssemblageDefinitions
+    .filter((definition) => removedAssemblageIds.has(definition.id))
+    .flatMap((definition) => definition.items.map(([slot, sname]) => `${slot}:${sname}`))
+);
+const hiddenShopWearKeys = new Set([...standaloneHiddenShopWearKeys, ...hiddenAssemblageWearKeys]);
+const shopWears = legacyShopWears.filter((item) => {
+  const slot = wearSlotNamesById.get(Number(item.wt)) || "";
+  return !hiddenShopWearKeys.has(`${slot}:${item.sname}`);
+});
 const shopAssemblages = restoredAssemblageDefinitions
   .filter((definition) => !removedAssemblageIds.has(definition.id))
   .map((definition) => {
@@ -1017,16 +1750,18 @@ const shopAssemblages = restoredAssemblageDefinitions
   });
 
 // Hidden from the live shop: 2 "Лимонадный глоток", 6 "Пальцестрел",
-// 10 "Секир-башка", 11 "Подозрительность".
-const shopTaunts = [3, 4, 5, 7, 8, 9].map((id) => taunt(id, SHOP_PRICE));
+// 9 "Самолеты", 10 "Секир-башка", 11 "Подозрительность".
+const canonicalTaunts = Object.entries(TAUNT_PRICES).map(([id, prices]) => taunt(Number(id), prices));
+const hiddenShopTauntIds = new Set([9]);
+const shopTaunts = canonicalTaunts.filter((item) => !hiddenShopTauntIds.has(Number(item.t_id)));
 const shopEnhancers = SHOP_ENHANCER_IDS.map((id) =>
-  enhancer(id, SHOP_PRICE)
+  enhancer(id, ENHANCER_PRICES[id])
 );
-const canonicalWeaponsById = new Map([...defaultWeapons, ...shopWeapons].map((item) => [Number(item.w_id), item]));
+const canonicalWeaponsById = new Map([...defaultWeapons, ...canonicalShopWeapons].map((item) => [Number(item.w_id), item]));
 const weaponSnameKey = (item) => String(item?.sn || item?.sname || "").toLowerCase();
-const canonicalWeaponsBySname = new Map([...defaultWeapons, ...shopWeapons].map((item) => [weaponSnameKey(item), item]).filter(([key]) => key));
-const canonicalWearsById = new Map(shopWears.map((item) => [Number(item.w_id), item]));
-const canonicalTauntsById = new Map(shopTaunts.map((item) => [Number(item.t_id), item]));
+const canonicalWeaponsBySname = new Map([...defaultWeapons, ...canonicalShopWeapons].map((item) => [weaponSnameKey(item), item]).filter(([key]) => key));
+const canonicalWearsById = new Map(legacyShopWears.map((item) => [Number(item.w_id), item]));
+const canonicalTauntsById = new Map(canonicalTaunts.map((item) => [Number(item.t_id), item]));
 const canonicalEnhancersById = new Map(shopEnhancers.map((item) => [Number(item.e_id), item]));
 const viewWearKeys = ["hat", "head", "mask", "gloves", "shirt", "pants", "boots", "backpack", "other"];
 
@@ -1048,15 +1783,34 @@ const abilityValueDefinitions = {
   11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] }
 };
 
+// Пять цен: для 1, 2, 3, 4 и 5 уровня способности.
+const abilityPrices = {
+  1: [100, 150, 200, 400, 1200],
+  2: [100, 150, 200, 400, 1200],
+  3: [180, 200, 300, 600, 1800],
+  4: [180, 250, 350, 700, 2100],
+  5: [180, 200, 300, 600, 1800],
+  6: [130, 160, 210, 420, 1260],
+  7: [180, 250, 350, 700, 2100], // Барахольщик
+  8: [130, 160, 210, 420, 1260], // Немаленький
+  9: [130, 160, 210, 420, 1260], // Максималист
+  10: [180, 200, 300, 600, 1800], // Точность по ГОСТу
+  11: [130, 160, 210, 420, 1260] // Охотник за головами
+};
 const abilityCatalog = [];
+
 for (const [abilityIdText, definition] of Object.entries(abilityValueDefinitions)) {
   const abilityId = Number(abilityIdText);
+
   for (let level = 1; level <= definition.values.length; level += 1) {
     abilityCatalog.push({
       i: abilityId,
       l: level,
       v: JSON.stringify([{ t: definition.type, [definition.key]: String(definition.values[level - 1]) }]),
-      sc: cost(5000 + abilityId * 10 + level, 100 * level)
+      sc: cost(
+        5000 + abilityId * 10 + level,
+        abilityPrices[abilityId]?.[level - 1] ?? 100 * level
+      )
     });
   }
 }
@@ -1066,7 +1820,11 @@ const MAP_MODE_DEATHMATCH = 1;
 const MAP_MODE_TEAM_DEATHMATCH = 2;
 const MAP_MODE_CAPTURE_THE_FLAG = 4;
 const MAP_MODE_CONTROL_POINTS = 8;
+// Client mode 16 initializes the Campaign NPC container. For Dashguard it is
+// presented as the dedicated Event mode rather than the legacy tower UI.
+//const MAP_MODE_DASHGUARD_EVENT = 16;
 const MAP_MODE_ZOMBIE = 64;
+const MAP_MODE_ROGUELIKE = 128;
 const MAP_MODE_DM_ZOMBIE = MAP_MODE_DEATHMATCH | MAP_MODE_ZOMBIE;
 const DOSSIER_GAME_MODE_STATS = [
   MAP_MODE_DEATHMATCH,
@@ -1094,7 +1852,9 @@ const maps = [
   mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
-  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS)
+  mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
+  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH | MAP_MODE_ROGUELIKE),
+  //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
 function starterAccount(name = "ContraCity", id = 1, key = DEFAULT_KEY) {
@@ -1158,13 +1918,33 @@ function newAccountKey(id) {
   return `${DEFAULT_KEY}-${id}-${crypto.randomUUID()}`.slice(0, 128);
 }
 
-function createNewAccount(name) {
-  const id = nextAccountId();
-  const account = starterAccount(name, id, newAccountKey(id));
-  account.namePending = true;
-  store.accounts[String(id)] = account;
-  saveStore(store);
-  return account;
+async function createNewAccounts(name, count) {
+  const total = Number(count);
+  if (!Number.isSafeInteger(total) || total < 1 || total > CREATE_BATCH_MAX) {
+    throw new RangeError(`account batch size must be between 1 and ${CREATE_BATCH_MAX}`);
+  }
+
+  const accounts = [];
+  try {
+    // Allocate the whole batch synchronously so concurrent HTTP requests cannot
+    // receive the same IDs. Persist once: saveStore writes one atomic Postgres
+    // snapshot instead of rewriting it for every generated tester account.
+    for (let index = 0; index < total; index += 1) {
+      const id = nextAccountId();
+      const account = starterAccount(name, id, newAccountKey(id));
+      account.namePending = true;
+      store.accounts[String(id)] = account;
+      accounts.push(account);
+    }
+
+    await saveStore(store);
+    return accounts;
+  } catch (error) {
+    for (const account of accounts) {
+      delete store.accounts[String(account.id)];
+    }
+    throw error;
+  }
 }
 
 function ensureStoreDir() {
@@ -1195,13 +1975,40 @@ function saveStore(store) {
 }
 
 let pgPool = null;
+const clanWarHost = String(process.env.CLAN_WARS_HOST || BATTLE_HOST).trim();
+const clanWarMasterPorts = new Set([Number(process.env.GAME_MASTER_PORT || 5058),
+  ...String(process.env.SOCIAL_MASTER_PORTS || process.env.SOCIAL_MASTER_PORT || "5057").split(",").map(Number)]);
+const clanWarPorts = String(process.env.CLIENT_BATTLE_PORTS || process.env.BATTLE_PORTS || "5055,5056,5255")
+  .split(",").map(Number).filter(port => Number.isInteger(port) && port > 0 && port <= 65535 && !clanWarMasterPorts.has(port));
+const clanWarPort = Number(process.env.CLAN_WARS_PORT || clanWarPorts[0]);
+// One public switch. Optional legacy overrides remain available for operators.
+const clanWarMaps = process.env.CLAN_WARS_VERIFIED_MAPS === undefined
+  ? WAR_MAPS.map(map => map.id)
+  : String(process.env.CLAN_WARS_VERIFIED_MAPS).split(",").map(value => value.trim());
+const clanWars = createClanWars({
+  getPool: () => pgPool,
+  enabled: process.env.CLAN_WARS_ENABLED === "1",
+  verifiedMaps: clanWarMaps,
+  endpoint: clanWarHost === BATTLE_HOST && clanWarPorts.includes(clanWarPort) && Number.isInteger(clanWarPort)
+    ? { serverId: process.env.CLAN_WARS_SERVER_ID || "clan-wars-1", host: clanWarHost, port: clanWarPort } : null
+});
+let clanBannerAppearanceReady = false;
+let clanBannerSchemaReady = false;
 let pgSaveChain = Promise.resolve();
 const viewSelectionSaveVersions = new Map();
 const weaponSelectionSaveVersions = new Map();
 const MANAGED_CATALOG_ITEM_TYPES = [1, 2, 3, 4];
 
 function enqueuePostgresMutation(operation) {
-  const run = pgSaveChain.catch(() => {}).then(operation);
+  if (postgresMutationQueueDepth >= POSTGRES_MUTATION_QUEUE_MAX) {
+    const error = new Error("database_busy");
+    error.code = "DATABASE_BUSY";
+    return Promise.reject(error);
+  }
+  postgresMutationQueueDepth += 1;
+  const run = pgSaveChain.catch(() => {}).then(operation).finally(() => {
+    postgresMutationQueueDepth = Math.max(0, postgresMutationQueueDepth - 1);
+  });
   pgSaveChain = run.catch((error) => {
     console.error("[postgres] mutation failed", error);
   });
@@ -1270,11 +2077,12 @@ async function runMigrations() {
     const applied = await pgPool.query("SELECT 1 FROM schema_migrations WHERE version = $1", [version]);
     if (applied.rowCount) continue;
 
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8").replace(/^\uFEFF/, "");
     const client = await pgPool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(sql);
+      await client.query(`SET LOCAL statement_timeout = ${Math.trunc(POSTGRES_MIGRATION_TIMEOUT_MS)}`);
+      await client.query({ text: sql, query_timeout: POSTGRES_MIGRATION_TIMEOUT_MS });
       await client.query("INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING", [version]);
       await client.query("COMMIT");
     } catch (error) {
@@ -1286,12 +2094,35 @@ async function runMigrations() {
   }
 }
 
+async function ensurePlayerNamePendingSchema() {
+  await pgPool.query("ALTER TABLE players ADD COLUMN IF NOT EXISTS name_pending BOOLEAN NOT NULL DEFAULT false");
+}
+
+async function ensureAuditSecuritySchema() {
+  // Keep these columns as startup invariants as well as migration 014. Railway
+  // deployments can retain a stale schema_migrations row or omit migration
+  // assets while still deploying server.js; either case must not break login
+  // audit on an otherwise healthy game API.
+  await pgPool.query("ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS geo JSONB NOT NULL DEFAULT '{}'::jsonb");
+  await pgPool.query("ALTER TABLE player_activity ADD COLUMN IF NOT EXISTS last_geo JSONB NOT NULL DEFAULT '{}'::jsonb");
+}
+
+async function ensureTelegramSystemState(executor = pgPool) {
+  if (!executor) return;
+  await executor.query(
+    `INSERT INTO launcher_telegram_system_state (id, binding_epoch)
+     VALUES (1, 1)
+     ON CONFLICT (id) DO NOTHING`
+  );
+}
+
 async function ensureLauncherDeviceSchema() {
   await pgPool.query(`
     CREATE TABLE IF NOT EXISTS launcher_devices (
       player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
       device_key_id TEXT NOT NULL,
       device_public_key TEXT NOT NULL,
+      link_key_hash TEXT NOT NULL DEFAULT '',
       hwid_hash TEXT NOT NULL DEFAULT '',
       risk JSONB NOT NULL DEFAULT '{}'::jsonb,
       bound_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1299,10 +2130,31 @@ async function ensureLauncherDeviceSchema() {
       reset_at TIMESTAMPTZ
     )
   `);
+  await pgPool.query("ALTER TABLE launcher_devices ADD COLUMN IF NOT EXISTS link_key_hash TEXT NOT NULL DEFAULT ''");
   await pgPool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS launcher_devices_device_key_id_idx
       ON launcher_devices (device_key_id)
   `);
+
+  const legacyBindings = await pgPool.query(`
+    SELECT d.player_id, p.cckey
+    FROM launcher_devices d
+    JOIN players p ON p.id = d.player_id
+    WHERE d.link_key_hash = ''
+  `);
+  if (legacyBindings.rowCount) {
+    const playerIds = legacyBindings.rows.map((row) => Number(row.player_id));
+    const linkKeyHashes = legacyBindings.rows.map((row) => launcherLinkKeyHash(row.cckey));
+    await pgPool.query(
+      `UPDATE launcher_devices d
+       SET link_key_hash = source.link_key_hash
+       FROM unnest($1::integer[], $2::text[]) AS source(player_id, link_key_hash)
+       WHERE d.player_id = source.player_id
+         AND d.link_key_hash = ''`,
+      [playerIds, linkKeyHashes]
+    );
+    console.log(`[launcher-device] backfilled link generation bindings=${legacyBindings.rowCount}`);
+  }
 }
 
 async function syncPostgresCatalog(existingClient = null) {
@@ -1359,6 +2211,7 @@ async function loadLegacyPostgresStore() {
 }
 
 async function loadPostgresStore() {
+  await refreshClanBannerSchema(pgPool);
   const players = await pgPool.query("SELECT * FROM players ORDER BY id");
   const inventory = await pgPool.query("SELECT player_id, item_data FROM player_inventory ORDER BY player_id, created_at, item_key");
   const abilities = await pgPool.query("SELECT player_id, ability_id, ability_level FROM player_abilities ORDER BY player_id, ability_id");
@@ -1498,6 +2351,18 @@ async function loadPostgresStore() {
     if (item && typeof item === "object") clan.inventory.push({ ...item, itemKey: row.item_key });
   }
 
+  // The legacy snapshot rewrites `clans`. Appearance is deliberately loaded
+  // from its independent table after reconstructing that snapshot.
+  if (clanBannerAppearanceReady) {
+    const appearances = await pgPool.query("SELECT clan_id, banner_id, revision FROM clan_banner_appearance");
+    for (const row of appearances.rows) {
+      const clan = clanStore.byId[String(row.clan_id)];
+      if (!clan || clan.deletedAt) continue;
+      clan.bannerId = normalizeClanBannerId(row.banner_id);
+      clan.bannerRevision = normalizeClanBannerRevision(row.revision);
+    }
+  }
+
   return normalizeStore({ accounts, clans: clanStore });
 }
 
@@ -1509,10 +2374,19 @@ async function initStore() {
   const { Pool } = await import("pg");
   pgPool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
+    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined,
+    max: POSTGRES_POOL_MAX,
+    connectionTimeoutMillis: POSTGRES_CONNECT_TIMEOUT_MS,
+    idleTimeoutMillis: POSTGRES_IDLE_TIMEOUT_MS,
+    statement_timeout: POSTGRES_QUERY_TIMEOUT_MS,
+    query_timeout: POSTGRES_QUERY_TIMEOUT_MS,
+    application_name: "contra-city-api",
   });
 
   await runMigrations();
+  await ensureAuditSecuritySchema();
+  await ensureTelegramSystemState();
+  await ensurePlayerNamePendingSchema();
   await ensureLauncherDeviceSchema();
   await syncPostgresCatalog();
 
@@ -1555,7 +2429,6 @@ async function savePostgresStore(nextStore) {
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16)
         ON CONFLICT (id) DO UPDATE SET
-          cckey = EXCLUDED.cckey,
           name = EXCLUDED.name,
           full_name = EXCLUDED.full_name,
           level = EXCLUDED.level,
@@ -1773,7 +2646,10 @@ async function savePostgresStore(nextStore) {
         const itemKey = String(item.itemKey || inventoryItemKey(item));
         await client.query(
           `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
-           VALUES ($1, $2, $3::jsonb, $4, $5)`,
+           VALUES ($1, $2, $3::jsonb, $4, $5)
+           ON CONFLICT (clan_id, item_key) DO UPDATE SET
+             item_data = EXCLUDED.item_data,
+             expires_at = EXCLUDED.expires_at`,
           [
             normalized.id,
             itemKey,
@@ -1801,6 +2677,31 @@ async function savePostgresStore(nextStore) {
 }
 
 let store = await initStore();
+if (pgPool && TELEGRAM_LINK_API_TOKEN) {
+  cleanupTelegramPairingState().catch((error) => {
+    console.error("[telegram-pairing] initial cleanup failed", error);
+  });
+  const telegramCleanupTimer = setInterval(() => {
+    cleanupTelegramPairingState().catch((error) => {
+      console.error("[telegram-pairing] scheduled cleanup failed", error);
+    });
+  }, TELEGRAM_CLEANUP_INTERVAL_MS);
+  telegramCleanupTimer.unref();
+}
+
+const adminLogsApi = createAdminLogsApi({
+  getPool: () => pgPool,
+  readJsonBody,
+  requestIp: requestClientIp,
+  requestGeo,
+  onPlayerChanged: async (playerId) => {
+    if (!pgPool) return;
+    playerBanCache.delete(Number(playerId));
+    const fresh = await loadPostgresAccount(playerId);
+    if (fresh) store.accounts[String(playerId)] = fresh;
+  }
+});
+const adminLogsStatus = await adminLogsApi.initialize();
 
 function canonicalWeaponForRawItem(item) {
   if (Number(item?.itype || 0) !== 1) return null;
@@ -2039,7 +2940,7 @@ function normalizeAccount(account) {
   const rawInventory = Array.isArray(account?.inventory) ? account.inventory : [];
   const loadoutInventory = normalizeLoadoutInventory({ ...fresh.weap, ...(account?.weap || {}) }, rawInventory);
   const viewInventory = normalizeViewInventory({ ...fresh.view, ...(account?.view || {}) }, loadoutInventory.inventory);
-  return {
+  const normalized = {
     ...fresh,
     ...account,
     view: viewInventory.view,
@@ -2054,6 +2955,13 @@ function normalizeAccount(account) {
     modeStats: Array.isArray(account?.modeStats) ? account.modeStats : [],
     mapStats: Array.isArray(account?.mapStats) ? account.mapStats : []
   };
+  if (normalized.launcherDevice) {
+    normalized.launcherDevice = {
+      ...normalized.launcherDevice,
+      linkKeyHash: normalized.launcherDevice.linkKeyHash || launcherLinkKeyHash(normalized.key)
+    };
+  }
+  return normalized;
 }
 
 function ensureDesktopAccount() {
@@ -2086,13 +2994,14 @@ function pruneLauncherSessions(now = Date.now()) {
   }
 }
 
-function createLauncherSession(account) {
+function createLauncherSession(account, deviceKeyId = "") {
   pruneLauncherSessions();
   const token = randomLauncherToken();
   const expiresAt = Date.now() + LAUNCHER_SESSION_TTL_MS;
   launcherSessions.set(token, {
     id: String(account.id),
     key: String(account.key),
+    deviceKeyId: normalizeLauncherDeviceKeyId(deviceKeyId),
     expiresAt
   });
   return {
@@ -2101,11 +3010,17 @@ function createLauncherSession(account) {
   };
 }
 
-function launcherSessionCredentials(rawToken) {
+function launcherSessionRecord(rawToken) {
   const token = String(rawToken || "").trim();
   if (!token) return null;
   pruneLauncherSessions();
   const session = launcherSessions.get(token);
+  if (!session) return null;
+  return { token, ...session };
+}
+
+function launcherSessionCredentials(rawToken) {
+  const session = launcherSessionRecord(rawToken);
   if (!session) return null;
   return { id: String(session.id), key: String(session.key) };
 }
@@ -2176,14 +3091,29 @@ function accountFrom(url) {
 }
 
 function persist(account) {
+  const current = store.accounts[String(account.id)];
+  if (current?.key && account.key !== current.key && isRevokedGameLinkKey(account.id, account.key)) {
+    account.key = current.key;
+  }
   account.updatedAt = new Date().toISOString();
   store.accounts[String(account.id)] = normalizeAccount(account);
   saveStore(store);
 }
 
-async function accountFromRequest(url) {
+async function accountFromRequestUnchecked(url) {
+  const requestStartedAt = Date.now();
+  const requestPage = String(url.searchParams.get("page") || "").toLowerCase();
+  const requestAction = String(url.searchParams.get("act") || url.searchParams.get("action") || "").toLowerCase();
+  const traceClanRequest = requestPage === "clan" && ["join", "m", "inv", "accept", "reject", "remove", "leave", "gevnt"].includes(requestAction);
+  const logClanPreRoute = (source) => {
+    if (!traceClanRequest) return;
+    console.log(`[clan-request] pre-route act=${requestAction} source=${source} duration=${Date.now() - requestStartedAt}ms`);
+  };
   const credentials = accountCredentialsFrom(url);
   if (!credentials) {
+    return null;
+  }
+  if (isRevokedGameLinkKey(credentials.id, credentials.key)) {
     return null;
   }
 
@@ -2191,7 +3121,9 @@ async function accountFromRequest(url) {
   const cached = store.accounts[credentials.id] ? normalizeAccount(store.accounts[credentials.id]) : null;
   if (cached && cached.key === credentials.key) {
     store.accounts[credentials.id] = cached;
-    return skipPreRefresh ? cached : refreshAccountFromPostgres(cached);
+    const resolved = skipPreRefresh ? cached : await refreshAccountFromPostgres(cached);
+    logClanPreRoute(skipPreRefresh ? "cache" : "cache-pg-refresh");
+    return resolved;
   }
 
   if (pgPool) {
@@ -2200,6 +3132,7 @@ async function accountFromRequest(url) {
       const fresh = await loadPostgresAccount(credentials.id);
       if (fresh && fresh.key === credentials.key) {
         store.accounts[credentials.id] = fresh;
+        logClanPreRoute("postgres-load");
         return fresh;
       }
     } catch (error) {
@@ -2208,7 +3141,39 @@ async function accountFromRequest(url) {
   }
 
   const account = accountFrom(url);
-  return skipPreRefresh ? account : refreshAccountFromPostgres(account);
+  const resolved = skipPreRefresh ? account : await refreshAccountFromPostgres(account);
+  logClanPreRoute(skipPreRefresh ? "fallback-cache" : "fallback-pg-refresh");
+  return resolved;
+}
+
+async function activePlayerBan(playerId, executor = pgPool) {
+  const id = Number(playerId || 0);
+  if (!executor?.query || !Number.isInteger(id) || id <= 0) return null;
+  const now = Date.now();
+  const cached = playerBanCache.get(id);
+  if (cached && now - cached.loadedAt < PLAYER_BAN_CACHE_TTL_MS) return cached.ban;
+  const result = await executor.query(
+    `SELECT id, reason, expires_at
+     FROM admin_punishments
+     WHERE player_id = $1
+       AND punishment_type = 'ban'
+       AND revoked_at IS NULL
+       AND (expires_at IS NULL OR expires_at > now())
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [id]
+  );
+  const ban = result.rows[0] || null;
+  if (playerBanCache.has(id)) playerBanCache.delete(id);
+  playerBanCache.set(id, { loadedAt: now, ban });
+  while (playerBanCache.size > 10000) playerBanCache.delete(playerBanCache.keys().next().value);
+  return ban;
+}
+
+async function accountFromRequest(url) {
+  const account = await accountFromRequestUnchecked(url);
+  if (!account) return null;
+  return (await activePlayerBan(account.id)) ? null : account;
 }
 
 function postgresTimestamp(value) {
@@ -2284,6 +3249,7 @@ async function loadPostgresAccount(id) {
      ORDER BY play_time DESC, map_name`,
     [Number(row.id)]
   );
+  const staffRole = await loadActiveStaffRole(pgPool, Number(row.id));
 
   const account = accountFromPostgresRow(
     row,
@@ -2312,6 +3278,7 @@ async function loadPostgresAccount(id) {
       pt: Number(statRow.play_time || 0)
     }))
   );
+  account.staffRole = staffRole;
   account.clan = clanSummaryForPlayer(account.id);
   return normalizeAccount(account);
 }
@@ -2344,6 +3311,7 @@ async function profileAccountForView(account, url) {
       const fresh = await loadPostgresAccount(targetId);
       if (fresh) {
         store.accounts[String(fresh.id)] = fresh;
+        account.money = nextPlayerMoney;
         target = fresh;
       }
     } catch (error) {
@@ -2402,7 +3370,7 @@ function launcherNewsPayload() {
   return [
     {
       id: "fresh-build",
-      title: `Свежая сборка v${LAUNCHER_VERSION}`,
+      title: `\u0421\u0432\u0435\u0436\u0430\u044f \u0441\u0431\u043e\u0440\u043a\u0430 v${LAUNCHER_VERSION}`,
       is_pinned: true
     }
   ];
@@ -2439,6 +3407,20 @@ function normalizeLauncherPublicKey(value) {
   return publicKey;
 }
 
+function launcherLinkKeyHash(value) {
+  return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
+}
+
+function launcherDeviceKeyMatchesPublicKey(deviceKeyId, publicKey) {
+  const expected = String(deviceKeyId || "").toLowerCase();
+  if (!expected.startsWith("win.")) return false;
+  const pemVariants = [publicKey, `${publicKey}\n`, `${publicKey}\r\n`];
+  return pemVariants.some((pem) => {
+    const hash = crypto.createHash("sha256").update(pem, "utf8").digest("hex").slice(0, 32);
+    return safeTokenEquals(expected, `win.${hash}`);
+  });
+}
+
 function normalizeHwidRiskHash(value) {
   const hash = String(value || "").trim().toLowerCase();
   return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
@@ -2471,6 +3453,7 @@ async function loadLauncherDevice(accountId) {
       playerId: Number(row.player_id),
       deviceKeyId: row.device_key_id,
       publicKey: row.device_public_key,
+      linkKeyHash: row.link_key_hash || "",
       hwidHash: row.hwid_hash || "",
       risk: jsonValue(row.risk, {}),
       boundAt: postgresTimestamp(row.bound_at),
@@ -2483,32 +3466,3688 @@ async function loadLauncherDevice(accountId) {
   return account?.launcherDevice || null;
 }
 
+function normalizePromoCode(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function isValidPromoCode(value) {
+  return /^[A-Z0-9][A-Z0-9_-]{2,31}$/.test(String(value || ""));
+}
+
+function promoCodePayload(row) {
+  if (!row) return null;
+  const maxRedemptions = row.max_redemptions == null ? null : Number(row.max_redemptions);
+  const redemptionCount = Number(row.redemption_count || 0);
+  return {
+    id: Number(row.id),
+    code: String(row.code || row.code_normalized || ""),
+    rewardType: String(row.reward_type || "contrabucks"),
+    rewardAmount: Number(row.reward_amount || 0),
+    maxRedemptions,
+    redemptionCount,
+    remainingRedemptions: maxRedemptions == null ? null : Math.max(0, maxRedemptions - redemptionCount),
+    active: Boolean(row.active),
+    expiresAt: postgresTimestamp(row.expires_at) || null,
+    createdByTelegramId: row.created_by_telegram_id == null ? null : Number(row.created_by_telegram_id),
+    createdByLabel: String(row.created_by_label || ""),
+    createdAt: postgresTimestamp(row.created_at),
+    updatedAt: postgresTimestamp(row.updated_at)
+  };
+}
+
+function normalizedPositiveInteger(value, maxValue, nullable = false) {
+  if (nullable && (value == null || value === "" || Number(value) === 0)) return null;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0 || number > maxValue) return undefined;
+  return number;
+}
+
+async function createPromoCode(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const code = normalizePromoCode(body?.code);
+  if (!isValidPromoCode(code)) {
+    return { ok: false, status: 400, error: "invalid_code" };
+  }
+
+  const rewardAmount = normalizedPositiveInteger(body?.rewardAmount ?? body?.contrabucks, 10_000_000);
+  if (rewardAmount === undefined) {
+    return { ok: false, status: 400, error: "invalid_reward_amount" };
+  }
+
+  const maxRedemptions = normalizedPositiveInteger(body?.maxRedemptions, 1_000_000, true);
+  if (maxRedemptions === undefined) {
+    return { ok: false, status: 400, error: "invalid_max_redemptions" };
+  }
+
+  const expiresInDays = normalizedPositiveInteger(body?.expiresInDays, 3650, true);
+  if (expiresInDays === undefined) {
+    return { ok: false, status: 400, error: "invalid_expiry" };
+  }
+  const expiresAt = expiresInDays == null
+    ? null
+    : new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+  const creatorTelegramId = Number(body?.createdByTelegramId || 0);
+  const creatorLabel = String(body?.createdByLabel || "").trim().slice(0, 160);
+
+  const inserted = await pgPool.query(
+    `INSERT INTO promo_codes (
+       code, code_normalized, reward_type, reward_amount, max_redemptions,
+       active, expires_at, created_by_telegram_id, created_by_label
+     )
+     VALUES ($1, $1, 'contrabucks', $2, $3, TRUE, $4, $5, $6)
+     ON CONFLICT (code_normalized) DO NOTHING
+     RETURNING *`,
+    [
+      code,
+      rewardAmount,
+      maxRedemptions,
+      expiresAt,
+      Number.isSafeInteger(creatorTelegramId) && creatorTelegramId > 0 ? creatorTelegramId : null,
+      creatorLabel
+    ]
+  );
+  if (!inserted.rowCount) {
+    const existing = await pgPool.query(
+      "SELECT * FROM promo_codes WHERE code_normalized = $1",
+      [code]
+    );
+    return { ok: false, status: 409, error: "code_exists", promo: promoCodePayload(existing.rows[0]) };
+  }
+
+  return { ok: true, created: true, promo: promoCodePayload(inserted.rows[0]) };
+}
+
+async function listPromoCodes(limitValue = 20) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const limit = Math.max(1, Math.min(100, Number(limitValue) || 20));
+  const result = await pgPool.query(
+    `SELECT *
+     FROM promo_codes
+     ORDER BY created_at DESC, id DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return { ok: true, promos: result.rows.map(promoCodePayload) };
+}
+
+async function setPromoCodeActive(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const id = Number(body?.id || 0);
+  const code = normalizePromoCode(body?.code);
+  const active = body?.active === true;
+  if ((!Number.isSafeInteger(id) || id <= 0) && !isValidPromoCode(code)) {
+    return { ok: false, status: 400, error: "invalid_promo_reference" };
+  }
+
+  const result = Number.isSafeInteger(id) && id > 0
+    ? await pgPool.query(
+      `UPDATE promo_codes
+       SET active = $2, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, active]
+    )
+    : await pgPool.query(
+      `UPDATE promo_codes
+       SET active = $2, updated_at = now()
+       WHERE code_normalized = $1
+       RETURNING *`,
+      [code, active]
+    );
+  if (!result.rowCount) return { ok: false, status: 404, error: "promo_not_found" };
+  return { ok: true, promo: promoCodePayload(result.rows[0]) };
+}
+
+async function accountFromLauncherSessionBody(body) {
+  const session = launcherSessionRecord(body?.sessionToken);
+  const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
+  if (!session || !session.deviceKeyId || !deviceKeyId || session.deviceKeyId !== deviceKeyId) {
+    return { ok: false, status: 403, error: "launcher_session_invalid" };
+  }
+
+  const sessionUrl = new URL("https://launcher.local/promo");
+  sessionUrl.searchParams.set("ccsession", session.token);
+  const account = await accountFromRequest(sessionUrl);
+  if (!account) return { ok: false, status: 403, error: "launcher_session_invalid" };
+
+  const device = await loadLauncherDevice(account.id);
+  const currentLinkKeyHash = launcherLinkKeyHash(account.key);
+  if (!device ||
+      device.deviceKeyId !== deviceKeyId ||
+      !safeTokenEquals(device.linkKeyHash, currentLinkKeyHash)) {
+    return { ok: false, status: 403, error: "device_signature_required" };
+  }
+
+  return { ok: true, account, session, device };
+}
+
+function normalizeTelegramIdentity(rawUser) {
+  const id = Number(rawUser?.id || rawUser?.telegramUserId || 0);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  return {
+    id,
+    username: String(rawUser?.username || "").trim().replace(/^@/, "").slice(0, 64),
+    firstName: String(rawUser?.firstName || rawUser?.first_name || "").trim().slice(0, 80),
+    lastName: String(rawUser?.lastName || rawUser?.last_name || "").trim().slice(0, 80)
+  };
+}
+
+function telegramUserPayload(row) {
+  if (!row?.telegram_user_id) return null;
+  return {
+    id: Number(row.telegram_user_id),
+    username: String(row.telegram_username || ""),
+    firstName: String(row.telegram_first_name || ""),
+    lastName: String(row.telegram_last_name || "")
+  };
+}
+
+function telegramLinkTokenHash(token) {
+  return crypto.createHash("sha256").update(String(token || ""), "utf8").digest("hex");
+}
+
+function normalizeTelegramStartToken(value) {
+  const token = String(value || "").trim();
+  return /^cc_[A-Za-z0-9_-]{40,60}$/.test(token) ? token : "";
+}
+
+async function loadTelegramBinding(accountId, executor = pgPool) {
+  if (!executor || !accountId) return null;
+  const result = await executor.query(
+    `SELECT b.*, p.name AS player_name
+     FROM launcher_telegram_bindings b
+     JOIN players p ON p.id = b.player_id
+     WHERE b.player_id = $1`,
+    [Number(accountId)]
+  );
+  return result.rows[0] || null;
+}
+
+async function launcherTelegramStatus(account, req, executor = pgPool) {
+  if (!executor || !TELEGRAM_LINK_API_TOKEN) {
+    return {
+      available: false,
+      required: true,
+      verified: false,
+      linked: false,
+      reason: "service_unavailable",
+      state: "unavailable",
+      user: null
+    };
+  }
+
+  const systemState = await telegramSystemState(executor);
+  if (!systemState) {
+    return {
+      available: false,
+      required: true,
+      verified: false,
+      linked: false,
+      reason: "service_unavailable",
+      state: "unavailable",
+      user: null
+    };
+  }
+  const currentLinkKeyHash = launcherLinkKeyHash(account.key);
+  let binding = await loadTelegramBinding(account.id, executor);
+  if (binding && (
+      Number(binding.binding_epoch || 0) !== Number(systemState.binding_epoch) ||
+      (binding.link_key_hash && !safeTokenEquals(binding.link_key_hash, currentLinkKeyHash))
+    )) {
+    await executor.query("DELETE FROM launcher_telegram_bindings WHERE player_id = $1", [Number(account.id)]);
+    await executor.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'cancelled', updated_at = now()
+       WHERE player_id = $1 AND state IN ('pending', 'claimed')`,
+      [Number(account.id)]
+    );
+    await executor.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'cancelled', updated_at = now()
+       WHERE (player_id = $1 OR expected_player_id = $1)
+         AND state IN ('issued', 'claimed')`,
+      [Number(account.id)]
+    );
+    binding = null;
+  }
+
+  const ipHash = launcherIpHash(req);
+  const linked = Boolean(binding);
+  const verified = linked && Boolean(ipHash) && safeTokenEquals(binding.last_ip_hash, ipHash);
+  return {
+    available: true,
+    required: !verified,
+    verified,
+    linked,
+    reason: verified ? "verified" : (linked ? "ip_changed" : "not_linked"),
+    state: verified ? "confirmed" : "required",
+    user: telegramUserPayload(binding),
+    confirmedAt: postgresTimestamp(binding?.confirmed_at) || null,
+    lastVerifiedAt: postgresTimestamp(binding?.last_verified_at) || null,
+    ipHash
+  };
+}
+
+function telegramStatusPayload(status) {
+  return {
+    available: Boolean(status?.available),
+    required: Boolean(status?.required),
+    verified: Boolean(status?.verified),
+    linked: Boolean(status?.linked),
+    reason: String(status?.reason || "not_linked"),
+    state: String(status?.state || "required"),
+    user: status?.user || null,
+    confirmedAt: status?.confirmedAt || null,
+    lastVerifiedAt: status?.lastVerifiedAt || null
+  };
+}
+
+async function listTelegramBindings(limitValue = 50) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const limit = Math.max(1, Math.min(100, Number(limitValue) || 50));
+  const [result, countResult] = await Promise.all([
+    pgPool.query(
+      `SELECT b.*, p.name AS player_name
+       FROM launcher_telegram_bindings b
+       JOIN players p ON p.id = b.player_id
+       ORDER BY b.updated_at DESC
+       LIMIT $1`,
+      [limit]
+    ),
+    pgPool.query("SELECT COUNT(*)::integer AS count FROM launcher_telegram_bindings")
+  ]);
+  return {
+    ok: true,
+    total: Number(countResult.rows[0]?.count || 0),
+    links: result.rows.map((row) => ({
+      playerId: Number(row.player_id),
+      playerName: String(row.player_name || ""),
+      telegram: telegramUserPayload(row),
+      confirmedAt: postgresTimestamp(row.confirmed_at),
+      lastVerifiedAt: postgresTimestamp(row.last_verified_at)
+    }))
+  };
+}
+
+function randomOpaqueId(prefix, byteLength = 18) {
+  return `${prefix}_${crypto.randomBytes(byteLength).toString("base64url")}`;
+}
+
+function normalizeTelegramPairingCode(value) {
+  const compact = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (compact.length !== 8) return "";
+  for (const character of compact) {
+    if (!TELEGRAM_PAIRING_CODE_ALPHABET.includes(character)) return "";
+  }
+  return `${compact.slice(0, 4)}-${compact.slice(4)}`;
+}
+
+function createTelegramPairingCodeValue() {
+  let compact = "";
+  for (let index = 0; index < 8; index += 1) {
+    compact += TELEGRAM_PAIRING_CODE_ALPHABET[
+      crypto.randomInt(0, TELEGRAM_PAIRING_CODE_ALPHABET.length)
+    ];
+  }
+  return `${compact.slice(0, 4)}-${compact.slice(4)}`;
+}
+
+function telegramPairingCodeHash(value) {
+  const normalized = normalizeTelegramPairingCode(value);
+  if (!normalized || !TELEGRAM_LINK_API_TOKEN) return "";
+  return crypto
+    .createHmac("sha256", TELEGRAM_LINK_API_TOKEN)
+    .update(`pairing-code:${normalized}`, "utf8")
+    .digest("hex");
+}
+
+function normalizeTelegramPairingRequestId(value, prefixes = ["pc", "lr", "ga"]) {
+  const requestId = String(value || "").trim();
+  const prefix = requestId.split("_", 1)[0];
+  if (!prefixes.includes(prefix)) return "";
+  return /^[a-z]{2}_[A-Za-z0-9_-]{20,60}$/.test(requestId) ? requestId : "";
+}
+
+async function telegramSystemState(executor = pgPool, { lock = false } = {}) {
+  if (!executor) return null;
+  await ensureTelegramSystemState(executor);
+  const result = await executor.query(
+    `SELECT id, binding_epoch, last_reset_at, last_reset_by_telegram_id, updated_at
+     FROM launcher_telegram_system_state
+     WHERE id = 1
+     ${lock ? "FOR UPDATE" : ""}`
+  );
+  return result.rows[0] || null;
+}
+
+function telegramPairingPurpose(status) {
+  return status?.linked ? "ip_reverify" : "link";
+}
+
+async function createTelegramLoginRequest(account, device, req) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const bindingStatus = await launcherTelegramStatus(account, req);
+  if (!bindingStatus.available) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  if (bindingStatus.verified) {
+    return {
+      ok: true,
+      status: "confirmed",
+      loginRequestId: null,
+      expiresAt: null,
+      remainingAttempts: 5,
+      telegram: telegramStatusPayload(bindingStatus)
+    };
+  }
+
+  const ipHash = bindingStatus.ipHash;
+  if (!ipHash) return { ok: false, status: 503, error: "launcher_ip_unavailable" };
+  const purpose = telegramPairingPurpose(bindingStatus);
+  const linkKeyHash = launcherLinkKeyHash(account.key);
+  const expectedTelegramUserId = Number(bindingStatus.user?.id || 0) || null;
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const bindingEpoch = Number(systemState.binding_epoch);
+
+    const existingResult = await client.query(
+      `SELECT r.*,
+              c.state AS code_state,
+              c.telegram_user_id,
+              c.telegram_username,
+              c.telegram_first_name,
+              c.telegram_last_name
+       FROM launcher_telegram_login_requests r
+       LEFT JOIN launcher_telegram_pairing_codes c ON c.login_request_id = r.request_id
+       WHERE r.player_id = $1
+         AND r.device_key_id = $2
+         AND r.link_key_hash = $3
+         AND r.launcher_ip_hash = $4
+         AND r.binding_epoch = $5
+         AND r.state IN ('pending', 'claimed')
+       ORDER BY r.created_at DESC
+       LIMIT 1
+       FOR UPDATE OF r`,
+      [
+        Number(account.id),
+        device.deviceKeyId,
+        linkKeyHash,
+        ipHash,
+        bindingEpoch
+      ]
+    );
+    const existing = existingResult.rows[0];
+    if (existing && new Date(existing.expires_at).getTime() > Date.now()) {
+      await client.query("COMMIT");
+      const codeUser = telegramUserPayload(existing);
+      return {
+        ok: true,
+        status: existing.state === "claimed" ? "claimed" : "required",
+        loginRequestId: String(existing.request_id),
+        expiresAt: postgresTimestamp(existing.expires_at),
+        remainingAttempts: Math.max(0, 5 - Number(existing.failed_attempts || 0)),
+        telegram: {
+          ...telegramStatusPayload(bindingStatus),
+          state: existing.state === "claimed" ? "claimed" : "required",
+          user: codeUser || bindingStatus.user
+        }
+      };
+    }
+
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = CASE
+         WHEN expires_at <= now() THEN 'expired'
+         ELSE 'cancelled'
+       END,
+       updated_at = now()
+       WHERE player_id = $1
+         AND state IN ('pending', 'claimed')`,
+      [Number(account.id)]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = CASE
+         WHEN expires_at <= now() THEN 'expired'
+         ELSE 'cancelled'
+       END,
+       updated_at = now()
+       WHERE login_request_id IN (
+         SELECT request_id
+         FROM launcher_telegram_login_requests
+         WHERE player_id = $1
+           AND state IN ('expired', 'cancelled')
+       )
+         AND state IN ('issued', 'claimed')`,
+      [Number(account.id)]
+    );
+
+    const loginRequestId = randomOpaqueId("lr");
+    const expiresAt = new Date(Date.now() + TELEGRAM_LOGIN_REQUEST_TTL_MS);
+    await client.query(
+      `INSERT INTO launcher_telegram_login_requests (
+         request_id, player_id, purpose, expected_telegram_user_id,
+         device_key_id, link_key_hash, launcher_ip_hash,
+         binding_epoch, expires_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        loginRequestId,
+        Number(account.id),
+        purpose,
+        expectedTelegramUserId,
+        device.deviceKeyId,
+        linkKeyHash,
+        ipHash,
+        bindingEpoch,
+        expiresAt.toISOString()
+      ]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: "required",
+      loginRequestId,
+      expiresAt: expiresAt.toISOString(),
+      remainingAttempts: 5,
+      telegram: {
+        ...telegramStatusPayload(bindingStatus),
+        state: "required"
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function latestTelegramPairingStatus(account, device, req, loginRequestIdValue = "") {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const bindingStatus = await launcherTelegramStatus(account, req);
+  if (!bindingStatus.available) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  if (bindingStatus.verified) {
+    return {
+      ok: true,
+      status: "confirmed",
+      loginRequestId: null,
+      expiresAt: null,
+      remainingAttempts: 5,
+      telegram: telegramStatusPayload(bindingStatus)
+    };
+  }
+
+  const loginRequestId = normalizeTelegramPairingRequestId(loginRequestIdValue, ["lr"]);
+  const values = [
+    Number(account.id),
+    device.deviceKeyId,
+    launcherLinkKeyHash(account.key),
+    bindingStatus.ipHash
+  ];
+  const requestFilter = loginRequestId
+    ? "AND r.request_id = $5"
+    : "";
+  if (loginRequestId) values.push(loginRequestId);
+  const result = await pgPool.query(
+    `SELECT r.*,
+            c.request_id AS pairing_request_id,
+            c.state AS code_state,
+            c.telegram_user_id,
+            c.telegram_username,
+            c.telegram_first_name,
+            c.telegram_last_name
+     FROM launcher_telegram_login_requests r
+     LEFT JOIN launcher_telegram_pairing_codes c ON c.login_request_id = r.request_id
+     WHERE r.player_id = $1
+       AND r.device_key_id = $2
+       AND r.link_key_hash = $3
+       AND r.launcher_ip_hash = $4
+       ${requestFilter}
+     ORDER BY r.created_at DESC
+     LIMIT 1`,
+    values
+  );
+  const loginRequest = result.rows[0];
+  if (!loginRequest) {
+    return {
+      ok: true,
+      status: "required",
+      loginRequestId: null,
+      expiresAt: null,
+      remainingAttempts: 5,
+      telegram: telegramStatusPayload(bindingStatus)
+    };
+  }
+
+  const expired = new Date(loginRequest.expires_at).getTime() <= Date.now();
+  if (expired && ["pending", "claimed"].includes(loginRequest.state)) {
+    await pgPool.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'expired', updated_at = now()
+       WHERE request_id = $1 AND state IN ('pending', 'claimed')`,
+      [String(loginRequest.request_id)]
+    );
+    await pgPool.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'expired', updated_at = now()
+       WHERE login_request_id = $1 AND state IN ('issued', 'claimed')`,
+      [String(loginRequest.request_id)]
+    );
+    loginRequest.state = "expired";
+  }
+
+  const state = loginRequest.state === "claimed"
+    ? "claimed"
+    : String(loginRequest.state || "required");
+  return {
+    ok: true,
+    status: state === "pending" ? "required" : state,
+    loginRequestId: String(loginRequest.request_id),
+    pairingRequestId: loginRequest.pairing_request_id
+      ? String(loginRequest.pairing_request_id)
+      : null,
+    expiresAt: postgresTimestamp(loginRequest.expires_at),
+    remainingAttempts: Math.max(0, 5 - Number(loginRequest.failed_attempts || 0)),
+    telegram: {
+      ...telegramStatusPayload(bindingStatus),
+      state: state === "pending" ? "required" : state,
+      user: telegramUserPayload(loginRequest) || bindingStatus.user
+    }
+  };
+}
+
+async function claimTelegramPairingCode(account, device, req, body) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const loginRequestId = normalizeTelegramPairingRequestId(body?.loginRequestId, ["lr"]);
+  const code = normalizeTelegramPairingCode(body?.code);
+  if (!loginRequestId) {
+    return { ok: false, status: 400, error: "telegram_login_request_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const loginResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_login_requests
+       WHERE request_id = $1
+       FOR UPDATE`,
+      [loginRequestId]
+    );
+    const loginRequest = loginResult.rows[0];
+    const currentIpHash = launcherIpHash(req);
+    const currentLinkHash = launcherLinkKeyHash(account.key);
+    if (!loginRequest ||
+        Number(loginRequest.player_id) !== Number(account.id) ||
+        loginRequest.device_key_id !== device.deviceKeyId ||
+        !safeTokenEquals(loginRequest.link_key_hash, currentLinkHash) ||
+        !safeTokenEquals(loginRequest.launcher_ip_hash, currentIpHash)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "telegram_login_request_invalid" };
+    }
+    if (Number(loginRequest.binding_epoch) !== Number(systemState.binding_epoch)) {
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'cancelled', updated_at = now()
+         WHERE request_id = $1`,
+        [loginRequestId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 409, error: "telegram_binding_reset" };
+    }
+    if (new Date(loginRequest.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [loginRequestId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "telegram_code_expired" };
+    }
+    if (loginRequest.state === "locked" || Number(loginRequest.failed_attempts || 0) >= 5) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 429, error: "telegram_code_attempts_exceeded", remainingAttempts: 0 };
+    }
+    if (loginRequest.state === "claimed") {
+      const existingClaim = await client.query(
+        `SELECT *
+         FROM launcher_telegram_pairing_codes
+         WHERE login_request_id = $1
+         LIMIT 1`,
+        [loginRequestId]
+      );
+      await client.query("ROLLBACK");
+      if (existingClaim.rowCount) {
+        return {
+          ok: true,
+          status: "claimed",
+          loginRequestId,
+          remainingAttempts: Math.max(0, 5 - Number(loginRequest.failed_attempts || 0)),
+          telegram: {
+            available: true,
+            required: true,
+            verified: false,
+            linked: loginRequest.purpose === "ip_reverify",
+            reason: loginRequest.purpose === "ip_reverify" ? "ip_changed" : "not_linked",
+            state: "claimed",
+            user: telegramUserPayload(existingClaim.rows[0])
+          }
+        };
+      }
+      return { ok: false, status: 409, error: "telegram_code_already_used" };
+    }
+    if (loginRequest.state !== "pending") {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: `telegram_request_${loginRequest.state}` };
+    }
+
+    const codeHash = telegramPairingCodeHash(code);
+    const codeResult = codeHash
+      ? await client.query(
+        `SELECT *
+         FROM launcher_telegram_pairing_codes
+         WHERE code_hash = $1
+         FOR UPDATE`,
+        [codeHash]
+      )
+      : { rows: [], rowCount: 0 };
+    const pairing = codeResult.rows[0];
+    const pairingValid = pairing &&
+      pairing.state === "issued" &&
+      new Date(pairing.expires_at).getTime() > Date.now() &&
+      Number(pairing.binding_epoch) === Number(systemState.binding_epoch);
+    if (!pairingValid) {
+      const codeWasAlreadyUsed = Boolean(pairing && pairing.state !== "issued");
+      const failedAttempts = Math.min(5, Number(loginRequest.failed_attempts || 0) + 1);
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET failed_attempts = $2,
+             state = CASE WHEN $2 >= 5 THEN 'locked' ELSE state END,
+             updated_at = now()
+         WHERE request_id = $1`,
+        [loginRequestId, failedAttempts]
+      );
+      await client.query("COMMIT");
+      return {
+        ok: false,
+        status: failedAttempts >= 5 ? 429 : 400,
+        error: failedAttempts >= 5
+          ? "telegram_code_attempts_exceeded"
+          : (codeWasAlreadyUsed ? "telegram_code_already_used" : "telegram_code_invalid"),
+        remainingAttempts: Math.max(0, 5 - failedAttempts)
+      };
+    }
+
+    const bindingResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_bindings
+       WHERE player_id = $1 OR telegram_user_id = $2
+       FOR UPDATE`,
+      [Number(account.id), Number(pairing.telegram_user_id)]
+    );
+    const playerBinding = bindingResult.rows.find(
+      (row) => Number(row.player_id) === Number(account.id)
+    );
+    const telegramBinding = bindingResult.rows.find(
+      (row) => Number(row.telegram_user_id) === Number(pairing.telegram_user_id)
+    );
+
+    if (loginRequest.purpose === "link") {
+      if (pairing.purpose !== "link" ||
+          pairing.expected_player_id ||
+          playerBinding ||
+          telegramBinding) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: playerBinding ? "telegram_player_already_bound" : "telegram_already_bound"
+        };
+      }
+    } else {
+      const expectedTelegramUserId = Number(loginRequest.expected_telegram_user_id || 0);
+      if (pairing.purpose !== "ip_reverify" ||
+          Number(pairing.expected_player_id || 0) !== Number(account.id) ||
+          Number(pairing.telegram_user_id) !== expectedTelegramUserId ||
+          !playerBinding ||
+          Number(playerBinding.telegram_user_id) !== expectedTelegramUserId ||
+          !telegramBinding ||
+          Number(telegramBinding.player_id) !== Number(account.id)) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "telegram_account_mismatch" };
+      }
+    }
+
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'claimed',
+           login_request_id = $2,
+           player_id = $3,
+           device_key_id = $4,
+           link_key_hash = $5,
+           launcher_ip_hash = $6,
+           claimed_at = now(),
+           updated_at = now()
+       WHERE request_id = $1 AND state = 'issued'`,
+      [
+        String(pairing.request_id),
+        loginRequestId,
+        Number(account.id),
+        device.deviceKeyId,
+        currentLinkHash,
+        currentIpHash
+      ]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'claimed', claimed_at = now(), updated_at = now()
+       WHERE request_id = $1 AND state = 'pending'`,
+      [loginRequestId]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: "claimed",
+      loginRequestId,
+      pairingRequestId: String(pairing.request_id),
+      expiresAt: postgresTimestamp(loginRequest.expires_at),
+      remainingAttempts: Math.max(0, 5 - Number(loginRequest.failed_attempts || 0)),
+      telegram: {
+        available: true,
+        required: true,
+        verified: false,
+        linked: loginRequest.purpose === "ip_reverify",
+        reason: loginRequest.purpose === "ip_reverify" ? "ip_changed" : "not_linked",
+        state: "claimed",
+        user: telegramUserPayload(pairing)
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") {
+      return { ok: false, status: 409, error: "telegram_code_already_used" };
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function botTelegramAccountStatus(telegramUserIdValue) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const telegramUserId = Number(telegramUserIdValue || 0);
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) {
+    return { ok: false, status: 400, error: "telegram_user_invalid" };
+  }
+  const bindingResult = await pgPool.query(
+    `SELECT b.*,
+            p.name AS player_name,
+            p.level AS player_level,
+            p.money AS player_money,
+            p.cckey AS player_key,
+            s.binding_epoch AS current_binding_epoch
+     FROM launcher_telegram_bindings b
+     JOIN players p ON p.id = b.player_id
+     JOIN launcher_telegram_system_state s ON s.id = 1
+     WHERE b.telegram_user_id = $1`,
+    [telegramUserId]
+  );
+  const rawBinding = bindingResult.rows[0] || null;
+  const binding = rawBinding &&
+      Number(rawBinding.binding_epoch || 0) === Number(rawBinding.current_binding_epoch || 0) &&
+      safeTokenEquals(
+        String(rawBinding.link_key_hash || ""),
+        launcherLinkKeyHash(rawBinding.player_key)
+      )
+    ? rawBinding
+    : null;
+  const loginResult = binding
+    ? await pgPool.query(
+      `SELECT *
+       FROM launcher_telegram_login_requests
+       WHERE player_id = $1
+         AND expected_telegram_user_id = $2
+         AND purpose = 'ip_reverify'
+         AND state IN ('pending', 'claimed')
+         AND expires_at > now()
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [Number(binding.player_id), telegramUserId]
+    )
+    : { rows: [] };
+  const loginRequest = loginResult.rows[0] || null;
+  const codeResult = await pgPool.query(
+    `SELECT request_id, purpose, state, expires_at
+     FROM launcher_telegram_pairing_codes
+     WHERE telegram_user_id = $1
+       AND state IN ('issued', 'claimed')
+       AND expires_at > now()
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [telegramUserId]
+  );
+  const activeCode = codeResult.rows[0] || null;
+  return {
+    ok: true,
+    linked: Boolean(binding),
+    player: binding ? {
+      id: Number(binding.player_id),
+      name: String(binding.player_name || ""),
+      level: Number(binding.player_level || 1),
+      money: Number(binding.player_money || 0),
+      gameLink: loginLink({
+        id: Number(binding.player_id),
+        key: String(binding.player_key || "")
+      })
+    } : null,
+    pendingLogin: loginRequest ? {
+      requestId: String(loginRequest.request_id),
+      expiresAt: postgresTimestamp(loginRequest.expires_at)
+    } : null,
+    activePairing: activeCode ? {
+      requestId: String(activeCode.request_id),
+      purpose: String(activeCode.purpose),
+      state: String(activeCode.state),
+      expiresAt: postgresTimestamp(activeCode.expires_at)
+    } : null
+  };
+}
+
+function normalizeDonateProductId(value) {
+  const productId = String(value || "").trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{2,50}$/.test(productId) ? productId : "";
+}
+
+function normalizeDonateOrderId(value) {
+  const orderId = String(value || "").trim();
+  return /^do_[A-Za-z0-9_-]{20,80}$/.test(orderId) ? orderId : "";
+}
+
+function donateProductPayload(row) {
+  const stockCapacity = Number(row.stock_capacity || 0);
+  const stockRemaining = stockCapacity > 0
+    ? Math.max(0, Number(row.stock_remaining || 0))
+    : null;
+  return {
+    id: String(row.id),
+    title: String(row.title || ""),
+    rewardKind: String(row.reward_kind || "coins"),
+    rewardAmount: Number(row.reward_amount || row.coins || 0),
+    coins: Number(row.coins),
+    rubles: Number(row.rubles),
+    stars: Number(row.stars),
+    active: Boolean(row.active),
+    stock: stockCapacity > 0
+      ? {
+          remaining: stockRemaining,
+          capacity: stockCapacity,
+          soldOut: stockRemaining <= 0
+        }
+      : null
+  };
+}
+
+function donateOrderPayload(row) {
+  const stockCapacity = Number(row.stock_capacity || 0);
+  const stockRemaining = stockCapacity > 0
+    ? Math.max(0, Number(row.stock_remaining || 0))
+    : null;
+  return {
+    id: String(row.id),
+    status: String(row.status),
+    player: {
+      id: Number(row.player_id),
+      name: String(row.player_name || "")
+    },
+    telegramUserId: Number(row.telegram_user_id),
+    product: {
+      id: String(row.product_id),
+      title: String(row.product_title || ""),
+      rewardKind: String(row.reward_kind || "coins"),
+      rewardAmount: Number(row.reward_amount || row.coins || 0),
+      coins: Number(row.coins),
+      rubles: Number(row.rubles),
+      stars: Number(row.stars),
+      stock: stockCapacity > 0
+        ? {
+            remaining: stockRemaining,
+            capacity: stockCapacity,
+            soldOut: stockRemaining <= 0
+          }
+        : null
+    },
+    expiresAt: postgresTimestamp(row.expires_at),
+    paidAt: postgresTimestamp(row.paid_at)
+  };
+}
+
+async function listDonateProducts() {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const result = await pgPool.query(
+    `SELECT p.id, p.title, p.reward_kind, p.reward_amount,
+            p.coins, p.rubles, p.stars, p.active,
+            stock.remaining AS stock_remaining,
+            stock.capacity AS stock_capacity
+     FROM donate_products p
+     LEFT JOIN donate_limited_stock stock ON stock.product_id = p.id
+     WHERE p.active = TRUE
+     ORDER BY p.display_order ASC, p.id ASC`
+  );
+  return {
+    ok: true,
+    currency: "XTR",
+    products: result.rows.map(donateProductPayload)
+  };
+}
+
+async function resetDonateLimitedStock(adminTelegramIdValue, rawProductId) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  const productId = normalizeDonateProductId(rawProductId);
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  if (!productId) {
+    return { ok: false, status: 400, error: "donate_product_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const stockResult = await client.query(
+      `SELECT stock.product_id, stock.capacity, stock.remaining, product.title
+       FROM donate_limited_stock stock
+       JOIN donate_products product ON product.id = stock.product_id
+       WHERE stock.product_id = $1
+       FOR UPDATE OF stock`,
+      [productId]
+    );
+    const stock = stockResult.rows[0] || null;
+    if (!stock) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_stock_not_found" };
+    }
+    const reservations = await client.query(
+      `SELECT COUNT(*)::integer AS count
+       FROM donate_orders
+       WHERE product_id = $1
+         AND status = 'pending'
+         AND limited_stock_reserved_at IS NOT NULL
+         AND limited_stock_consumed_at IS NULL`,
+      [productId]
+    );
+    if (Number(reservations.rows[0]?.count || 0) > 0) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: "donate_stock_reservations_pending"
+      };
+    }
+    const updatedResult = await client.query(
+      `UPDATE donate_limited_stock
+       SET remaining = capacity,
+           updated_at = now()
+       WHERE product_id = $1
+       RETURNING capacity, remaining`,
+      [productId]
+    );
+    const updated = updatedResult.rows[0];
+    await writeAuditEvent(client, {
+      eventType: "donate_stock_reset",
+      category: "economy",
+      severity: "notice",
+      description:
+        `Лимит «${String(stock.title || productId)}» восстановлен ` +
+        `до ${Number(updated.remaining)}/${Number(updated.capacity)}`,
+      source: "telegram_admin",
+      oldValue: {
+        productId,
+        remaining: Number(stock.remaining),
+        capacity: Number(stock.capacity)
+      },
+      newValue: {
+        productId,
+        remaining: Number(updated.remaining),
+        capacity: Number(updated.capacity)
+      },
+      metadata: { telegramAdminId: adminTelegramId }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      product: {
+        id: productId,
+        title: String(stock.title || ""),
+        stock: {
+          remaining: Number(updated.remaining),
+          capacity: Number(updated.capacity),
+          soldOut: false
+        }
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+let battlePassSeasonCache = null;
+let battlePassSeasonCacheUntil = 0;
+
+async function loadActiveBattlePassSeason(client, now = Date.now()) {
+  if (battlePassSeasonCache && now < battlePassSeasonCacheUntil) {
+    return battlePassSeasonCache;
+  }
+  const result = await client.query(
+    `SELECT season_id, title, starts_at, ends_at, task_cycle_anchor_at
+     FROM battle_pass_seasons
+     WHERE active = TRUE
+     ORDER BY season_id DESC
+     LIMIT 1`
+  );
+  battlePassSeasonCache = result.rows[0] || null;
+  battlePassSeasonCacheUntil = now + 60 * 1000;
+  return battlePassSeasonCache;
+}
+
+function timestampIso(value, fallbackMs) {
+  const parsed = Date.parse(String(value || ""));
+  return new Date(Number.isFinite(parsed) ? parsed : fallbackMs).toISOString();
+}
+
+function nextBattlePassTaskResetAt(season, now = Date.now()) {
+  const anchor = Date.parse(String(season?.task_cycle_anchor_at || ""));
+  const safeAnchor = Number.isFinite(anchor) ? anchor : now;
+  const cycle = now < safeAnchor
+    ? 0
+    : Math.floor((now - safeAnchor) / BATTLE_PASS_TASK_CYCLE_MS) + 1;
+  let resetAt = safeAnchor + cycle * BATTLE_PASS_TASK_CYCLE_MS;
+  const seasonEndsAt = Date.parse(String(season?.ends_at || ""));
+  if (Number.isFinite(seasonEndsAt)) {
+    resetAt = Math.min(resetAt, seasonEndsAt);
+  }
+  return new Date(resetAt).toISOString();
+}
+
+function storeEntitlementPayload(row, season = null, now = Date.now()) {
+  const payload = {
+    battlePassSeason: Number(row.battle_pass_season || 1),
+    battlePassLevel: Number(row.battle_pass_level || 1),
+    battlePassXp: Number(row.battle_pass_xp || 0),
+    battlePassXpMax: BATTLE_PASS_XP_PER_LEVEL,
+    battlePassPremium: Boolean(row.battle_pass_premium),
+    battlePassPremiumPlus: Boolean(row.battle_pass_premium_plus),
+    tropicalCases: Number(row.tropical_cases || 0),
+    summerCases: Number(row.summer_cases || 0),
+    specialCaseFragments: Number(row.special_case_fragments || 0),
+    summerCaseProgress: Number(row.special_case_fragments || row.summer_case_progress || 0),
+    tropicalCaseProgress: Number(row.special_case_fragments || row.tropical_case_progress || 0)
+  };
+  if (season) {
+    payload.seasonTitle = String(season.title || "Летний сезон 1");
+    payload.seasonStartsAt = timestampIso(season.starts_at, now);
+    payload.seasonEndsAt = timestampIso(season.ends_at, now);
+    payload.tasksResetAt = nextBattlePassTaskResetAt(season, now);
+    payload.serverTime = new Date(now).toISOString();
+  }
+  return payload;
+}
+
+async function loadStoreEntitlements(client, playerId, lock = false) {
+  const season = await loadActiveBattlePassSeason(client);
+  const seasonId = Number(season?.season_id || 1);
+  await client.query(
+    `INSERT INTO player_store_entitlements (
+       player_id, battle_pass_season, battle_pass_level, battle_pass_xp
+     )
+     SELECT id, $2, 1, 0
+     FROM players
+     WHERE id = $1
+     ON CONFLICT (player_id) DO NOTHING`,
+    [playerId, seasonId]
+  );
+  await client.query(
+    `UPDATE player_store_entitlements
+     SET battle_pass_season = $2,
+         battle_pass_level = 1,
+         battle_pass_xp = 0,
+         battle_pass_premium = FALSE,
+         battle_pass_premium_plus = FALSE,
+         updated_at = now()
+     WHERE player_id = $1
+       AND battle_pass_season <> $2`,
+    [playerId, seasonId]
+  );
+  const result = await client.query(
+    `SELECT *
+     FROM player_store_entitlements
+     WHERE player_id = $1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [playerId]
+  );
+  return result.rows[0] || null;
+}
+
+function summerCaseAccessSignature(payload, accountKey) {
+  return crypto
+    .createHmac("sha256", `${DEFAULT_KEY}\0${String(accountKey || "")}`)
+    .update(payload, "utf8")
+    .digest("base64url");
+}
+
+function issueSummerCaseAccessToken(account, now = Date.now()) {
+  const expiresAt = now + SUMMER_CASE_ACCESS_TTL_MS;
+  const payload = `v1:${Number(account.id)}:${expiresAt}`;
+  const encoded = Buffer.from(payload, "utf8").toString("base64url");
+  const signature = summerCaseAccessSignature(payload, account.key);
+  return { token: `${encoded}.${signature}`, expiresAt };
+}
+
+function parseSummerCaseAccessToken(value, now = Date.now()) {
+  const token = String(value || "").trim();
+  const parts = token.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  let payload;
+  try {
+    payload = Buffer.from(parts[0], "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+  const match = /^v1:(\d+):(\d+)$/.exec(payload);
+  if (!match) return null;
+  const playerId = Number(match[1]);
+  const expiresAt = Number(match[2]);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0 ||
+      !Number.isSafeInteger(expiresAt) || expiresAt <= now) {
+    return null;
+  }
+  return { token, payload, signature: parts[1], playerId, expiresAt };
+}
+
+function verifyParsedSummerCaseAccessToken(parsed, accountKey) {
+  return Boolean(parsed) && safeTokenEquals(
+    parsed.signature,
+    summerCaseAccessSignature(parsed.payload, accountKey)
+  );
+}
+
+function battlePassCaseAccessPayload(account, requestOrigin = null) {
+  const access = issueSummerCaseAccessToken(account);
+  const origin = String(requestOrigin || PUBLIC_BASE_URL).replace(/\/+$/, "");
+  return {
+    url: `${origin}/battle-pass/case/open`,
+    resolveUrl: `${origin}/battle-pass/case/resolve`,
+    token: access.token,
+    expiresAt: new Date(access.expiresAt).toISOString()
+  };
+}
+
+function normalizeSummerCaseRequestId(value) {
+  const requestId = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
+    ? requestId
+    : "";
+}
+
+function caseOpenConfig(caseKind) {
+  if (caseKind === "summer") {
+    return {
+      kind: "summer",
+      title: "кейс лета",
+      rewards: SUMMER_CASE_REWARDS,
+      roll: rollSummerCaseReward,
+      stockColumn: "summer_cases",
+      stockPayloadKey: "summerCases"
+    };
+  }
+  if (caseKind === "tropical") {
+    return {
+      kind: "tropical",
+      title: "тропический кейс",
+      rewards: TROPICAL_CASE_REWARDS,
+      roll: rollTropicalCaseReward,
+      stockColumn: "tropical_cases",
+      stockPayloadKey: "tropicalCases"
+    };
+  }
+  return null;
+}
+
+function caseGrantCatalogItem(grant) {
+  if (grant?.kind === "wear") {
+    return clone(findWearCatalogItem(grant.slot, grant.sname));
+  }
+  if (grant?.kind === "weapon") {
+    const item = canonicalWeaponsById.get(Number(grant.id));
+    if (!item) throw new Error(`Case weapon not found: ${grant.id}`);
+    return clone(item);
+  }
+  return null;
+}
+
+function caseRewardCatalogItems(reward) {
+  const grants = reward?.grant?.kind === "bundle"
+    ? reward.grant.items
+    : [reward?.grant];
+  return (grants || [])
+    .map(caseGrantCatalogItem)
+    .filter(Boolean);
+}
+
+function caseDismantleYield(rarity) {
+  const ranges = rarity === "common"
+    ? { coins: [150, 300], experience: [150, 300], fragments: [10, 20] }
+    : (rarity === "epic"
+      ? { coins: [750, 1500], experience: [750, 1500], fragments: [50, 100] }
+      : { coins: [2000, 4000], experience: [2000, 4000], fragments: [200, 400] });
+  return {
+    coins: crypto.randomInt(ranges.coins[0], ranges.coins[1] + 1),
+    experience: crypto.randomInt(ranges.experience[0], ranges.experience[1] + 1),
+    fragments: crypto.randomInt(ranges.fragments[0], ranges.fragments[1] + 1)
+  };
+}
+
+function caseDropPayload(reward, awardedItems = [], chanceBasisPoints = 0) {
+  const itemKeys = awardedItems.map(inventoryItemKey);
+  const dismantle = caseDismantleYield(reward.rarity);
+  if (reward?.grant?.kind === "special_fragments") {
+    dismantle.fragments = Math.min(
+      dismantle.fragments,
+      Math.max(0, Math.trunc(Number(reward.grant.amount || 0)))
+    );
+  }
+  const payload = {
+    key: reward.key,
+    name: reward.name,
+    rarity: reward.rarity,
+    kind: reward.grant.kind,
+    chanceBasisPoints: Number(chanceBasisPoints),
+    itemKeys,
+    dismantle,
+    resolution: null
+  };
+  if (itemKeys.length === 1) payload.itemKey = itemKeys[0];
+  if (["coins", "experience", "special_fragments", "case_stock"].includes(reward.grant.kind)) {
+    payload.amount = Number(reward.grant.amount);
+  }
+  if (reward.grant.kind === "case_stock") payload.caseKind = reward.grant.caseKind;
+  return payload;
+}
+
+function caseOpeningResolutionData(value) {
+  const parsed = jsonValue(value, {});
+  const decisions = parsed.decisions && typeof parsed.decisions === "object"
+    ? parsed.decisions
+    : {};
+  return { ...parsed, decisions };
+}
+
+function caseOpeningPayload(resultData, resolutionData) {
+  const result = jsonValue(resultData, {});
+  const opening = result.caseOpening && typeof result.caseOpening === "object"
+    ? result.caseOpening
+    : null;
+  if (!opening || !Array.isArray(opening.drops)) return null;
+  const resolution = caseOpeningResolutionData(resolutionData);
+  const legacyDecision = resolution.legacyGranted
+    ? { action: "claim", legacyGranted: true, resolvedAt: resolution.legacyGrantedAt || null }
+    : null;
+  const drops = opening.drops.map((drop, index) => {
+    const dismantle = drop?.dismantle && typeof drop.dismantle === "object"
+      ? { ...drop.dismantle }
+      : {};
+    if (String(drop?.kind || "") === "special_fragments") {
+      dismantle.fragments = Math.min(
+        Math.max(0, Math.trunc(Number(dismantle.fragments || 0))),
+        Math.max(0, Math.trunc(Number(drop.amount || 0)))
+      );
+    }
+    return {
+      ...drop,
+      dismantle,
+      resolution: resolution.decisions[String(index)] || legacyDecision
+    };
+  });
+  const resolvedCount = drops.filter((drop) => drop.resolution).length;
+  return {
+    ...opening,
+    drops,
+    resolvedCount,
+    pendingCount: drops.length - resolvedCount,
+    completed: resolvedCount === drops.length
+  };
+}
+
+async function pendingCaseOpeningForPlayer(client, playerId) {
+  const result = await client.query(
+    `SELECT result_data, resolution_data
+     FROM player_case_openings
+     WHERE player_id = $1 AND resolved_at IS NULL
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [Number(playerId)]
+  );
+  const row = result.rows[0] || null;
+  return row ? caseOpeningPayload(row.result_data, row.resolution_data) : null;
+}
+
+async function openBattlePassCase(body = {}) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const parsedAccess = parseSummerCaseAccessToken(body.token);
+  const requestId = normalizeSummerCaseRequestId(body.requestId);
+  const caseKind = String(body.caseKind || "summer");
+  const config = caseOpenConfig(caseKind);
+  const amount = Number(body.amount || 1);
+  if (!parsedAccess) return { ok: false, status: 403, error: "case_access_invalid" };
+  if (!requestId || !config || ![1, 10].includes(amount)) {
+    return { ok: false, status: 400, error: "case_open_request_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      `SELECT id, name, cckey, money, level, exp
+       FROM players
+       WHERE id = $1
+       FOR UPDATE`,
+      [parsedAccess.playerId]
+    );
+    const player = playerResult.rows[0] || null;
+    if (!player || !verifyParsedSummerCaseAccessToken(parsedAccess, player.cckey)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "case_access_invalid" };
+    }
+    if (await activePlayerBan(parsedAccess.playerId, client)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "account_banned" };
+    }
+
+    const state = await loadStoreEntitlements(client, parsedAccess.playerId, true);
+    if (!state) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 500, error: "store_entitlement_unavailable" };
+    }
+
+    const previousResult = await client.query(
+      `SELECT case_kind, case_amount, result_data, resolution_data
+       FROM player_case_openings
+       WHERE player_id = $1 AND request_id = $2`,
+      [parsedAccess.playerId, requestId]
+    );
+    const previous = previousResult.rows[0] || null;
+    if (previous) {
+      if (String(previous.case_kind) !== caseKind || Number(previous.case_amount) !== amount) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "case_request_conflict" };
+      }
+      const caseOpening = caseOpeningPayload(previous.result_data, previous.resolution_data);
+      await client.query("COMMIT");
+      return {
+        ...jsonValue(previous.result_data, {}),
+        caseOpening,
+        battlePass: storeEntitlementPayload(state),
+        replayed: true
+      };
+    }
+
+    const pendingOpening = await pendingCaseOpeningForPlayer(client, parsedAccess.playerId);
+    if (pendingOpening) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: "case_opening_pending",
+        battlePass: storeEntitlementPayload(state),
+        caseOpening: pendingOpening
+      };
+    }
+
+    const stockBefore = Number(state[config.stockColumn] || 0);
+    if (stockBefore < amount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: `${caseKind}_case_stock_insufficient` };
+    }
+
+    const openingResult = await client.query(
+      `INSERT INTO player_case_openings (
+         player_id, request_id, case_kind, case_amount, result_data
+       )
+       VALUES ($1, $2, $3, $4, '{}'::jsonb)
+       RETURNING id`,
+      [parsedAccess.playerId, requestId, caseKind, amount]
+    );
+    const openingId = Number(openingResult.rows[0].id);
+
+    const rewardItems = new Map();
+    for (const reward of config.rewards) {
+      const items = caseRewardCatalogItems(reward);
+      if (items.length) rewardItems.set(reward.key, items);
+    }
+    const uniqueItemKeys = [...new Set(
+      [...rewardItems.values()].flat().map(inventoryItemKey)
+    )];
+    const ownedResult = await client.query(
+      `SELECT item_key
+       FROM player_inventory
+       WHERE player_id = $1 AND item_key = ANY($2::text[])`,
+      [parsedAccess.playerId, uniqueItemKeys]
+    );
+    const unavailableItemKeys = new Set(
+      ownedResult.rows.map((row) => String(row.item_key))
+    );
+
+    const drops = [];
+    const chanceBasisPoints = [];
+    for (let index = 0; index < amount; index += 1) {
+      const rolled = config.roll({
+        isAvailable: (reward) => {
+          const items = rewardItems.get(reward.key) || [];
+          return !items.length || items.some(
+            item => !unavailableItemKeys.has(inventoryItemKey(item))
+          );
+        }
+      });
+      const reward = rolled.reward;
+      const selectedItems = (rewardItems.get(reward.key) || []).filter(
+        item => !unavailableItemKeys.has(inventoryItemKey(item))
+      );
+      const rolledChanceBasisPoints = Number(
+        rolled.selectedTierChanceBasisPoints ??
+        rolled.legendaryChanceBasisPoints ??
+        rolled.bundleChanceBasisPoints ??
+        0
+      );
+      chanceBasisPoints.push(rolledChanceBasisPoints);
+      drops.push(caseDropPayload(reward, selectedItems, rolledChanceBasisPoints));
+      if (selectedItems.length) {
+        for (const item of selectedItems) {
+          const itemKey = inventoryItemKey(item);
+          unavailableItemKeys.add(itemKey);
+        }
+      }
+    }
+
+    const stateResult = await client.query(
+      `UPDATE player_store_entitlements
+       SET ${config.stockColumn} = ${config.stockColumn} - $2,
+           updated_at = now()
+       WHERE player_id = $1
+       RETURNING *`,
+      [parsedAccess.playerId, amount]
+    );
+    const battlePass = storeEntitlementPayload(stateResult.rows[0]);
+    const response = {
+      ok: true,
+      battlePass,
+      caseOpening: {
+        requestId,
+        caseKind,
+        amount,
+        drops,
+        chanceBasisPoints,
+        resolvedCount: 0,
+        pendingCount: drops.length,
+        completed: false
+      }
+    };
+    await client.query(
+      `UPDATE player_case_openings
+       SET result_data = $2::jsonb
+       WHERE id = $1`,
+      [openingId, JSON.stringify(response)]
+    );
+    await auditGameEvent(client, {
+      playerId: parsedAccess.playerId,
+      playerName: String(player.name || ""),
+      eventType: `${caseKind}_case_opened`,
+      category: "economy",
+      severity: drops.some((drop) => ["bundle", "legendary"].includes(drop.rarity)) ? "notice" : "info",
+      description: `Открыт ${config.title} x${amount}`,
+      oldValue: {
+        [config.stockPayloadKey]: stockBefore
+      },
+      newValue: {
+        [config.stockPayloadKey]: battlePass[config.stockPayloadKey],
+        drops
+      },
+      metadata: { requestId, openingId, caseKind, chanceBasisPoints }
+    });
+    await client.query("COMMIT");
+
+    const fresh = await loadPostgresAccount(parsedAccess.playerId);
+    if (fresh) store.accounts[String(fresh.id)] = fresh;
+    console.log(
+      `[case-open] player=${parsedAccess.playerId} request=${requestId} kind=${caseKind} amount=${amount} ` +
+      `drops=${drops.map((drop) => drop.key).join(",")} cases=${stockBefore}->${battlePass[config.stockPayloadKey]} ` +
+      "resolution=pending"
+    );
+    return response;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(`[case-open] failed player=${parsedAccess.playerId} request=${requestId} kind=${caseKind}`, error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resolveBattlePassCaseReward(body = {}) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const parsedAccess = parseSummerCaseAccessToken(body.token);
+  const requestId = normalizeSummerCaseRequestId(body.requestId);
+  const dropIndex = Number(body.dropIndex);
+  const action = String(body.action || "");
+  if (!parsedAccess) return { ok: false, status: 403, error: "case_access_invalid" };
+  if (!requestId || !Number.isInteger(dropIndex) || dropIndex < 0 ||
+      !["claim", "dismantle"].includes(action)) {
+    return { ok: false, status: 400, error: "case_resolution_request_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      `SELECT id, name, cckey, money, level, exp
+       FROM players
+       WHERE id = $1
+       FOR UPDATE`,
+      [parsedAccess.playerId]
+    );
+    const player = playerResult.rows[0] || null;
+    if (!player || !verifyParsedSummerCaseAccessToken(parsedAccess, player.cckey)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "case_access_invalid" };
+    }
+    if (await activePlayerBan(parsedAccess.playerId, client)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "account_banned" };
+    }
+
+    const state = await loadStoreEntitlements(client, parsedAccess.playerId, true);
+    const openingResult = await client.query(
+      `SELECT id, case_kind, case_amount, result_data, resolution_data, resolved_at
+       FROM player_case_openings
+       WHERE player_id = $1 AND request_id = $2
+       FOR UPDATE`,
+      [parsedAccess.playerId, requestId]
+    );
+    const openingRow = openingResult.rows[0] || null;
+    if (!state || !openingRow) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "case_opening_not_found" };
+    }
+
+    const config = caseOpenConfig(String(openingRow.case_kind));
+    const resultData = jsonValue(openingRow.result_data, {});
+    const opening = resultData.caseOpening;
+    const drops = Array.isArray(opening?.drops) ? opening.drops : [];
+    if (!config || dropIndex >= drops.length || drops.length !== Number(openingRow.case_amount)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "case_opening_data_invalid" };
+    }
+
+    const resolutionData = caseOpeningResolutionData(openingRow.resolution_data);
+    const decisionKey = String(dropIndex);
+    const existingDecision = resolutionData.decisions[decisionKey] || null;
+    if (existingDecision) {
+      const caseOpening = caseOpeningPayload(resultData, resolutionData);
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        replayed: true,
+        battlePass: storeEntitlementPayload(state),
+        caseOpening,
+        caseResolution: existingDecision
+      };
+    }
+
+    const drop = drops[dropIndex];
+    const reward = config.rewards.find((entry) => entry.key === String(drop.key || ""));
+    if (!reward || reward.grant.kind !== String(drop.kind || "")) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "case_reward_contract_invalid" };
+    }
+
+    let coinsAdded = 0;
+    let experienceAdded = 0;
+    let fragmentsRequested = 0;
+    let summerCasesAdded = 0;
+    let tropicalCasesAdded = 0;
+    const itemGrants = [];
+    if (action === "dismantle") {
+      coinsAdded = Math.max(0, Math.trunc(Number(drop.dismantle?.coins || 0)));
+      experienceAdded = Math.max(0, Math.trunc(Number(drop.dismantle?.experience || 0)));
+      fragmentsRequested = Math.max(0, Math.trunc(Number(drop.dismantle?.fragments || 0)));
+      if (reward.grant.kind === "special_fragments") {
+        fragmentsRequested = Math.min(
+          fragmentsRequested,
+          Math.max(0, Math.trunc(Number(reward.grant.amount || 0)))
+        );
+      }
+      if (coinsAdded > 4000 || experienceAdded > 4000 || fragmentsRequested > 400) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "case_dismantle_contract_invalid" };
+      }
+    } else if (["wear", "weapon", "bundle"].includes(reward.grant.kind)) {
+      const allowedItemKeys = new Set((drop.itemKeys || []).map(String));
+      for (const item of caseRewardCatalogItems(reward)) {
+        const itemKey = inventoryItemKey(item);
+        if (allowedItemKeys.has(itemKey)) itemGrants.push({ item, itemKey });
+      }
+    } else if (reward.grant.kind === "coins") {
+      coinsAdded = Number(reward.grant.amount);
+    } else if (reward.grant.kind === "experience") {
+      experienceAdded = Number(reward.grant.amount);
+    } else if (reward.grant.kind === "special_fragments") {
+      fragmentsRequested = Number(reward.grant.amount);
+    } else if (reward.grant.kind === "case_stock") {
+      if (reward.grant.caseKind === "summer") summerCasesAdded = Number(reward.grant.amount);
+      if (reward.grant.caseKind === "tropical") tropicalCasesAdded = Number(reward.grant.amount);
+    } else {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "case_reward_grant_unsupported" };
+    }
+
+    const balanceBefore = Number(player.money || 0);
+    const balanceAfter = balanceBefore + coinsAdded;
+    const expBefore = Number(player.exp || 0);
+    const summerCasesAfter = Number(state.summer_cases || 0) + summerCasesAdded;
+    const tropicalCasesAfter = Number(state.tropical_cases || 0) + tropicalCasesAdded;
+    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > 2_147_483_647 ||
+        !Number.isSafeInteger(expBefore + experienceAdded) || expBefore + experienceAdded > 2_147_483_647 ||
+        !Number.isSafeInteger(summerCasesAfter) || summerCasesAfter > 2_147_483_647 ||
+        !Number.isSafeInteger(tropicalCasesAfter) || tropicalCasesAfter > 2_147_483_647) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "account_progress_limit_reached" };
+    }
+
+    for (const grant of itemGrants) {
+      await client.query(
+        `INSERT INTO player_inventory (
+           player_id, item_key, item_type, item_data, updated_at
+         )
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [parsedAccess.playerId, grant.itemKey, Number(grant.item.itype), JSON.stringify(grant.item)]
+      );
+      await client.query(
+        `INSERT INTO player_pending_inventory_deliveries (
+           player_id, order_id, case_opening_id, item_key, item_data
+         )
+         VALUES ($1, NULL, $2, $3, $4::jsonb)
+         ON CONFLICT (case_opening_id, item_key)
+           WHERE case_opening_id IS NOT NULL
+         DO NOTHING`,
+        [parsedAccess.playerId, Number(openingRow.id), grant.itemKey, JSON.stringify(grant.item)]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (
+           player_id, item_key, item_type, item_id, price, currency, item_data
+         )
+         VALUES ($1, $2, $3, $4, 0, 'case', $5::jsonb)`,
+        [
+          parsedAccess.playerId,
+          grant.itemKey,
+          Number(grant.item.itype),
+          inventoryItemId(grant.item),
+          JSON.stringify(grant.item)
+        ]
+      );
+    }
+
+    if (coinsAdded > 0) {
+      await client.query(
+        "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+        [parsedAccess.playerId, balanceAfter]
+      );
+    }
+    const experienceState = experienceAdded > 0
+      ? await awardPlayerExperience(
+        client,
+        parsedAccess.playerId,
+        experienceAdded,
+        action === "dismantle" ? "case_dismantle" : `${config.kind}_case_claim`
+      )
+      : null;
+
+    const fragmentsBefore = Number(state.special_case_fragments || 0);
+    const fragmentsAfter = Math.min(2000, fragmentsBefore + fragmentsRequested);
+    const fragmentsAdded = fragmentsAfter - fragmentsBefore;
+    const stateResult = await client.query(
+      `UPDATE player_store_entitlements
+       SET summer_cases = summer_cases + $2,
+           tropical_cases = tropical_cases + $3,
+           special_case_fragments = $4,
+           updated_at = now()
+       WHERE player_id = $1
+       RETURNING *`,
+      [
+        parsedAccess.playerId,
+        summerCasesAdded,
+        tropicalCasesAdded,
+        fragmentsAfter
+      ]
+    );
+    const battlePass = storeEntitlementPayload(stateResult.rows[0]);
+    const decision = {
+      dropIndex,
+      action,
+      rewardKey: reward.key,
+      rewardName: reward.name,
+      resolvedAt: new Date().toISOString(),
+      award: {
+        itemKeys: itemGrants.map((grant) => grant.itemKey),
+        coins: coinsAdded,
+        experience: experienceAdded,
+        fragments: fragmentsAdded,
+        cases: summerCasesAdded > 0
+          ? { caseKind: "summer", amount: summerCasesAdded }
+          : (tropicalCasesAdded > 0
+            ? { caseKind: "tropical", amount: tropicalCasesAdded }
+            : null)
+      }
+    };
+    resolutionData.decisions[decisionKey] = decision;
+    const resolvedCount = Object.keys(resolutionData.decisions).length;
+    const completed = resolvedCount === drops.length;
+    await client.query(
+      `UPDATE player_case_openings
+       SET resolution_data = $2::jsonb,
+           resolved_at = CASE WHEN $3 THEN now() ELSE NULL END
+       WHERE id = $1`,
+      [Number(openingRow.id), JSON.stringify(resolutionData), completed]
+    );
+
+    const caseOpening = caseOpeningPayload(resultData, resolutionData);
+    await auditGameEvent(client, {
+      playerId: parsedAccess.playerId,
+      playerName: String(player.name || ""),
+      eventType: action === "dismantle" ? "case_reward_dismantled" : "case_reward_claimed",
+      category: "economy",
+      severity: ["bundle", "legendary"].includes(reward.rarity) ? "notice" : "info",
+      description: action === "dismantle"
+        ? `Разобрана награда ${reward.name}`
+        : `Получена награда ${reward.name}`,
+      oldValue: {
+        balance: balanceBefore,
+        exp: expBefore,
+        specialCaseFragments: fragmentsBefore
+      },
+      newValue: {
+        balance: balanceAfter,
+        exp: experienceState?.exp ?? expBefore,
+        specialCaseFragments: fragmentsAfter,
+        award: decision.award
+      },
+      metadata: { requestId, openingId: Number(openingRow.id), dropIndex, action }
+    });
+    await client.query("COMMIT");
+
+    const fresh = await loadPostgresAccount(parsedAccess.playerId);
+    if (fresh) store.accounts[String(fresh.id)] = fresh;
+    console.log(
+      `[case-resolve] player=${parsedAccess.playerId} request=${requestId} index=${dropIndex} ` +
+      `action=${action} reward=${reward.key} coins=${coinsAdded} xp=${experienceAdded} ` +
+      `fragments=${fragmentsAdded} completed=${completed}`
+    );
+    return {
+      ok: true,
+      battlePass,
+      caseOpening,
+      caseResolution: decision
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(
+      `[case-resolve] failed player=${parsedAccess.playerId} request=${requestId} index=${dropIndex}`,
+      error
+    );
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function loadDonateLimitedStock(client, productIdValue, lock = false) {
+  const productId = normalizeDonateProductId(productIdValue);
+  if (!productId) return null;
+  const result = await client.query(
+    `SELECT product_id, capacity, remaining, updated_at
+     FROM donate_limited_stock
+     WHERE product_id = $1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [productId]
+  );
+  return result.rows[0] || null;
+}
+
+async function ownedDonateWearSetKeys(client, playerId, setItems) {
+  const itemKeys = setItems.map(inventoryItemKey);
+  if (!itemKeys.length) return [];
+  const result = await client.query(
+    `SELECT item_key
+     FROM player_inventory
+     WHERE player_id = $1
+       AND item_key = ANY($2::text[])`,
+    [Number(playerId), itemKeys]
+  );
+  return result.rows.map((row) => String(row.item_key));
+}
+
+async function validateStoreProductEligibility(client, playerId, product) {
+  const rewardKind = String(product.reward_kind || "coins");
+  const rewardAmount = Number(product.reward_amount || product.coins || 0);
+  if (rewardKind === "coins" ||
+      rewardKind === "case_tropical" ||
+      rewardKind === "case_summer") {
+    return { ok: true };
+  }
+
+  if (rewardKind === "wear_set") {
+    const setItems = donateWearSetItems(rewardAmount);
+    if (!setItems?.length) {
+      return { ok: false, status: 409, error: "store_reward_unsupported" };
+    }
+    const ownedKeys = await ownedDonateWearSetKeys(client, playerId, setItems);
+    if (ownedKeys.length === setItems.length) {
+      return { ok: false, status: 409, error: "clothing_set_already_owned" };
+    }
+    return { ok: true };
+  }
+
+  const state = await loadStoreEntitlements(client, playerId, true);
+  if (!state) {
+    return { ok: false, status: 500, error: "store_entitlement_unavailable" };
+  }
+  if (rewardKind === "battle_pass_premium" &&
+      Boolean(state.battle_pass_premium)) {
+    return { ok: false, status: 409, error: "battle_pass_already_owned" };
+  }
+  if (rewardKind === "battle_pass_premium_plus" &&
+      Boolean(state.battle_pass_premium_plus)) {
+    return { ok: false, status: 409, error: "battle_pass_plus_already_owned" };
+  }
+  if ((rewardKind === "battle_pass_levels" ||
+       rewardKind === "battle_pass_premium_plus") &&
+      Number(state.battle_pass_level) + rewardAmount > 100) {
+    return { ok: false, status: 409, error: "battle_pass_level_limit" };
+  }
+  return { ok: true };
+}
+
+async function createDonateOrder(telegramUserIdValue, rawProductId) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const telegramUserId = Number(telegramUserIdValue || 0);
+  const productId = normalizeDonateProductId(rawProductId);
+  if (!Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) {
+    return { ok: false, status: 400, error: "telegram_user_invalid" };
+  }
+  if (!productId) return { ok: false, status: 400, error: "donate_product_invalid" };
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE donate_orders
+       SET status = CASE
+             WHEN expires_at <= now() THEN 'expired'
+             ELSE 'cancelled'
+           END,
+           updated_at = now()
+       WHERE telegram_user_id = $1
+          AND status = 'pending'
+          AND limited_stock_reserved_at IS NULL`,
+      [telegramUserId]
+    );
+    const bindingResult = await client.query(
+      `SELECT b.player_id, p.name AS player_name
+       FROM launcher_telegram_bindings b
+       JOIN players p ON p.id = b.player_id
+       WHERE b.telegram_user_id = $1
+       FOR UPDATE OF b`,
+      [telegramUserId]
+    );
+    const binding = bindingResult.rows[0] || null;
+    if (!binding) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "telegram_account_not_linked" };
+    }
+    const productResult = await client.query(
+      `SELECT p.id, p.title, p.reward_kind, p.reward_amount,
+              p.coins, p.rubles, p.stars, p.active,
+              stock.remaining AS stock_remaining,
+              stock.capacity AS stock_capacity
+       FROM donate_products p
+       LEFT JOIN donate_limited_stock stock ON stock.product_id = p.id
+       WHERE p.id = $1
+       FOR SHARE OF p`,
+      [productId]
+    );
+    const product = productResult.rows[0] || null;
+    if (!product || !product.active) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_product_not_found" };
+    }
+    if (String(product.reward_kind) === "wear_set") {
+      if (Number(product.stock_capacity || 0) <= 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_stock_unavailable" };
+      }
+      if (Number(product.stock_remaining || 0) <= 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_product_sold_out" };
+      }
+      const reservedResult = await client.query(
+        `SELECT 1
+         FROM donate_orders
+         WHERE player_id = $1
+           AND product_id = $2
+           AND status = 'pending'
+           AND limited_stock_reserved_at IS NOT NULL
+         LIMIT 1`,
+        [Number(binding.player_id), productId]
+      );
+      if (reservedResult.rowCount > 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_checkout_pending" };
+      }
+    }
+    const eligibility = await validateStoreProductEligibility(
+      client,
+      Number(binding.player_id),
+      product
+    );
+    if (!eligibility.ok) {
+      await client.query("ROLLBACK");
+      return eligibility;
+    }
+
+    const orderId = randomOpaqueId("do");
+    const expiresAt = new Date(Date.now() + DONATE_ORDER_TTL_MS);
+    const orderResult = await client.query(
+       `INSERT INTO donate_orders (
+         id, player_id, telegram_user_id, product_id,
+         product_title, reward_kind, reward_amount,
+         coins, rubles, stars, status, expires_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11)
+       RETURNING *`,
+      [
+        orderId,
+        Number(binding.player_id),
+        telegramUserId,
+        String(product.id),
+        String(product.title),
+        String(product.reward_kind),
+        Number(product.reward_amount),
+        Number(product.coins),
+        Number(product.rubles),
+        Number(product.stars),
+        expiresAt
+      ]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+       order: donateOrderPayload({
+         ...orderResult.rows[0],
+         player_name: binding.player_name,
+         stock_remaining: product.stock_remaining,
+         stock_capacity: product.stock_capacity
+       })
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function reserveLimitedStockForOrder(client, order) {
+  if (String(order.reward_kind || "") !== "wear_set") {
+    return { ok: true, stock: null };
+  }
+
+  const stock = await loadDonateLimitedStock(
+    client,
+    String(order.product_id || ""),
+    true
+  );
+  if (!stock) {
+    return { ok: false, status: 409, error: "donate_stock_unavailable" };
+  }
+
+  if (order.limited_stock_reserved_at) {
+    return {
+      ok: true,
+      stock: {
+        remaining: Number(stock.remaining),
+        capacity: Number(stock.capacity)
+      }
+    };
+  }
+  if (Number(stock.remaining) <= 0) {
+    return { ok: false, status: 409, error: "donate_product_sold_out" };
+  }
+
+  const stockResult = await client.query(
+    `UPDATE donate_limited_stock
+     SET remaining = remaining - 1,
+         updated_at = now()
+     WHERE product_id = $1
+       AND remaining > 0
+     RETURNING remaining, capacity`,
+    [String(order.product_id)]
+  );
+  const updatedStock = stockResult.rows[0] || null;
+  if (!updatedStock) {
+    return { ok: false, status: 409, error: "donate_product_sold_out" };
+  }
+
+  const reservationResult = await client.query(
+    `UPDATE donate_orders
+     SET limited_stock_reserved_at = now(),
+         updated_at = now()
+     WHERE id = $1
+       AND limited_stock_reserved_at IS NULL
+     RETURNING limited_stock_reserved_at`,
+    [String(order.id)]
+  );
+  const reservation = reservationResult.rows[0] || null;
+  if (!reservation) {
+    throw new Error("donate_stock_reservation_conflict");
+  }
+  order.limited_stock_reserved_at = reservation.limited_stock_reserved_at;
+  return {
+    ok: true,
+    stock: {
+      remaining: Number(updatedStock.remaining),
+      capacity: Number(updatedStock.capacity)
+    }
+  };
+}
+
+async function validateDonateCheckout(orderIdValue, telegramUserIdValue, currencyValue, totalAmountValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const orderId = normalizeDonateOrderId(orderIdValue);
+  const telegramUserId = Number(telegramUserIdValue || 0);
+  const currency = String(currencyValue || "");
+  const totalAmount = Number(totalAmountValue || 0);
+  if (!orderId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      currency !== "XTR" ||
+      !Number.isSafeInteger(totalAmount) || totalAmount <= 0) {
+    return { ok: false, status: 400, error: "donate_checkout_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `SELECT o.*, p.name AS player_name
+       FROM donate_orders o
+       JOIN players p ON p.id = o.player_id
+       WHERE o.id = $1
+       FOR UPDATE OF o`,
+      [orderId]
+    );
+    const order = result.rows[0] || null;
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_order_not_found" };
+    }
+    if (order.status !== "pending") {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        error: order.status === "paid" ? "donate_order_already_paid" : "donate_order_unavailable"
+      };
+    }
+    if (!order.limited_stock_reserved_at &&
+        new Date(order.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE donate_orders
+         SET status = 'expired', updated_at = now()
+         WHERE id = $1 AND status = 'pending'`,
+        [orderId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "donate_order_expired" };
+    }
+    if (Number(order.telegram_user_id) !== telegramUserId ||
+        Number(order.stars) !== totalAmount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "donate_checkout_mismatch" };
+    }
+    const eligibility = await validateStoreProductEligibility(
+      client,
+      Number(order.player_id),
+      order
+    );
+    if (!eligibility.ok) {
+      await client.query("ROLLBACK");
+      return eligibility;
+    }
+    const reservation = await reserveLimitedStockForOrder(client, order);
+    if (!reservation.ok) {
+      await client.query("ROLLBACK");
+      return reservation;
+    }
+    if (reservation.stock) {
+      order.stock_remaining = reservation.stock.remaining;
+      order.stock_capacity = reservation.stock.capacity;
+    }
+    await client.query("COMMIT");
+    return { ok: true, order: donateOrderPayload(order) };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function donatePaymentPayload(row, duplicate = false) {
+  return {
+    ok: true,
+    duplicate,
+    orderId: String(row.order_id),
+    telegramPaymentChargeId: String(row.telegram_payment_charge_id),
+    player: {
+      id: Number(row.player_id),
+      name: String(row.player_name || "")
+    },
+    product: {
+      id: String(row.product_id),
+      title: String(row.product_title || ""),
+      rewardKind: String(row.reward_kind || "coins"),
+      rewardAmount: Number(row.reward_amount || row.coins || 0),
+      coins: Number(row.coins),
+      rubles: Number(row.rubles),
+      stars: Number(row.stars)
+    },
+    rewardBefore: row.reward_before || {},
+    rewardAfter: row.reward_after || {},
+    balanceBefore: Number(row.balance_before),
+    balanceAfter: Number(row.balance_after),
+    paidAt: postgresTimestamp(row.telegram_paid_at)
+  };
+}
+
+async function loadDonatePaymentByCharge(chargeId, executor = pgPool) {
+  const result = await executor.query(
+    `SELECT dp.*, p.name AS player_name
+     FROM donate_payments dp
+     JOIN players p ON p.id = dp.player_id
+     WHERE dp.telegram_payment_charge_id = $1`,
+    [chargeId]
+  );
+  return result.rows[0] || null;
+}
+
+async function applyStoreReward(client, order, player) {
+  const rewardKind = String(order.reward_kind || "coins");
+  const rewardAmount = Number(order.reward_amount || order.coins || 0);
+  const balanceBefore = Number(player.money || 0);
+
+  if (rewardKind === "coins") {
+    const balanceAfter = balanceBefore + Number(order.coins);
+    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > 2_147_483_647) {
+      return { ok: false, status: 409, error: "balance_limit_reached" };
+    }
+    await client.query(
+      "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+      [Number(order.player_id), balanceAfter]
+    );
+    return {
+      ok: true,
+      balanceBefore,
+      balanceAfter,
+      rewardBefore: { coins: balanceBefore },
+      rewardAfter: { coins: balanceAfter }
+    };
+  }
+
+  if (rewardKind === "wear_set") {
+    const setItems = donateWearSetItems(rewardAmount);
+    if (!setItems?.length) {
+      return { ok: false, status: 409, error: "store_reward_unsupported" };
+    }
+    const ownedBefore = await ownedDonateWearSetKeys(
+      client,
+      Number(order.player_id),
+      setItems
+    );
+    const awardedItemKeys = [];
+    for (const item of setItems) {
+      const itemKey = inventoryItemKey(item);
+      awardedItemKeys.push(itemKey);
+      await client.query(
+        `INSERT INTO player_inventory (
+           player_id, item_key, item_type, item_data, updated_at
+         )
+         VALUES ($1, $2, $3, $4::jsonb, now())
+         ON CONFLICT (player_id, item_key) DO UPDATE SET
+           item_type = EXCLUDED.item_type,
+           item_data = EXCLUDED.item_data,
+           updated_at = now()`,
+        [
+          Number(order.player_id),
+          itemKey,
+          Number(item.itype),
+          JSON.stringify(item)
+        ]
+      );
+      await client.query(
+        `INSERT INTO player_pending_inventory_deliveries (
+           player_id, order_id, item_key, item_data
+         )
+         VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (order_id, item_key) DO NOTHING`,
+        [
+          Number(order.player_id),
+          String(order.id),
+          itemKey,
+          JSON.stringify(item)
+        ]
+      );
+      await client.query(
+        `INSERT INTO purchase_history (
+           player_id, item_key, item_type, item_id,
+           price, currency, item_data
+         )
+         VALUES ($1, $2, $3, $4, 0, 'XTR', $5::jsonb)`,
+        [
+          Number(order.player_id),
+          itemKey,
+          Number(item.itype),
+          inventoryItemId(item),
+          JSON.stringify(item)
+        ]
+      );
+    }
+    return {
+      ok: true,
+      balanceBefore,
+      balanceAfter: balanceBefore,
+      rewardBefore: {
+        wearSetId: rewardAmount,
+        ownedItemKeys: ownedBefore
+      },
+      rewardAfter: {
+        wearSetId: rewardAmount,
+        awardedItemKeys,
+        ownedItemCount: awardedItemKeys.length
+      }
+    };
+  }
+
+  const stateRow = await loadStoreEntitlements(
+    client,
+    Number(order.player_id),
+    true
+  );
+  if (!stateRow) {
+    return { ok: false, status: 500, error: "store_entitlement_unavailable" };
+  }
+
+  const before = storeEntitlementPayload(stateRow);
+  const after = { ...before };
+  if (rewardKind === "battle_pass_premium") {
+    if (before.battlePassPremium) {
+      return { ok: false, status: 409, error: "battle_pass_already_owned" };
+    }
+    after.battlePassPremium = true;
+  } else if (rewardKind === "battle_pass_premium_plus") {
+    if (before.battlePassPremiumPlus) {
+      return { ok: false, status: 409, error: "battle_pass_plus_already_owned" };
+    }
+    if (before.battlePassLevel + rewardAmount > 100) {
+      return { ok: false, status: 409, error: "battle_pass_level_limit" };
+    }
+    after.battlePassPremium = true;
+    after.battlePassPremiumPlus = true;
+    after.battlePassLevel += rewardAmount;
+  } else if (rewardKind === "battle_pass_levels") {
+    if (before.battlePassLevel + rewardAmount > 100) {
+      return { ok: false, status: 409, error: "battle_pass_level_limit" };
+    }
+    after.battlePassLevel += rewardAmount;
+  } else if (rewardKind === "case_tropical") {
+    after.tropicalCases += rewardAmount;
+  } else if (rewardKind === "case_summer") {
+    after.summerCases += rewardAmount;
+  } else {
+    return { ok: false, status: 409, error: "store_reward_unsupported" };
+  }
+
+  if (!Number.isSafeInteger(after.tropicalCases) ||
+      !Number.isSafeInteger(after.summerCases) ||
+      after.tropicalCases > 2_147_483_647 ||
+      after.summerCases > 2_147_483_647) {
+    return { ok: false, status: 409, error: "store_inventory_limit" };
+  }
+
+  await client.query(
+    `UPDATE player_store_entitlements
+     SET battle_pass_level = $2,
+         battle_pass_premium = $3,
+         battle_pass_premium_plus = $4,
+         tropical_cases = $5,
+         summer_cases = $6,
+         updated_at = now()
+     WHERE player_id = $1`,
+    [
+      Number(order.player_id),
+      after.battlePassLevel,
+      after.battlePassPremium,
+      after.battlePassPremiumPlus,
+      after.tropicalCases,
+      after.summerCases
+    ]
+  );
+  return {
+    ok: true,
+    balanceBefore,
+    balanceAfter: balanceBefore,
+    rewardBefore: before,
+    rewardAfter: after
+  };
+}
+
+async function settleDonatePayment(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const orderId = normalizeDonateOrderId(body?.orderId);
+  const telegramUserId = Number(body?.telegramUserId || 0);
+  const currency = String(body?.currency || "");
+  const totalAmount = Number(body?.totalAmount || 0);
+  const telegramPaymentChargeId = String(body?.telegramPaymentChargeId || "").trim();
+  const providerPaymentChargeId = String(body?.providerPaymentChargeId || "").trim();
+  const telegramPaidAtValue = String(body?.paidAt || "");
+  const telegramPaidAtMs = Date.parse(telegramPaidAtValue);
+  if (!orderId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      currency !== "XTR" ||
+      !Number.isSafeInteger(totalAmount) || totalAmount <= 0 ||
+      !telegramPaymentChargeId || telegramPaymentChargeId.length > 512 ||
+      providerPaymentChargeId.length > 512 ||
+      !Number.isFinite(telegramPaidAtMs)) {
+    return { ok: false, status: 400, error: "donate_payment_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  let committedPayment = null;
+  try {
+    await client.query("BEGIN");
+    const duplicate = await loadDonatePaymentByCharge(telegramPaymentChargeId, client);
+    if (duplicate) {
+      if (String(duplicate.order_id) !== orderId ||
+          Number(duplicate.telegram_user_id) !== telegramUserId ||
+          Number(duplicate.stars) !== totalAmount) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "donate_payment_charge_conflict" };
+      }
+      await client.query("COMMIT");
+      return donatePaymentPayload(duplicate, true);
+    }
+
+    const orderResult = await client.query(
+      `SELECT o.*, p.name AS player_name
+       FROM donate_orders o
+       JOIN players p ON p.id = o.player_id
+       WHERE o.id = $1
+       FOR UPDATE OF o`,
+      [orderId]
+    );
+    const order = orderResult.rows[0] || null;
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "donate_order_not_found" };
+    }
+    if (order.status === "paid") {
+      const previousResult = await client.query(
+        `SELECT dp.*, p.name AS player_name
+         FROM donate_payments dp
+         JOIN players p ON p.id = dp.player_id
+         WHERE dp.order_id = $1`,
+        [orderId]
+      );
+      const previous = previousResult.rows[0] || null;
+      await client.query("COMMIT");
+      if (previous &&
+          String(previous.telegram_payment_charge_id) === telegramPaymentChargeId &&
+          Number(previous.telegram_user_id) === telegramUserId &&
+          Number(previous.stars) === totalAmount) {
+        return donatePaymentPayload(previous, true);
+      }
+      return { ok: false, status: 409, error: "donate_order_already_paid" };
+    }
+    if ((order.status !== "pending" && order.status !== "expired") ||
+        Number(order.telegram_user_id) !== telegramUserId ||
+        Number(order.stars) !== totalAmount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "donate_payment_mismatch" };
+    }
+
+    const reservation = await reserveLimitedStockForOrder(client, order);
+    if (!reservation.ok) {
+      await client.query("ROLLBACK");
+      return reservation;
+    }
+
+    const playerResult = await client.query(
+      "SELECT id, name, money FROM players WHERE id = $1 FOR UPDATE",
+      [Number(order.player_id)]
+    );
+    const player = playerResult.rows[0] || null;
+    if (!player) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "player_not_found" };
+    }
+    const reward = await applyStoreReward(client, order, player);
+    if (!reward.ok) {
+      await client.query("ROLLBACK");
+      return reward;
+    }
+    if (reservation.stock) {
+      reward.rewardAfter = {
+        ...reward.rewardAfter,
+        stock: reservation.stock
+      };
+    }
+    const balanceBefore = reward.balanceBefore;
+    const balanceAfter = reward.balanceAfter;
+    const paymentResult = await client.query(
+      `INSERT INTO donate_payments (
+         telegram_payment_charge_id, provider_payment_charge_id,
+         order_id, player_id, telegram_user_id, product_id,
+         product_title, reward_kind, reward_amount,
+         currency, stars, coins, rubles,
+         reward_before, reward_after,
+         balance_before, balance_after, telegram_paid_at
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, $8, $9,
+         'XTR', $10, $11, $12,
+         $13, $14,
+         $15, $16, $17
+       )
+       RETURNING *`,
+      [
+        telegramPaymentChargeId,
+        providerPaymentChargeId,
+        orderId,
+        Number(order.player_id),
+        telegramUserId,
+        String(order.product_id),
+        String(order.product_title),
+        String(order.reward_kind),
+        Number(order.reward_amount),
+        Number(order.stars),
+        Number(order.coins),
+        Number(order.rubles),
+        reward.rewardBefore,
+        reward.rewardAfter,
+        balanceBefore,
+        balanceAfter,
+        new Date(telegramPaidAtMs)
+      ]
+    );
+    await client.query(
+      `UPDATE donate_orders
+       SET status = 'paid',
+           telegram_payment_charge_id = $2,
+           paid_at = $3,
+           limited_stock_consumed_at = CASE
+             WHEN $4::boolean THEN COALESCE(limited_stock_consumed_at, now())
+             ELSE limited_stock_consumed_at
+           END,
+           updated_at = now()
+       WHERE id = $1`,
+      [
+        orderId,
+        telegramPaymentChargeId,
+        new Date(telegramPaidAtMs),
+        String(order.reward_kind) === "wear_set"
+      ]
+    );
+    await writeAuditEvent(client, {
+      playerId: Number(order.player_id),
+      playerName: String(player.name || order.player_name || ""),
+      eventType: "telegram_stars_donate",
+      category: "economy",
+      severity: "notice",
+      description:
+        `Telegram Stars: выдано «${String(order.product_title)}» ` +
+        `за ${Number(order.stars)} ⭐`,
+      oldValue: reward.rewardBefore,
+      newValue: {
+        ...reward.rewardAfter,
+        productId: String(order.product_id)
+      },
+      source: "telegram_stars",
+      metadata: {
+        orderId,
+        telegramUserId,
+        telegramPaymentChargeId,
+        stars: Number(order.stars),
+        rubles: Number(order.rubles),
+        rewardKind: String(order.reward_kind),
+        rewardAmount: Number(order.reward_amount)
+      }
+    });
+    await client.query("COMMIT");
+    committedPayment = {
+      ...paymentResult.rows[0],
+      player_name: player.name
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") {
+      const duplicate = await loadDonatePaymentByCharge(telegramPaymentChargeId);
+      if (duplicate) {
+        if (String(duplicate.order_id) === orderId &&
+            Number(duplicate.telegram_user_id) === telegramUserId &&
+            Number(duplicate.stars) === totalAmount) {
+          return donatePaymentPayload(duplicate, true);
+        }
+        return {
+          ok: false,
+          status: 409,
+          error: "donate_payment_charge_conflict"
+        };
+      }
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (String(committedPayment.reward_kind) === "wear_set") {
+    const fresh = await loadPostgresAccount(Number(committedPayment.player_id));
+    if (fresh) {
+      store.accounts[String(fresh.id)] = fresh;
+    }
+  } else {
+    const cached = store.accounts[String(committedPayment.player_id)];
+    if (cached) {
+      cached.money = Number(committedPayment.balance_after);
+      cached.updatedAt = new Date().toISOString();
+    }
+  }
+  console.log(
+    `[store] player=${committedPayment.player_id} order=${orderId} ` +
+    `product=${committedPayment.product_id} stars=${committedPayment.stars} ` +
+    `reward=${committedPayment.reward_kind}:${committedPayment.reward_amount} ` +
+    `balance=${committedPayment.balance_after}`
+  );
+  return donatePaymentPayload(committedPayment, false);
+}
+
+async function createBotTelegramPairingCode(rawUser, chatIdValue) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const telegramUser = normalizeTelegramIdentity(rawUser);
+  const chatId = Number(chatIdValue || 0);
+  if (!telegramUser || !Number.isSafeInteger(chatId) || chatId <= 0) {
+    return { ok: false, status: 400, error: "telegram_user_invalid" };
+  }
+
+  for (let collisionAttempt = 0; collisionAttempt < 4; collisionAttempt += 1) {
+    const code = createTelegramPairingCodeValue();
+    const codeHash = telegramPairingCodeHash(code);
+    const requestId = randomOpaqueId("pc");
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "SELECT pg_advisory_xact_lock_shared($1)",
+        [TELEGRAM_RESET_ADVISORY_LOCK]
+      );
+      const systemState = await telegramSystemState(client);
+      if (!systemState) throw new Error("telegram_system_state_missing");
+      const bindingResult = await client.query(
+        `SELECT b.*, p.name AS player_name
+         FROM launcher_telegram_bindings b
+         JOIN players p ON p.id = b.player_id
+         WHERE b.telegram_user_id = $1
+         FOR UPDATE OF b`,
+        [telegramUser.id]
+      );
+      const binding = bindingResult.rows[0] || null;
+      let purpose = "link";
+      let expectedPlayerId = null;
+      let loginRequestId = null;
+      if (binding) {
+        const loginResult = await client.query(
+          `SELECT *
+           FROM launcher_telegram_login_requests
+           WHERE player_id = $1
+             AND expected_telegram_user_id = $2
+             AND purpose = 'ip_reverify'
+             AND state IN ('pending', 'claimed')
+             AND expires_at > now()
+           ORDER BY created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
+          [Number(binding.player_id), telegramUser.id]
+        );
+        const loginRequest = loginResult.rows[0];
+        if (!loginRequest) {
+          await client.query("ROLLBACK");
+          return {
+            ok: false,
+            status: 409,
+            error: "telegram_already_bound",
+            player: {
+              id: Number(binding.player_id),
+              name: String(binding.player_name || "")
+            }
+          };
+        }
+        if (loginRequest.state === "claimed") {
+          const claimedResult = await client.query(
+            `SELECT request_id, state, expires_at
+             FROM launcher_telegram_pairing_codes
+             WHERE login_request_id = $1
+               AND state = 'claimed'
+             LIMIT 1`,
+            [String(loginRequest.request_id)]
+          );
+          await client.query("ROLLBACK");
+          return {
+            ok: false,
+            status: 409,
+            error: "telegram_confirmation_pending",
+            pairing: claimedResult.rows[0] ? {
+              requestId: String(claimedResult.rows[0].request_id),
+              state: "claimed",
+              expiresAt: postgresTimestamp(claimedResult.rows[0].expires_at)
+            } : null
+          };
+        }
+        purpose = "ip_reverify";
+        expectedPlayerId = Number(binding.player_id);
+        loginRequestId = String(loginRequest.request_id);
+      }
+
+      const claimedResult = await client.query(
+        `SELECT request_id, state, expires_at
+         FROM launcher_telegram_pairing_codes
+         WHERE telegram_user_id = $1
+           AND state = 'claimed'
+           AND expires_at > now()
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [telegramUser.id]
+      );
+      if (claimedResult.rowCount) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: "telegram_confirmation_pending",
+          pairing: {
+            requestId: String(claimedResult.rows[0].request_id),
+            state: "claimed",
+            expiresAt: postgresTimestamp(claimedResult.rows[0].expires_at)
+          }
+        };
+      }
+
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = CASE
+           WHEN expires_at <= now() THEN 'expired'
+           ELSE 'cancelled'
+         END,
+         updated_at = now()
+         WHERE telegram_user_id = $1
+           AND state = 'issued'`,
+        [telegramUser.id]
+      );
+
+      const expiresAt = new Date(Date.now() + TELEGRAM_PAIRING_CODE_TTL_MS);
+      await client.query(
+        `INSERT INTO launcher_telegram_pairing_codes (
+           request_id, code_hash, telegram_user_id,
+           telegram_username, telegram_first_name, telegram_last_name,
+           purpose, expected_player_id, login_request_id,
+           binding_epoch, bot_chat_id, expires_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          requestId,
+          codeHash,
+          telegramUser.id,
+          telegramUser.username,
+          telegramUser.firstName,
+          telegramUser.lastName,
+          purpose,
+          expectedPlayerId,
+          loginRequestId,
+          Number(systemState.binding_epoch),
+          chatId,
+          expiresAt.toISOString()
+        ]
+      );
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        status: "issued",
+        requestId,
+        code,
+        purpose,
+        expiresAt: expiresAt.toISOString(),
+        player: binding ? {
+          id: Number(binding.player_id),
+          name: String(binding.player_name || "")
+        } : null
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      if (error?.code === "23505" && collisionAttempt < 3) continue;
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  return { ok: false, status: 503, error: "telegram_code_generation_failed" };
+}
+
+async function attachBotTelegramPairingMessage(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const requestId = normalizeTelegramPairingRequestId(body?.requestId, ["pc"]);
+  const telegramUserId = Number(body?.telegramUserId || 0);
+  const chatId = Number(body?.chatId || 0);
+  const messageId = Number(body?.messageId || 0);
+  if (!requestId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      !Number.isSafeInteger(chatId) || chatId <= 0 ||
+      !Number.isSafeInteger(messageId) || messageId <= 0) {
+    return { ok: false, status: 400, error: "telegram_message_invalid" };
+  }
+  const result = await pgPool.query(
+    `UPDATE launcher_telegram_pairing_codes
+     SET bot_chat_id = $3,
+         bot_message_id = $4,
+         updated_at = now()
+     WHERE request_id = $1
+       AND telegram_user_id = $2
+       AND state IN ('issued', 'claimed')
+     RETURNING request_id, state`,
+    [requestId, telegramUserId, chatId, messageId]
+  );
+  if (!result.rowCount) {
+    return { ok: false, status: 404, error: "telegram_pairing_not_found" };
+  }
+  return { ok: true, requestId, state: String(result.rows[0].state) };
+}
+
+async function listBotTelegramConfirmations(limitValue = 20) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const limit = Math.max(1, Math.min(100, Number(limitValue) || 20));
+  const systemState = await telegramSystemState();
+  if (!systemState) return { ok: false, status: 503, error: "telegram_system_state_missing" };
+  const result = await pgPool.query(
+    `SELECT c.*, p.name AS player_name
+     FROM launcher_telegram_pairing_codes c
+     JOIN players p ON p.id = c.player_id
+     WHERE c.state = 'claimed'
+       AND c.confirmation_notified_at IS NULL
+       AND c.expires_at > now()
+       AND c.binding_epoch = $1
+     ORDER BY c.claimed_at ASC
+     LIMIT $2`,
+    [Number(systemState.binding_epoch), limit]
+  );
+  return {
+    ok: true,
+    confirmations: result.rows.map((row) => ({
+      requestId: String(row.request_id),
+      purpose: String(row.purpose),
+      chatId: Number(row.bot_chat_id),
+      messageId: row.bot_message_id == null ? null : Number(row.bot_message_id),
+      player: {
+        id: Number(row.player_id),
+        name: String(row.player_name || "")
+      },
+      telegram: telegramUserPayload(row),
+      expiresAt: postgresTimestamp(row.expires_at)
+    }))
+  };
+}
+
+async function markBotTelegramConfirmationNotified(body) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const requestId = normalizeTelegramPairingRequestId(body?.requestId, ["pc"]);
+  const telegramUserId = Number(body?.telegramUserId || 0);
+  const chatId = Number(body?.chatId || 0);
+  const messageId = Number(body?.messageId || 0);
+  if (!requestId ||
+      !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 ||
+      !Number.isSafeInteger(chatId) || chatId <= 0 ||
+      !Number.isSafeInteger(messageId) || messageId <= 0) {
+    return { ok: false, status: 400, error: "telegram_message_invalid" };
+  }
+  const result = await pgPool.query(
+    `UPDATE launcher_telegram_pairing_codes
+     SET bot_chat_id = $3,
+         bot_message_id = $4,
+         confirmation_notified_at = COALESCE(confirmation_notified_at, now()),
+         updated_at = now()
+     WHERE request_id = $1
+       AND telegram_user_id = $2
+       AND state = 'claimed'
+     RETURNING request_id`,
+    [requestId, telegramUserId, chatId, messageId]
+  );
+  if (!result.rowCount) {
+    return { ok: false, status: 404, error: "telegram_pairing_not_found" };
+  }
+  return { ok: true, requestId };
+}
+
+async function decideTelegramPairing(requestIdValue, rawUser, decisionValue) {
+  if (!pgPool || !TELEGRAM_LINK_API_TOKEN) {
+    return { ok: false, status: 503, error: "telegram_link_unavailable" };
+  }
+  const requestId = normalizeTelegramPairingRequestId(requestIdValue, ["pc"]);
+  const telegramUser = normalizeTelegramIdentity(rawUser);
+  const decision = String(decisionValue || "").toLowerCase();
+  if (!requestId || !telegramUser || !["confirm", "reject"].includes(decision)) {
+    return { ok: false, status: 400, error: "telegram_pairing_invalid" };
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const result = await client.query(
+      `SELECT c.*, r.state AS login_state, r.expires_at AS login_expires_at,
+              p.cckey, p.name AS player_name,
+              d.device_key_id AS bound_device_key_id,
+              d.link_key_hash AS device_link_key_hash
+       FROM launcher_telegram_pairing_codes c
+       JOIN launcher_telegram_login_requests r ON r.request_id = c.login_request_id
+       JOIN players p ON p.id = c.player_id
+       LEFT JOIN launcher_devices d ON d.player_id = c.player_id
+       WHERE c.request_id = $1
+       FOR UPDATE OF c, r, p`,
+      [requestId]
+    );
+    const pairing = result.rows[0];
+    if (pairing &&
+        Number(pairing.telegram_user_id) === telegramUser.id &&
+        ["confirmed", "rejected"].includes(pairing.state) &&
+        pairing.login_state === pairing.state) {
+      await client.query("ROLLBACK");
+      return {
+        ok: true,
+        status: String(pairing.state),
+        purpose: String(pairing.purpose),
+        player: {
+          id: Number(pairing.player_id),
+          name: String(pairing.player_name || "")
+        },
+        telegram: telegramUser
+      };
+    }
+    if (!pairing ||
+        pairing.state !== "claimed" ||
+        pairing.login_state !== "claimed") {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "telegram_pairing_not_claimed" };
+    }
+    if (Number(pairing.telegram_user_id) !== telegramUser.id) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 403, error: "telegram_account_mismatch" };
+    }
+    if (Number(pairing.binding_epoch) !== Number(systemState.binding_epoch)) {
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = 'cancelled', updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'cancelled', updated_at = now()
+         WHERE request_id = $1`,
+        [String(pairing.login_request_id)]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 409, error: "telegram_binding_reset" };
+    }
+    if (new Date(pairing.expires_at).getTime() <= Date.now() ||
+        new Date(pairing.login_expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [String(pairing.login_request_id)]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "telegram_code_expired" };
+    }
+    if (decision === "reject") {
+      await client.query(
+        `UPDATE launcher_telegram_pairing_codes
+         SET state = 'rejected', rejected_at = now(), updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query(
+        `UPDATE launcher_telegram_login_requests
+         SET state = 'rejected', rejected_at = now(), updated_at = now()
+         WHERE request_id = $1`,
+        [String(pairing.login_request_id)]
+      );
+      await writeAuditEvent(client, {
+        playerId: Number(pairing.player_id),
+        playerName: String(pairing.player_name || ""),
+        eventType: "telegram_pairing_rejected",
+        category: "security",
+        severity: "notice",
+        description: `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} отклонил привязку`,
+        source: "telegram_bot",
+        device: String(pairing.device_key_id || ""),
+        metadata: { purpose: String(pairing.purpose) }
+      });
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        status: "rejected",
+        player: {
+          id: Number(pairing.player_id),
+          name: String(pairing.player_name || "")
+        }
+      };
+    }
+
+    const currentLinkHash = launcherLinkKeyHash(pairing.cckey);
+    if (!pairing.bound_device_key_id ||
+        pairing.bound_device_key_id !== pairing.device_key_id ||
+        !safeTokenEquals(pairing.link_key_hash, currentLinkHash) ||
+        !safeTokenEquals(pairing.device_link_key_hash, currentLinkHash)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "telegram_link_stale" };
+    }
+
+    const bindingResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_bindings
+       WHERE player_id = $1 OR telegram_user_id = $2
+       FOR UPDATE`,
+      [Number(pairing.player_id), telegramUser.id]
+    );
+    const playerBinding = bindingResult.rows.find(
+      (row) => Number(row.player_id) === Number(pairing.player_id)
+    );
+    const telegramBinding = bindingResult.rows.find(
+      (row) => Number(row.telegram_user_id) === telegramUser.id
+    );
+    if (pairing.purpose === "link") {
+      if (playerBinding || telegramBinding) {
+        await client.query("ROLLBACK");
+        return {
+          ok: false,
+          status: 409,
+          error: playerBinding ? "telegram_player_already_bound" : "telegram_already_bound"
+        };
+      }
+      await client.query(
+        `INSERT INTO launcher_telegram_bindings (
+           player_id, telegram_user_id, telegram_username,
+           telegram_first_name, telegram_last_name, link_key_hash,
+           last_ip_hash, binding_epoch,
+           confirmed_at, last_verified_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now(), now())`,
+        [
+          Number(pairing.player_id),
+          telegramUser.id,
+          telegramUser.username,
+          telegramUser.firstName,
+          telegramUser.lastName,
+          currentLinkHash,
+          String(pairing.launcher_ip_hash),
+          Number(systemState.binding_epoch)
+        ]
+      );
+    } else {
+      if (!playerBinding ||
+          !telegramBinding ||
+          Number(playerBinding.telegram_user_id) !== telegramUser.id ||
+          Number(telegramBinding.player_id) !== Number(pairing.player_id) ||
+          Number(pairing.expected_player_id || 0) !== Number(pairing.player_id)) {
+        await client.query("ROLLBACK");
+        return { ok: false, status: 409, error: "telegram_account_mismatch" };
+      }
+      await client.query(
+        `UPDATE launcher_telegram_bindings
+         SET telegram_username = $2,
+             telegram_first_name = $3,
+             telegram_last_name = $4,
+             link_key_hash = $5,
+             last_ip_hash = $6,
+             binding_epoch = $7,
+             last_verified_at = now(),
+             updated_at = now()
+         WHERE player_id = $1`,
+        [
+          Number(pairing.player_id),
+          telegramUser.username,
+          telegramUser.firstName,
+          telegramUser.lastName,
+          currentLinkHash,
+          String(pairing.launcher_ip_hash),
+          Number(systemState.binding_epoch)
+        ]
+      );
+    }
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'confirmed', confirmed_at = now(), updated_at = now()
+       WHERE request_id = $1`,
+      [requestId]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'confirmed', confirmed_at = now(), updated_at = now()
+       WHERE request_id = $1`,
+      [String(pairing.login_request_id)]
+    );
+    await writeAuditEvent(client, {
+      playerId: Number(pairing.player_id),
+      playerName: String(pairing.player_name || ""),
+      eventType: pairing.purpose === "ip_reverify"
+        ? "telegram_ip_reverified"
+        : "telegram_link_confirmed",
+      category: "security",
+      severity: "notice",
+      description: pairing.purpose === "ip_reverify"
+        ? `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} подтвердил новый IP`
+        : `Telegram ${telegramUser.username ? `@${telegramUser.username}` : telegramUser.id} подтверждён для лаунчера`,
+      source: "telegram_bot",
+      device: String(pairing.device_key_id || ""),
+      newValue: {
+        telegramUserId: telegramUser.id,
+        telegramUsername: telegramUser.username,
+        purpose: String(pairing.purpose),
+        bindingEpoch: Number(systemState.binding_epoch)
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      status: "confirmed",
+      purpose: String(pairing.purpose),
+      player: {
+        id: Number(pairing.player_id),
+        name: String(pairing.player_name || "")
+      },
+      telegram: telegramUser
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (error?.code === "23505") {
+      return { ok: false, status: 409, error: "telegram_already_bound" };
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resetTelegramBindingForPlayer(playerIdValue, adminTelegramIdValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const playerId = Number(playerIdValue || 0);
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0) {
+    return { ok: false, status: 400, error: "invalid_player_id" };
+  }
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const playerResult = await client.query(
+      "SELECT id, name FROM players WHERE id = $1 FOR UPDATE",
+      [playerId]
+    );
+    if (!playerResult.rowCount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "player_not_found" };
+    }
+    const bindingResult = await client.query(
+      "DELETE FROM launcher_telegram_bindings WHERE player_id = $1",
+      [playerId]
+    );
+    const codeResult = await client.query(
+      "DELETE FROM launcher_telegram_pairing_codes WHERE player_id = $1 OR expected_player_id = $1",
+      [playerId]
+    );
+    const requestResult = await client.query(
+      "DELETE FROM launcher_telegram_login_requests WHERE player_id = $1",
+      [playerId]
+    );
+    await writeAuditEvent(client, {
+      playerId,
+      playerName: String(playerResult.rows[0].name || ""),
+      eventType: "telegram_binding_admin_reset",
+      category: "security",
+      severity: "warning",
+      description: "Администратор сбросил Telegram-привязку игрока",
+      source: "telegram_admin",
+      metadata: {
+        adminTelegramId,
+        removedBinding: bindingResult.rowCount,
+        removedCodes: codeResult.rowCount,
+        removedLoginRequests: requestResult.rowCount
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      player: {
+        id: playerId,
+        name: String(playerResult.rows[0].name || "")
+      },
+      removed: {
+        bindings: bindingResult.rowCount,
+        codes: codeResult.rowCount,
+        loginRequests: requestResult.rowCount
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resetLauncherGameLinkForTelegramAdmin(
+  playerIdValue,
+  adminTelegramIdValue,
+  requestOrigin = null
+) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const playerId = Number(playerIdValue || 0);
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0) {
+    return { ok: false, status: 400, error: "invalid_player_id" };
+  }
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+
+  const rotated = await rotateLauncherGameLink(playerId);
+  if (!rotated?.account) {
+    return { ok: false, status: 404, error: "player_not_found" };
+  }
+
+  await writeAuditEvent(pgPool, {
+    playerId,
+    playerName: String(rotated.account.name || ""),
+    eventType: "admin_game_link_reset",
+    category: "security",
+    severity: "warning",
+    description: "Администратор удалил старую игровую ссылку, привязку устройства и Telegram",
+    source: "telegram_admin",
+    newValue: {
+      linkRotated: true,
+      deviceBindingRemoved: rotated.bindingRemoved,
+      telegramBindingRemoved: rotated.telegramBindingRemoved
+    },
+    metadata: { adminTelegramId }
+  });
+
+  return {
+    ok: true,
+    player: {
+      id: playerId,
+      name: String(rotated.account.name || "")
+    },
+    removed: {
+      device: Boolean(rotated.bindingRemoved),
+      telegram: Boolean(rotated.telegramBindingRemoved)
+    },
+    linkRotated: true,
+    loginLink: loginLink(rotated.account, requestOrigin)
+  };
+}
+
+async function prepareGlobalTelegramBindingReset(adminTelegramIdValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "SELECT pg_advisory_xact_lock_shared($1)",
+      [TELEGRAM_RESET_ADVISORY_LOCK]
+    );
+    const systemState = await telegramSystemState(client);
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = CASE WHEN expires_at <= now() THEN 'expired' ELSE 'cancelled' END,
+           updated_at = now()
+       WHERE admin_telegram_user_id = $1
+         AND action = 'reset_all'
+         AND state = 'prepared'`,
+      [adminTelegramId]
+    );
+    const countResult = await client.query(
+      "SELECT COUNT(*)::integer AS count FROM launcher_telegram_bindings"
+    );
+    const affectedCount = Number(countResult.rows[0]?.count || 0);
+    const requestId = randomOpaqueId("ga");
+    const expiresAt = new Date(Date.now() + TELEGRAM_RESET_CONFIRM_TTL_MS);
+    await client.query(
+      `INSERT INTO launcher_telegram_admin_actions (
+         request_id, action, admin_telegram_user_id,
+         binding_epoch, affected_count, expires_at
+       )
+       VALUES ($1, 'reset_all', $2, $3, $4, $5)`,
+      [
+        requestId,
+        adminTelegramId,
+        Number(systemState.binding_epoch),
+        affectedCount,
+        expiresAt.toISOString()
+      ]
+    );
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      requestId,
+      affectedCount,
+      expiresAt: expiresAt.toISOString()
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function executeGlobalTelegramBindingReset(requestIdValue, adminTelegramIdValue) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const requestId = normalizeTelegramPairingRequestId(requestIdValue, ["ga"]);
+  const adminTelegramId = Number(adminTelegramIdValue || 0);
+  if (!requestId) return { ok: false, status: 400, error: "reset_confirmation_invalid" };
+  if (adminTelegramId !== TELEGRAM_ADMIN_ID) {
+    return { ok: false, status: 403, error: "admin_forbidden" };
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [TELEGRAM_RESET_ADVISORY_LOCK]);
+    const systemState = await telegramSystemState(client, { lock: true });
+    if (!systemState) throw new Error("telegram_system_state_missing");
+    const actionResult = await client.query(
+      `SELECT *
+       FROM launcher_telegram_admin_actions
+       WHERE request_id = $1
+       FOR UPDATE`,
+      [requestId]
+    );
+    const action = actionResult.rows[0];
+    if (!action ||
+        action.action !== "reset_all" ||
+        Number(action.admin_telegram_user_id) !== adminTelegramId ||
+        action.state !== "prepared" ||
+        Number(action.binding_epoch) !== Number(systemState.binding_epoch)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "reset_confirmation_invalid" };
+    }
+    if (new Date(action.expires_at).getTime() <= Date.now()) {
+      await client.query(
+        `UPDATE launcher_telegram_admin_actions
+         SET state = 'expired', updated_at = now()
+         WHERE request_id = $1`,
+        [requestId]
+      );
+      await client.query("COMMIT");
+      return { ok: false, status: 410, error: "reset_confirmation_expired" };
+    }
+
+    const bindingResult = await client.query("DELETE FROM launcher_telegram_bindings");
+    const codeResult = await client.query("DELETE FROM launcher_telegram_pairing_codes");
+    const loginResult = await client.query("DELETE FROM launcher_telegram_login_requests");
+    const nextEpoch = Number(systemState.binding_epoch) + 1;
+    await client.query(
+      `UPDATE launcher_telegram_system_state
+       SET binding_epoch = $1,
+           last_reset_at = now(),
+           last_reset_by_telegram_id = $2,
+           updated_at = now()
+       WHERE id = 1`,
+      [nextEpoch, adminTelegramId]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = 'executed', executed_at = now(), updated_at = now()
+       WHERE request_id = $1`,
+      [requestId]
+    );
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = 'cancelled', updated_at = now()
+       WHERE request_id <> $1
+         AND state = 'prepared'`,
+      [requestId]
+    );
+    await writeAuditEvent(client, {
+      eventType: "telegram_bindings_global_reset",
+      category: "security",
+      severity: "critical",
+      description: `Администратор глобально сбросил ${bindingResult.rowCount} Telegram-привязок`,
+      source: "telegram_admin",
+      metadata: {
+        adminTelegramId,
+        previousEpoch: Number(systemState.binding_epoch),
+        nextEpoch,
+        removedBindings: bindingResult.rowCount,
+        removedCodes: codeResult.rowCount,
+        removedLoginRequests: loginResult.rowCount
+      }
+    });
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      bindingEpoch: nextEpoch,
+      removed: {
+        bindings: bindingResult.rowCount,
+        codes: codeResult.rowCount,
+        loginRequests: loginResult.rowCount
+      }
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function cleanupTelegramPairingState() {
+  if (!pgPool) return;
+  const client = await pgPool.connect();
+  let locked = false;
+  try {
+    const lockResult = await client.query(
+      "SELECT pg_try_advisory_lock($1) AS locked",
+      [TELEGRAM_CLEANUP_ADVISORY_LOCK]
+    );
+    locked = lockResult.rows[0]?.locked === true;
+    if (!locked) return;
+    await client.query("BEGIN");
+    await client.query(
+      `UPDATE launcher_telegram_pairing_codes
+       SET state = 'expired', updated_at = now()
+       WHERE state IN ('issued', 'claimed')
+         AND expires_at <= now()`
+    );
+    await client.query(
+      `UPDATE launcher_telegram_login_requests
+       SET state = 'expired', updated_at = now()
+       WHERE state IN ('pending', 'claimed')
+         AND expires_at <= now()`
+    );
+    await client.query(
+      `UPDATE launcher_telegram_admin_actions
+       SET state = 'expired', updated_at = now()
+       WHERE state = 'prepared'
+         AND expires_at <= now()`
+    );
+    await client.query(
+      `DELETE FROM launcher_telegram_pairing_codes
+       WHERE state IN ('confirmed', 'rejected', 'cancelled', 'expired')
+         AND updated_at < now() - interval '24 hours'`
+    );
+    await client.query(
+      `DELETE FROM launcher_telegram_login_requests
+       WHERE state IN ('confirmed', 'rejected', 'cancelled', 'expired', 'locked')
+         AND updated_at < now() - interval '24 hours'`
+    );
+    await client.query(
+      `DELETE FROM launcher_telegram_admin_actions
+       WHERE state IN ('executed', 'cancelled', 'expired')
+         AND updated_at < now() - interval '24 hours'`
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("[telegram-pairing] cleanup failed", error);
+  } finally {
+    if (locked) {
+      await client.query("SELECT pg_advisory_unlock($1)", [TELEGRAM_CLEANUP_ADVISORY_LOCK]).catch(() => {});
+    }
+    client.release();
+  }
+}
+
+async function redeemPromoCode(account, rawCode, context = {}) {
+  if (!pgPool) return { ok: false, status: 503, error: "postgres_required" };
+  const code = normalizePromoCode(rawCode);
+  if (!isValidPromoCode(code)) return { ok: false, status: 400, error: "invalid_code" };
+
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const promoResult = await client.query(
+      "SELECT * FROM promo_codes WHERE code_normalized = $1 FOR UPDATE",
+      [code]
+    );
+    const promo = promoResult.rows[0];
+    if (!promo) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 400, error: "promo_not_found" };
+    }
+
+    const previous = await client.query(
+      `SELECT reward_amount, balance_after, redeemed_at
+       FROM promo_redemptions
+       WHERE promo_code_id = $1 AND player_id = $2`,
+      [Number(promo.id), Number(account.id)]
+    );
+    if (previous.rowCount) {
+      const balanceResult = await client.query("SELECT money FROM players WHERE id = $1", [Number(account.id)]);
+      await client.query("COMMIT");
+      return {
+        ok: true,
+        alreadyRedeemed: true,
+        status: "already_redeemed",
+        promo: promoCodePayload(promo),
+        rewardAmount: Number(previous.rows[0].reward_amount || promo.reward_amount || 0),
+        balance: Number(balanceResult.rows[0]?.money ?? previous.rows[0].balance_after ?? account.money ?? 0),
+        redeemedAt: postgresTimestamp(previous.rows[0].redeemed_at)
+      };
+    }
+
+    if (!promo.active) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "promo_inactive" };
+    }
+    if (promo.expires_at && new Date(promo.expires_at).getTime() <= Date.now()) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "promo_expired" };
+    }
+    if (promo.max_redemptions != null && Number(promo.redemption_count || 0) >= Number(promo.max_redemptions)) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "promo_limit_reached" };
+    }
+
+    const playerResult = await client.query(
+      "SELECT money FROM players WHERE id = $1 FOR UPDATE",
+      [Number(account.id)]
+    );
+    if (!playerResult.rowCount) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 404, error: "player_not_found" };
+    }
+
+    const balanceBefore = Number(playerResult.rows[0].money || 0);
+    const rewardAmount = Number(promo.reward_amount || 0);
+    const balanceAfter = balanceBefore + rewardAmount;
+    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > 2_147_483_647) {
+      await client.query("ROLLBACK");
+      return { ok: false, status: 409, error: "balance_limit_reached" };
+    }
+
+    await client.query(
+      "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+      [Number(account.id), balanceAfter]
+    );
+    const redemption = await client.query(
+      `INSERT INTO promo_redemptions (
+         promo_code_id, player_id, reward_type, reward_amount,
+         balance_before, balance_after, device_key_id, link_key_hash
+       )
+       VALUES ($1, $2, 'contrabucks', $3, $4, $5, $6, $7)
+       RETURNING redeemed_at`,
+      [
+        Number(promo.id),
+        Number(account.id),
+        rewardAmount,
+        balanceBefore,
+        balanceAfter,
+        String(context.deviceKeyId || "").slice(0, 160),
+        launcherLinkKeyHash(account.key)
+      ]
+    );
+    const updatedPromo = await client.query(
+      `UPDATE promo_codes
+       SET redemption_count = redemption_count + 1, updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [Number(promo.id)]
+    );
+    await writeAuditEvent(client, {
+      playerId: Number(account.id),
+      playerName: String(account.name || ""),
+      eventType: "promo_redeemed",
+      category: "economy",
+      severity: "info",
+      description: `Промокод ${code}: начислено ${rewardAmount} контрабаксов`,
+      oldValue: { balance: balanceBefore },
+      newValue: { balance: balanceAfter, delta: rewardAmount, promoCode: code },
+      source: "launcher_promo",
+      ipAddress: String(context.ipAddress || ""),
+      device: String(context.deviceKeyId || ""),
+      metadata: { promoCodeId: Number(promo.id), rewardType: "contrabucks" }
+    });
+    await client.query("COMMIT");
+
+    return {
+      ok: true,
+      alreadyRedeemed: false,
+      status: "redeemed",
+      promo: promoCodePayload(updatedPromo.rows[0]),
+      rewardAmount,
+      balance: balanceAfter,
+      redeemedAt: postgresTimestamp(redemption.rows[0]?.redeemed_at)
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function bindLauncherDevice(account, body, req) {
   const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
   const publicKey = normalizeLauncherPublicKey(body?.devicePublicKey);
   const hwidHash = normalizeHwidRiskHash(body?.hwidRiskHash);
-  if (!deviceKeyId || !publicKey || !hwidHash) {
+  if (!deviceKeyId || !publicKey || !hwidHash || !launcherDeviceKeyMatchesPublicKey(deviceKeyId, publicKey)) {
     return { ok: false, error: "device_bind_required" };
   }
 
   const now = new Date().toISOString();
+  const linkKeyHash = launcherLinkKeyHash(account.key);
   const risk = { hwidChanged: false, ip: requestClientIp(req), userAgent: String(req.headers["user-agent"] || "").slice(0, 160) };
   if (pgPool) {
     const existingDevice = await pgPool.query(
-      "SELECT player_id FROM launcher_devices WHERE device_key_id = $1 AND player_id <> $2",
-      [deviceKeyId, Number(account.id)]
+      `SELECT player_id
+       FROM launcher_devices
+       WHERE player_id <> $2
+         AND (device_key_id = $1 OR (hwid_hash <> '' AND hwid_hash = $3))
+       LIMIT 1`,
+      [deviceKeyId, Number(account.id), hwidHash]
     );
     if (existingDevice.rowCount) {
       return { ok: false, error: "device_already_bound" };
     }
 
     try {
-      await pgPool.query(
-        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, hwid_hash, risk, bound_at, last_seen_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, now(), now())
-         ON CONFLICT (player_id) DO NOTHING`,
-        [Number(account.id), deviceKeyId, publicKey, hwidHash, JSON.stringify(risk)]
+      const inserted = await pgPool.query(
+        `INSERT INTO launcher_devices (player_id, device_key_id, device_public_key, link_key_hash, hwid_hash, risk, bound_at, last_seen_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, now(), now())
+         ON CONFLICT (player_id) DO NOTHING
+         RETURNING player_id`,
+        [Number(account.id), deviceKeyId, publicKey, linkKeyHash, hwidHash, JSON.stringify(risk)]
       );
+      if (!inserted.rowCount) {
+        return { ok: false, error: "device_signature_required" };
+      }
     } catch (error) {
       if (error?.code === "23505") {
         return { ok: false, error: "device_already_bound" };
@@ -2517,12 +7156,14 @@ async function bindLauncherDevice(account, body, req) {
     }
   } else {
     for (const existing of Object.values(store.accounts || {})) {
-      if (Number(existing?.id) !== Number(account.id) && existing?.launcherDevice?.deviceKeyId === deviceKeyId) {
+      const existingDevice = existing?.launcherDevice;
+      if (Number(existing?.id) !== Number(account.id) &&
+          (existingDevice?.deviceKeyId === deviceKeyId || (existingDevice?.hwidHash && existingDevice.hwidHash === hwidHash))) {
         return { ok: false, error: "device_already_bound" };
       }
     }
     const normalized = normalizeAccount(account);
-    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, hwidHash, risk, boundAt: now, lastSeenAt: now };
+    normalized.launcherDevice = { playerId: Number(account.id), deviceKeyId, publicKey, linkKeyHash, hwidHash, risk, boundAt: now, lastSeenAt: now };
     store.accounts[String(account.id)] = normalized;
     await saveStore(store);
   }
@@ -2533,6 +7174,7 @@ async function bindLauncherDevice(account, body, req) {
 
 async function touchLauncherDevice(account, device, hwidHash, req) {
   const normalizedHash = normalizeHwidRiskHash(hwidHash);
+  const linkKeyHash = launcherLinkKeyHash(account.key);
   const risk = {
     hwidChanged: Boolean(device?.hwidHash && normalizedHash && device.hwidHash !== normalizedHash),
     ip: requestClientIp(req),
@@ -2542,13 +7184,22 @@ async function touchLauncherDevice(account, device, hwidHash, req) {
   if (pgPool) {
     await pgPool.query(
       `UPDATE launcher_devices
-       SET hwid_hash = COALESCE(NULLIF($2, ''), hwid_hash), risk = $3::jsonb, last_seen_at = now()
+       SET link_key_hash = $2,
+           hwid_hash = COALESCE(NULLIF($3, ''), hwid_hash),
+           risk = $4::jsonb,
+           last_seen_at = now()
        WHERE player_id = $1`,
-      [Number(account.id), normalizedHash, JSON.stringify(risk)]
+      [Number(account.id), linkKeyHash, normalizedHash, JSON.stringify(risk)]
     );
   } else if (store.accounts[String(account.id)]?.launcherDevice) {
     const normalized = normalizeAccount(store.accounts[String(account.id)]);
-    normalized.launcherDevice = { ...normalized.launcherDevice, hwidHash: normalizedHash || normalized.launcherDevice.hwidHash, risk, lastSeenAt: new Date().toISOString() };
+    normalized.launcherDevice = {
+      ...normalized.launcherDevice,
+      linkKeyHash,
+      hwidHash: normalizedHash || normalized.launcherDevice.hwidHash,
+      risk,
+      lastSeenAt: new Date().toISOString()
+    };
     store.accounts[String(account.id)] = normalized;
     await saveStore(store);
   }
@@ -2607,7 +7258,13 @@ function verifyLauncherDeviceSignature(device, nonce, signature) {
 }
 
 async function verifyLauncherDeviceAccess(account, body, req) {
-  const current = await loadLauncherDevice(account.id);
+  let current = await loadLauncherDevice(account.id);
+  const currentLinkKeyHash = launcherLinkKeyHash(account.key);
+  if (current?.linkKeyHash && !safeTokenEquals(current.linkKeyHash, currentLinkKeyHash)) {
+    console.warn(`[launcher-device] stale link generation reset player=${account.id} keyId=${current.deviceKeyId}`);
+    await deleteLauncherDeviceBinding(account.id);
+    current = null;
+  }
   if (!current) {
     const bound = await bindLauncherDevice(account, body, req);
     if (!bound.ok) return { ok: false, status: 403, error: bound.error };
@@ -2636,9 +7293,10 @@ async function verifyLauncherDeviceAccess(account, body, req) {
   return { ok: true, bound: true };
 }
 
-async function resetLauncherDeviceBinding(accountId) {
+async function deleteLauncherDeviceBinding(accountId, client = null) {
   if (pgPool) {
-    const result = await pgPool.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
+    const executor = client || pgPool;
+    const result = await executor.query("DELETE FROM launcher_devices WHERE player_id = $1", [Number(accountId)]);
     return result.rowCount > 0;
   }
   const account = store.accounts[String(accountId)];
@@ -2647,6 +7305,97 @@ async function resetLauncherDeviceBinding(accountId) {
   store.accounts[String(accountId)] = account;
   await saveStore(store);
   return true;
+}
+
+function revokeLauncherCredentialsForPlayer(accountId) {
+  const playerId = Number(accountId);
+  for (const [token, session] of launcherSessions) {
+    if (Number(session?.id) === playerId) launcherSessions.delete(token);
+  }
+  for (const [nonce, challenge] of launcherDeviceChallenges) {
+    if (Number(challenge?.playerId) === playerId) launcherDeviceChallenges.delete(nonce);
+  }
+}
+
+function rememberRevokedGameLinkKey(accountId, key) {
+  const playerId = Number(accountId);
+  if (!Number.isInteger(playerId) || playerId <= 0 || !key) return;
+  const hashes = revokedGameLinkKeys.get(playerId) || [];
+  hashes.push(launcherLinkKeyHash(key));
+  revokedGameLinkKeys.set(playerId, hashes.slice(-8));
+}
+
+function isRevokedGameLinkKey(accountId, key) {
+  const hashes = revokedGameLinkKeys.get(Number(accountId));
+  if (!hashes?.length || !key) return false;
+  const hash = launcherLinkKeyHash(key);
+  return hashes.some((revokedHash) => safeTokenEquals(revokedHash, hash));
+}
+
+async function rotateLauncherGameLink(accountId) {
+  const playerId = Number(accountId);
+  if (!Number.isInteger(playerId) || playerId <= 0) return null;
+  const nextKey = newAccountKey(playerId);
+  let bindingRemoved = false;
+  let telegramBindingRemoved = false;
+  let account = null;
+  let previousKey = "";
+
+  if (pgPool) {
+    await pgSaveChain.catch(() => {});
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query("SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE", [playerId]);
+      if (!existing.rowCount) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      previousKey = String(existing.rows[0].cckey || "");
+      bindingRemoved = await deleteLauncherDeviceBinding(playerId, client);
+      const telegramBinding = await client.query(
+        "DELETE FROM launcher_telegram_bindings WHERE player_id = $1",
+        [playerId]
+      );
+      telegramBindingRemoved = telegramBinding.rowCount > 0;
+      await client.query(
+        "DELETE FROM launcher_telegram_pairing_codes WHERE player_id = $1 OR expected_player_id = $1",
+        [playerId]
+      );
+      await client.query(
+        "DELETE FROM launcher_telegram_login_requests WHERE player_id = $1",
+        [playerId]
+      );
+      await client.query(
+        "UPDATE players SET cckey = $2, updated_at = now() WHERE id = $1",
+        [playerId, nextKey]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    account = await loadPostgresAccount(playerId);
+    if (account) store.accounts[String(playerId)] = account;
+  } else {
+    const existing = store.accounts[String(playerId)];
+    if (!existing) return null;
+    const normalized = normalizeAccount(existing);
+    previousKey = String(normalized.key || "");
+    bindingRemoved = Boolean(normalized.launcherDevice);
+    delete normalized.launcherDevice;
+    normalized.key = nextKey;
+    normalized.updatedAt = new Date().toISOString();
+    store.accounts[String(playerId)] = normalized;
+    await saveStore(store);
+    account = normalized;
+  }
+
+  rememberRevokedGameLinkKey(playerId, previousKey);
+  revokeLauncherCredentialsForPlayer(playerId);
+  return { account, bindingRemoved, telegramBindingRemoved };
 }
 
 async function loginAccountFromUrl(url) {
@@ -2668,6 +7417,7 @@ function clone(value) {
 }
 
 const playerStatKeys = ["k", "d", "s", "hs", "ns", "pt", "w", "l", "dhs", "dns", "do", "re", "mdo", "mre", "sh", "hi"];
+const STATISTIC_RESET_COST = 30;
 
 function statNumber(value, fallback = 0) {
   const number = Number(value);
@@ -2690,7 +7440,7 @@ function levelStateForExp(totalExp, currentLevel = START_LEVEL) {
   };
 }
 
-async function awardPlayerExperience(client, playerId, amount) {
+async function awardPlayerExperience(client, playerId, amount, source = "game_api") {
   const id = Number(playerId || 0);
   const expGain = statNumber(amount, 0);
   if (!Number.isInteger(id) || id <= 0 || expGain <= 0) return null;
@@ -2719,6 +7469,18 @@ async function awardPlayerExperience(client, playerId, amount) {
   }
 
   console.log(`[battle-exp] player=${id} add=${expGain} exp=${oldExp}->${next.exp} level=${oldLevel}->${next.level} next=${next.expMax}`);
+  await writeAuditEvent(client, {
+    playerId: id,
+    eventType: next.level !== oldLevel ? "level_change" : "experience_change",
+    category: "progress",
+    severity: next.level !== oldLevel ? "notice" : "info",
+    description: next.level !== oldLevel
+      ? `Уровень изменён: ${oldLevel} → ${next.level}`
+      : `Начислено ${expGain} опыта`,
+    oldValue: { exp: oldExp, level: oldLevel },
+    newValue: { exp: next.exp, level: next.level, delta: expGain },
+    source
+  });
   return {
     gained: expGain,
     expBefore: oldExp,
@@ -2770,13 +7532,41 @@ async function awardClanExperience(client, playerId, amount) {
   };
 }
 
+async function claimPendingInventoryDeliveries(playerId) {
+  if (!pgPool) return [];
+  const result = await pgPool.query(
+    `WITH pending AS (
+       SELECT id
+       FROM player_pending_inventory_deliveries
+       WHERE player_id = $1
+         AND delivered_at IS NULL
+       ORDER BY created_at ASC, id ASC
+       LIMIT 64
+       FOR UPDATE SKIP LOCKED
+     ),
+     delivered AS (
+       UPDATE player_pending_inventory_deliveries delivery
+       SET delivered_at = now()
+       FROM pending
+       WHERE delivery.id = pending.id
+       RETURNING delivery.id, delivery.item_data
+     )
+     SELECT id, item_data
+     FROM delivered
+     ORDER BY id ASC`,
+    [Number(playerId)]
+  );
+  return result.rows.map((row) => jsonValue(row.item_data, {}));
+}
+
 function profilePayload(account, full = false) {
   const publicName = account.namePending ? "" : account.name;
+  const staff = staffProfilePayload(account.staffRole, publicName);
   const payload = {
     result: true,
     info: {
       u_id: account.id,
-      un: publicName,
+      un: staff.battleName,
       fname: account.fullName,
       lvl: account.level,
       vcur: account.money,
@@ -2789,7 +7579,9 @@ function profilePayload(account, full = false) {
     conf: {
       cst: {
         cn: 30
-      }
+      },
+      mdr: legacyPermissionPayload(staff.role),
+      staff,
     },
     name_pending: Boolean(account.namePending)
   };
@@ -2800,7 +7592,9 @@ function profilePayload(account, full = false) {
     payload.taun = clone(account.taun);
   }
 
-  const liveClan = clanSummaryForPlayer(account.id) || account.clan || null;
+  // Clan membership is derived from the active clan/member store. account.clan
+  // is only a cached projection and must not resurrect a deleted clan.
+  const liveClan = clanSummaryForPlayer(account.id);
   if (liveClan) {
     const clanRecord = clanById(liveClan.cid);
     payload.cl = {
@@ -2837,7 +7631,11 @@ function inventoryPayload(account) {
     result: true,
     st: Math.floor(Date.now() / 1000),
     data: {
-      items: JSON.stringify(account.inventory || []),
+      items: JSON.stringify(
+        (account.inventory || []).filter(
+          (item) => !(Number(item?.itype || 0) === 2 && Number(item?.e_id ?? item?.id ?? 0) === 36)
+        )
+      ),
       dw: clone(defaultWeapons)
     }
   };
@@ -3173,6 +7971,18 @@ async function syncPostgresAchievements(client, playerId) {
   } else if (newlyCompleted.length) {
     console.log(`[achievements] unlock player=${account.id} count=${newlyCompleted.length} ids=${newlyCompleted.map((item) => item.i).join(",")}`);
   }
+  for (const achievement of newlyCompleted) {
+    await writeAuditEvent(client, {
+      playerId: account.id,
+      eventType: "achievement_complete",
+      category: "progress",
+      severity: "notice",
+      description: `Выполнено достижение #${achievement.i}`,
+      newValue: { current: achievement.currentValue, target: achievement.maxValue, reward: achievement.reward },
+      source: "battle_server",
+      metadata: { achievementId: achievement.id, originalId: achievement.i }
+    });
+  }
   return newlyCompleted;
 }
 
@@ -3293,6 +8103,108 @@ function statsBlock(account) {
   };
 }
 
+function isSupportedStatisticResetType(type) {
+  return type === 1 || type === 2;
+}
+
+function applyStatisticResetToAccount(account, type) {
+  if (type === 1) {
+    account.weaponStats = [];
+    return "weapon";
+  }
+  if (type === 2) {
+    account.stats = {};
+    return "common";
+  }
+  return "";
+}
+
+async function resetStatisticPostgres(account, type) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query(
+        "SELECT cckey, money FROM players WHERE id = $1 FOR UPDATE",
+        [Number(account.id)]
+      );
+      const row = player.rows[0];
+      if (!row || row.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const money = Number(row.money || 0);
+      if (money < STATISTIC_RESET_COST) {
+        await client.query("ROLLBACK");
+        return { result: false, err: [2] };
+      }
+
+      const scope = type === 1 ? "weapon" : "common";
+      if (type === 1) {
+        await client.query("DELETE FROM player_weapon_stats WHERE player_id = $1", [Number(account.id)]);
+      } else {
+        await client.query(
+          "UPDATE players SET stats = '{}'::jsonb WHERE id = $1",
+          [Number(account.id)]
+        );
+      }
+
+      const nextMoney = money - STATISTIC_RESET_COST;
+      await client.query(
+        "UPDATE players SET money = $2, updated_at = now() WHERE id = $1",
+        [Number(account.id), nextMoney]
+      );
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "statistics_reset",
+        category: "statistics",
+        description: scope === "weapon" ? "Сброшена статистика оружия" : "Сброшена общая статистика",
+        oldValue: { balance: money },
+        newValue: { balance: nextMoney, type, scope },
+        metadata: { cost: STATISTIC_RESET_COST, type, scope }
+      });
+      await client.query("COMMIT");
+
+      const fresh = await loadPostgresAccount(account.id);
+      if (fresh) store.accounts[String(fresh.id)] = fresh;
+      account.money = nextMoney;
+      if (type === 1) account.weaponStats = [];
+      else account.stats = {};
+      console.log(`[stats-reset] pg player=${account.id} type=${type} scope=${scope} before=${money} after=${nextMoney}`);
+      return ok({ req: "", vcur: nextMoney });
+    } catch (error) {
+      if (client) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // Preserve the original failure for diagnostics.
+        }
+      }
+      console.error("[postgres] statistics reset failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function resetStatistic(account, url) {
+  const type = Number(url.searchParams.get("t") || 0);
+  if (!isSupportedStatisticResetType(type)) return { result: false, err: [1] };
+  if (pgPool) return resetStatisticPostgres(account, type);
+  if (Number(account.money || 0) < STATISTIC_RESET_COST) return { result: false, err: [2] };
+
+  const money = Number(account.money || 0);
+  const scope = applyStatisticResetToAccount(account, type);
+  account.money = money - STATISTIC_RESET_COST;
+  persist(account);
+  console.log(`[stats-reset] json player=${account.id} type=${type} scope=${scope} before=${money} after=${account.money}`);
+  return ok({ req: "", vcur: account.money });
+}
+
 function usesProfileObjectLoadout(account, url) {
   const targetId = Number(url.searchParams.get("ui") || 0);
   return Number.isInteger(targetId) && targetId > 0 && targetId !== Number(account.id);
@@ -3319,7 +8231,7 @@ function ratingUser(account, pos = 1, overrides = {}) {
   const stats = playerStats(account);
   const death = Number(overrides.death ?? stats.d);
   const kill = Number(overrides.kill ?? stats.k);
-  const liveClan = clanSummaryForPlayer(account.id) || account.clan || null;
+  const liveClan = clanSummaryForPlayer(account.id);
   return {
     pos,
     id: Number(overrides.id ?? account.id),
@@ -3522,7 +8434,17 @@ const SHOP_DURATION = Object.freeze({
   MONTH: 3,
   PERMANENT: 4
 });
+const PURCHASABLE_TIMED_DURATIONS = new Set([
+  SHOP_DURATION.DAY,
+  SHOP_DURATION.WEEK,
+  SHOP_DURATION.MONTH
+]);
 const SHOP_DAY_SECONDS = 86460;
+// Enhancer.eD is read through SimpleJSON.JSONNode.AsInt on the original
+// client. Permanent clan ownership is stored as eD=0, but clan inventory must
+// expose a non-zero Int32 timestamp because ClanInventory.Refresh dereferences
+// Enhancer.Duration without a null check.
+const CLIENT_MAX_UNIX_SECONDS = 2147483647;
 
 function currentUnixSeconds() {
   return Math.floor(Date.now() / 1000);
@@ -3547,6 +8469,8 @@ function normalizeClanSummary(clan) {
     t: String(clan.t ?? clan.tag ?? ""),
     tc: String(clan.tc ?? clan.tagColor ?? ""),
     aid: Number(clan.aid ?? clan.armId ?? 1),
+    bannerId: normalizeClanBannerId(clan.bannerId),
+    bannerRevision: normalizeClanBannerRevision(clan.bannerRevision),
     h: String(clan.h ?? clan.homepage ?? ""),
     d: String(clan.d ?? clan.desc ?? ""),
     vc: Number(clan.vc ?? clan.money ?? 0),
@@ -3576,6 +8500,18 @@ function normalizeStore(rawStore = {}) {
 }
 
 function ensureClanStore() {
+  // normalizeStore replaces every clan object. Re-running it while a mutation
+  // holds a clan reference makes subsequent writes land on a detached copy.
+  // The store is normalized at load and at the start of routeClan; only repair
+  // the shape here when it is actually missing.
+  if (
+    store?.clans?.byId &&
+    Number.isFinite(Number(store.clans.nextId)) &&
+    Number.isFinite(Number(store.clans.nextEventId)) &&
+    Number.isFinite(Number(store.clans.nextTreasuryEventId))
+  ) {
+    return store.clans;
+  }
   store = normalizeStore(store || { accounts: {} });
   return store.clans;
 }
@@ -3605,6 +8541,8 @@ function normalizeClanRecord(raw = {}) {
     exp: Number(raw.exp ?? raw.e ?? 0),
     money: Number(raw.money ?? raw.vc ?? 0),
     armId: Number(raw.armId ?? raw.aid ?? 1),
+    bannerId: normalizeClanBannerId(raw.bannerId),
+    bannerRevision: normalizeClanBannerRevision(raw.bannerRevision),
     tagColor: String(raw.tagColor ?? raw.tc ?? ""),
     homepage: String(raw.homepage ?? raw.h ?? ""),
     desc: String(raw.desc ?? raw.description ?? raw.d ?? ""),
@@ -3825,14 +8763,19 @@ async function mutateBattleSocial(action, userId, targetId) {
           return { ok: false, error: "target_not_found", status: 404 };
         }
 
-        if (action === "request") {
-          const existing = await client.query(
+        let existing = { rows: [] };
+        let becameAccepted = false;
+        if (action === "request" || action === "confirm") {
+          existing = await client.query(
             `SELECT player_id, friend_player_id, status
              FROM player_friends
              WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)
              FOR UPDATE`,
             [id, target]
           );
+        }
+
+        if (action === "request") {
           if (existing.rows.some((row) => row.status === "accepted")) {
             // Already friends; original client treats this as a no-op after refresh.
           } else if (existing.rows.some((row) => Number(row.player_id) === target && Number(row.friend_player_id) === id && row.status === "pending")) {
@@ -3840,9 +8783,10 @@ async function mutateBattleSocial(action, userId, targetId) {
             await client.query(
               `INSERT INTO player_friends (player_id, friend_player_id, status)
                VALUES ($1, $2, 'accepted'), ($2, $1, 'accepted')
-               ON CONFLICT (player_id, friend_player_id) DO UPDATE SET status = 'accepted'`,
+              ON CONFLICT (player_id, friend_player_id) DO UPDATE SET status = 'accepted'`,
               [id, target]
             );
+            becameAccepted = true;
           } else {
             await client.query(
               `INSERT INTO player_friends (player_id, friend_player_id, status)
@@ -3852,6 +8796,7 @@ async function mutateBattleSocial(action, userId, targetId) {
             );
           }
         } else if (action === "confirm") {
+          becameAccepted = !existing.rows.some((row) => row.status === "accepted");
           await client.query("DELETE FROM player_friends WHERE (player_id = $1 AND friend_player_id = $2) OR (player_id = $2 AND friend_player_id = $1)", [id, target]);
           await client.query(
             `INSERT INTO player_friends (player_id, friend_player_id, status)
@@ -3864,7 +8809,7 @@ async function mutateBattleSocial(action, userId, targetId) {
         }
 
         await client.query("COMMIT");
-        return { ok: true };
+        return { ok: true, becameAccepted };
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
@@ -3914,6 +8859,127 @@ async function battleSocialRequest(body) {
   return { ok: false, error: "unknown_action", status: 400 };
 }
 
+async function battleClanTreasuryEvents(body) {
+  const afterId = Math.max(0, Math.trunc(Number(body?.afterId || 0)));
+  const limit = Math.max(1, Math.min(200, Math.trunc(Number(body?.limit || 100))));
+  const initialize = body?.initialize === true;
+  const exactEventId = Math.max(0, Math.trunc(Number(body?.eventId || 0)));
+  const expectedClanId = Math.max(0, Math.trunc(Number(body?.clanId || 0)));
+  const expectedPlayerId = Math.max(0, Math.trunc(Number(body?.playerId || 0)));
+
+  if (exactEventId > 0) {
+    if (expectedClanId <= 0 || expectedPlayerId <= 0) {
+      return { ok: false, error: "invalid_clan_treasury_event_identity" };
+    }
+
+    let exactEvent = null;
+    if (pgPool) {
+      const result = await pgPool.query(
+        `SELECT id, clan_id, player_id, player_name, money, event_type, created_at
+         FROM clan_treasury_events
+         WHERE id = $1 AND clan_id = $2 AND player_id = $3 AND event_type = $4
+         LIMIT 1`,
+        [exactEventId, expectedClanId, expectedPlayerId, CLAN_TREASURY_EVENT_TYPE.ADD]
+      );
+      const row = result.rows[0];
+      if (row) {
+        exactEvent = {
+          id: Number(row.id),
+          clanId: Number(row.clan_id),
+          playerId: Number(row.player_id || 0),
+          playerName: String(row.player_name || ""),
+          money: Number(row.money || 0),
+          type: Number(row.event_type || 0),
+          createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || "")
+        };
+      }
+    } else {
+      exactEvent = Object.values(store.clans?.byId || {})
+        .flatMap((clan) => clan?.treasuryEvents || [])
+        .map(normalizeClanTreasuryRecord)
+        .filter(Boolean)
+        .find((event) => (
+          Number(event.id) === exactEventId &&
+          Number(event.clanId) === expectedClanId &&
+          Number(event.playerId) === expectedPlayerId &&
+          Number(event.type) === CLAN_TREASURY_EVENT_TYPE.ADD
+        )) || null;
+      if (exactEvent) {
+        exactEvent = {
+          id: Number(exactEvent.id),
+          clanId: Number(exactEvent.clanId),
+          playerId: Number(exactEvent.playerId || 0),
+          playerName: String(exactEvent.playerName || ""),
+          money: Number(exactEvent.money || 0),
+          type: Number(exactEvent.type || 0),
+          createdAt: String(exactEvent.createdAt || "")
+        };
+      }
+    }
+
+    console.log(`[clan-live] treasury-exact event=${exactEventId} clan=${expectedClanId} player=${expectedPlayerId} found=${exactEvent ? 1 : 0}`);
+    return { ok: true, cursor: exactEventId, events: exactEvent ? [exactEvent] : [] };
+  }
+
+  if (initialize) {
+    const cursor = pgPool
+      ? Number((await pgPool.query(
+          "SELECT COALESCE(MAX(id), 0)::int AS id FROM clan_treasury_events WHERE event_type = $1",
+          [CLAN_TREASURY_EVENT_TYPE.ADD]
+        )).rows[0]?.id || 0)
+      : Object.values(store.clans?.byId || {})
+          .flatMap((clan) => clan?.treasuryEvents || [])
+          .filter((event) => Number(event?.type) === CLAN_TREASURY_EVENT_TYPE.ADD)
+          .reduce((max, event) => Math.max(max, Number(event?.id || 0)), 0);
+    return { ok: true, initialized: true, cursor, events: [] };
+  }
+  let events;
+
+  if (pgPool) {
+    const result = await pgPool.query(
+      `SELECT id, clan_id, player_id, player_name, money, event_type, created_at
+       FROM clan_treasury_events
+       WHERE id > $1 AND event_type = $2
+       ORDER BY id ASC
+       LIMIT $3`,
+      [afterId, CLAN_TREASURY_EVENT_TYPE.ADD, limit]
+    );
+    events = result.rows.map((row) => ({
+      id: Number(row.id),
+      clanId: Number(row.clan_id),
+      playerId: Number(row.player_id || 0),
+      playerName: String(row.player_name || ""),
+      money: Number(row.money || 0),
+      type: Number(row.event_type || 0),
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || "")
+    }));
+  } else {
+    events = Object.values(store.clans?.byId || {})
+      .flatMap((clan) => clan?.treasuryEvents || [])
+      .map(normalizeClanTreasuryRecord)
+      .filter(Boolean)
+      .filter((event) => Number(event.id) > afterId)
+      .filter((event) => Number(event.type) === CLAN_TREASURY_EVENT_TYPE.ADD)
+      .sort((left, right) => Number(left.id) - Number(right.id))
+      .slice(0, limit)
+      .map((event) => ({
+        id: Number(event.id),
+        clanId: Number(event.clanId),
+        playerId: Number(event.playerId || 0),
+        playerName: String(event.playerName || ""),
+        money: Number(event.money || 0),
+        type: Number(event.type || 0),
+        createdAt: String(event.createdAt || "")
+      }));
+  }
+
+  const cursor = events.length > 0 ? Number(events[events.length - 1].id) : afterId;
+  if (events.length > 0) {
+    console.log(`[clan-live] treasury-feed after=${afterId} events=${events.length} cursor=${cursor}`);
+  }
+  return { ok: true, cursor, events };
+}
+
 function clanMemberAccountPayload(member, targetStore = store) {
   const account = accountById(member.playerId, targetStore);
   return {
@@ -3960,8 +9026,104 @@ function clanMemberList(clan, targetStore = store) {
     .sort((left, right) => Number(right.e || 0) - Number(left.e || 0));
 }
 
+async function clanMemberListPostgres(clanId) {
+  const id = Number(clanId || 0);
+  if (!Number.isInteger(id) || id <= 0) return [];
+  const startedAt = Date.now();
+  try {
+    const result = await pgPool.query(
+      `SELECT cm.player_id, cm.role, cm.member_level, cm.money, cm.clan_exp,
+              cm.exp_koef, cm.player_exp, cm.joined_at, p.level, p.name, p.exp
+       FROM clan_members cm
+       JOIN clans c ON c.id = cm.clan_id AND c.deleted_at IS NULL
+       JOIN players p ON p.id = cm.player_id
+       WHERE cm.clan_id = $1
+       ORDER BY cm.clan_exp DESC, cm.joined_at, cm.player_id`,
+      [id]
+    );
+
+    const memoryClan = clanById(id, { includeDeleted: true });
+    if (memoryClan) {
+      memoryClan.members = {};
+      for (const row of result.rows) {
+        memoryClan.members[String(row.player_id)] = normalizeClanMemberRecord({
+          playerId: Number(row.player_id),
+          memberLevel: Number(row.member_level || (row.role === "owner" ? 2 : 1)),
+          money: Number(row.money || 0),
+          clanExp: Number(row.clan_exp || 0),
+          expKoef: Number(row.exp_koef || 0),
+          playerExp: Number(row.player_exp ?? row.exp ?? 0),
+          joinedAt: postgresTimestamp(row.joined_at)
+        });
+      }
+    }
+
+    const members = result.rows.map((row) => ({
+      uid: Number(row.player_id),
+      ul: Number(row.level || 1),
+      n: String(row.name || `Player ${row.player_id}`),
+      mlvl: Number(row.member_level || (row.role === "owner" ? 2 : 1)),
+      m: Number(row.money || 0),
+      e: Number(row.clan_exp || 0),
+      ek: Number(row.exp_koef || 0),
+      ue: Number(row.exp ?? row.player_exp ?? 0),
+      date: formatClanDate(row.joined_at)
+    }));
+    console.log(`[clan-member] list clan=${id} members=${members.length} source=postgres duration=${Date.now() - startedAt}ms`);
+    return members;
+  } catch (error) {
+    console.error(`[postgres] clan member list failed clan=${id}`, error);
+    return null;
+  }
+}
+
 function clanInviteList(clan, targetStore = store) {
   return Object.values(clan.invites || {}).map((invite) => clanInvitePayload(invite, targetStore));
+}
+
+async function clanInviteListPostgres(clanId) {
+  const id = Number(clanId || 0);
+  if (!Number.isInteger(id) || id <= 0) return [];
+  const startedAt = Date.now();
+  try {
+    const result = await pgPool.query(
+      `SELECT ci.player_id, ci.created_at, p.level, p.name, p.exp
+       FROM clan_invites ci
+       JOIN clans c ON c.id = ci.clan_id AND c.deleted_at IS NULL
+       JOIN players p ON p.id = ci.player_id
+       WHERE ci.clan_id = $1
+       ORDER BY ci.created_at, ci.player_id`,
+      [id]
+    );
+
+    const memoryClan = clanById(id, { includeDeleted: true });
+    if (memoryClan) {
+      memoryClan.invites = {};
+      for (const row of result.rows) {
+        memoryClan.invites[String(row.player_id)] = {
+          playerId: Number(row.player_id),
+          createdAt: postgresTimestamp(row.created_at)
+        };
+      }
+    }
+
+    const invites = result.rows.map((row) => ({
+      uid: Number(row.player_id),
+      ul: Number(row.level || 1),
+      n: String(row.name || `Player ${row.player_id}`),
+      mlvl: 0,
+      m: 0,
+      e: 0,
+      ek: 0,
+      ue: Number(row.exp || 0),
+      date: formatClanDate(row.created_at)
+    }));
+    console.log(`[clan-invite] list clan=${id} invites=${invites.length} source=postgres duration=${Date.now() - startedAt}ms`);
+    return invites;
+  } catch (error) {
+    console.error(`[postgres] clan invite list failed clan=${id}`, error);
+    return null;
+  }
 }
 
 function clanEventPayload(event) {
@@ -3992,12 +9154,24 @@ function isActiveTimedItem(item = {}, now = currentUnixSeconds()) {
   return expiresAt <= 0 || expiresAt > now;
 }
 
+function clanTreasuryAddResponse(account, clan, eventId) {
+  refreshAccountClan(account);
+  return ok({
+    id: Number(eventId),
+    cid: Number(clan.id)
+  });
+}
+
 function activeClanInventoryItems(clan, now = currentUnixSeconds()) {
   return (clan?.inventory || [])
     .filter((item) => Number(item?.itype ?? item?.it ?? 0) === 2)
     .filter((item) => Number(item?.iC || 0) === 1)
     .filter((item) => isActiveTimedItem(item, now))
-    .map((item) => clone(item));
+    .map((item) => {
+      const payload = clone(item);
+      if (Number(payload.eD || 0) <= 0) payload.eD = CLIENT_MAX_UNIX_SECONDS;
+      return payload;
+    });
 }
 
 function clanPayload(clan, options = {}) {
@@ -4017,12 +9191,15 @@ function clanPayload(clan, options = {}) {
     t: String(clan.tag || ""),
     tc: String(clan.tagColor || ""),
     aid: Number(clan.armId || 0),
+    bannerId: normalizeClanBannerId(clan.bannerId),
+    bannerRevision: normalizeClanBannerRevision(clan.bannerRevision),
     vc: Number(clan.money || 0)
   };
   if (full) {
     payload.h = String(clan.homepage || "");
     payload.d = String(clan.desc || "");
     payload.mlist = clanMemberList(clan, targetStore);
+    payload.inv = clanInviteList(clan, targetStore);
     payload.ev = (clan.events || []).map(clanEventPayload);
     payload.etreas = (clan.treasuryEvents || []).map(clanTreasuryPayload);
     payload.inventory = { items: activeClanInventoryItems(clan) };
@@ -4054,6 +9231,14 @@ function refreshAllAccountClanSummaries(targetStore = store) {
   }
 }
 
+function refreshAccountClan(account, targetStore = store) {
+  if (!account) return null;
+  const summary = clanSummaryForPlayer(account.id, targetStore);
+  account.clan = summary;
+  const stored = targetStore.accounts?.[String(account.id)];
+  if (stored && stored !== account) stored.clan = summary;
+  return summary;
+}
 function clanCostsPayload() {
   return {
     cc: CLAN_COSTS.create,
@@ -4152,6 +9337,11 @@ function clanArmsPayload(requestOrigin = null, clan = null) {
     };
     if (!clanOwnsArm(clan, id)) {
       arm.sc = cost(7000 + id, clanArmCost(id));
+      if (CLAN_CONTRACTS_ENABLED && CLAN_CONTRACT_ARM_PRODUCT_BY_ID.has(id)) {
+        // The legacy screen keeps displaying the real crest but cannot spend
+        // treasury currency on a contract-only unlock.
+        arm.co = 1;
+      }
     }
     return arm;
   });
@@ -4244,6 +9434,18 @@ function validateClanTag(tag, currentClanId = 0) {
   if (tag.length < 2 || tag.length > 6) return CLAN_ERROR.CLAN_TAG_LEN;
   const lower = tag.toLowerCase();
   if (activeClanRecords().some((clan) => Number(clan.id) !== Number(currentClanId) && String(clan.tag || "").toLowerCase() === lower)) {
+    return CLAN_ERROR.CLAN_TAG_EXIST;
+  }
+  return 0;
+}
+
+function clanCreateUniqueViolationCode(error) {
+  if (String(error?.code || "") !== "23505") return 0;
+  const constraint = String(error?.constraint || "");
+  if (constraint === "clans_name_key" || constraint === "clans_name_active_lower_unique") {
+    return CLAN_ERROR.CLAN_NAME_EXIST;
+  }
+  if (constraint === "clans_tag_lower_unique" || constraint === "clans_tag_active_lower_unique") {
     return CLAN_ERROR.CLAN_TAG_EXIST;
   }
   return 0;
@@ -4350,6 +9552,7 @@ async function addClanMoneyPostgres(account, clanId, money) {
       if (fresh) {
         fresh.money = nextPlayerMoney;
         store.accounts[String(fresh.id)] = fresh;
+        account.money = nextPlayerMoney;
       } else {
         account.money = nextPlayerMoney;
         store.accounts[String(account.id)] = normalizeAccount(account);
@@ -4379,7 +9582,7 @@ async function addClanMoneyPostgres(account, clanId, money) {
       }
 
       console.log(`[clan-treasury] add player=${account.id} clan=${clanId} money=${money} playerMoney=${nextPlayerMoney} clanMoney=${nextClanMoney} event=${eventId}`);
-      return ok({ id: eventId, cid: Number(clanId) });
+      return clanTreasuryAddResponse(account, clanById(clanId, { includeDeleted: true }) || { id: clanId, money: nextClanMoney }, eventId);
     } catch (error) {
       try {
         if (client && !committed) await client.query("ROLLBACK");
@@ -4388,7 +9591,7 @@ async function addClanMoneyPostgres(account, clanId, money) {
       }
       if (committed) {
         console.error("[postgres] clan treasury memory sync failed", error);
-        return ok({ id: eventId, cid: Number(clanId) });
+        return clanTreasuryAddResponse(account, clanById(clanId, { includeDeleted: true }) || { id: clanId, money: nextClanMoney }, eventId);
       }
       console.error("[postgres] clan treasury add failed", error);
       return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
@@ -4431,6 +9634,7 @@ function clanBaseResponse(account, extra = {}) {
 function clanListPayload(url, account, sourceClans = activeClanRecords()) {
   const page = Math.max(1, Number(url.searchParams.get("pg") || 1));
   const pageSize = 100;
+  const lite = Number(url.searchParams.get("lite") || 0) === 1;
   const sorted = [...sourceClans].sort((left, right) => {
     const expDiff = Number(right.exp || 0) - Number(left.exp || 0);
     if (expDiff !== 0) return expDiff;
@@ -4443,7 +9647,7 @@ function clanListPayload(url, account, sourceClans = activeClanRecords()) {
     dtot: Math.max(1, Math.ceil(sorted.length / pageSize)),
     d: sorted.slice(start, start + pageSize).map((clan) => clanPayload(clan))
   });
-  if (ownClan) {
+  if (ownClan && !lite) {
     response.id = Number(ownClan.id);
     response.cinfo = clanPayload(ownClan, { full: true });
   }
@@ -4451,7 +9655,9 @@ function clanListPayload(url, account, sourceClans = activeClanRecords()) {
 }
 
 function clanExtraPayload(account, clanId) {
-  const clan = clanById(clanId, { includeDeleted: true });
+  // gextra is a live clan view. Deleted records remain available only to the
+  // event refresh path so ClanEventType.Delete can finish the client cleanup.
+  const clan = clanById(clanId);
   if (!clan) return clanBaseResponse(account, { id: 0, cinfo: {} });
   return clanBaseResponse(account, {
     id: Number(clan.id),
@@ -4459,6 +9665,135 @@ function clanExtraPayload(account, clanId) {
   });
 }
 
+async function createClanPostgres(account, name, tag, armId) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    let clan = null;
+    let nextPlayerMoney = Number(account.money || 0);
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const playerResult = await client.query("SELECT * FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      const playerRow = playerResult.rows[0];
+      if (!playerRow || playerRow.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const membershipResult = await client.query(
+        `SELECT 1
+         FROM clan_members cm
+         JOIN clans c ON c.id = cm.clan_id
+         WHERE cm.player_id = $1 AND c.deleted_at IS NULL
+         LIMIT 1`,
+        [Number(account.id)]
+      );
+      if (membershipResult.rows.length) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
+      }
+
+      const duplicateNameResult = await client.query(
+        `SELECT 1 FROM clans WHERE deleted_at IS NULL AND lower(name) = lower($1) LIMIT 1`,
+        [name]
+      );
+      if (duplicateNameResult.rows.length) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_NAME_EXIST);
+      }
+
+      const duplicateTagResult = await client.query(
+        `SELECT 1 FROM clans WHERE deleted_at IS NULL AND lower(tag) = lower($1) LIMIT 1`,
+        [tag]
+      );
+      if (duplicateTagResult.rows.length) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_TAG_EXIST);
+      }
+
+      const playerMoney = Number(playerRow.money || 0);
+      if (playerMoney < CLAN_COSTS.create) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.MISSING_MONEY);
+      }
+
+      const createdAt = new Date().toISOString();
+      nextPlayerMoney = playerMoney - CLAN_COSTS.create;
+      const nextClanIdResult = await client.query("SELECT COALESCE(MAX(id), 0)::int + 1 AS id FROM clans");
+      const id = Number(nextClanIdResult.rows[0]?.id || 1);
+      await client.query(
+        `INSERT INTO clans (
+          id, name, tag, owner_player_id, level, exp, money, arm_id,
+          tag_color, homepage, description, access, access_level, max_members,
+          deleted_at, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, 1, 0, 0, $5, '', '', '', 1, $6, $7, NULL, $8, $8)`,
+        [id, name, tag, Number(account.id), armId, CLAN_JOIN_LEVEL, CLAN_DEFAULT_MAX_MEMBERS, createdAt]
+      );
+
+      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextPlayerMoney]);
+      await client.query(
+        `INSERT INTO clan_members (
+          clan_id, player_id, role, member_level, money, clan_exp, exp_koef, player_exp, joined_at
+        )
+        VALUES ($1, $2, 'owner', 2, 0, 0, 0, $3, $4)`,
+        [id, Number(account.id), Number(account.exp || 0), createdAt]
+      );
+
+      await client.query("COMMIT");
+      committed = true;
+
+      account.money = nextPlayerMoney;
+      account.updatedAt = createdAt;
+      const fresh = await loadPostgresAccount(account.id);
+      store.accounts[String(account.id)] = fresh ? { ...fresh, money: nextPlayerMoney } : normalizeAccount(account);
+
+      clan = normalizeClanRecord({
+        id,
+        name,
+        tag,
+        ownerPlayerId: Number(account.id),
+        money: 0,
+        armId,
+        access: 1,
+        accessLevel: CLAN_JOIN_LEVEL,
+        maxMembers: CLAN_DEFAULT_MAX_MEMBERS,
+        members: {
+          [String(account.id)]: clanMemberRecordForAccount(account, 2)
+        },
+        createdAt,
+        updatedAt: createdAt
+      });
+      store.clans.byId[String(id)] = clan;
+      store.clans.nextId = Math.max(Number(store.clans.nextId || 1), id + 1);
+      refreshAllAccountClanSummaries(store);
+      refreshAccountClan(account);
+
+      console.log(`[clan-create] pg player=${account.id} clan=${id} money=${nextPlayerMoney}`);
+      return clanBaseResponse(account, {
+        id,
+        cinfo: clanPayload(clan, { full: true })
+      });
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      const duplicateCode = clanCreateUniqueViolationCode(error);
+      if (duplicateCode) {
+        console.log(`[clan-create] rejected player=${account.id} reason=${duplicateCode === CLAN_ERROR.CLAN_NAME_EXIST ? "name-exists" : "tag-exists"} constraint=${String(error.constraint || "unknown")}`);
+        return clanError(duplicateCode);
+      }
+      console.error("[postgres] clan create failed", error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
 async function createClan(account, url) {
   account = ensureClanAccount(account);
   const name = cleanClanName(clanFormValue(url, "data[name]", "name"));
@@ -4472,6 +9807,7 @@ async function createClan(account, url) {
   const tagError = validateClanTag(tag);
   if (tagError) return clanError(tagError);
   if (Number(account.money || 0) < CLAN_COSTS.create) return clanError(CLAN_ERROR.MISSING_MONEY);
+  if (pgPool) return await createClanPostgres(account, name, tag, armId);
 
   const createdAt = new Date().toISOString();
   account.money = Number(account.money || 0) - CLAN_COSTS.create;
@@ -4501,17 +9837,154 @@ async function createClan(account, url) {
   });
 }
 
+async function joinClanPostgres(account, clanId) {
+  const id = Number(clanId || 0);
+  const playerId = Number(account.id || 0);
+  const startedAt = Date.now();
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const playerResult = await client.query(
+        "SELECT id, cckey, level, exp, name FROM players WHERE id = $1 FOR UPDATE",
+        [playerId]
+      );
+      const playerRow = playerResult.rows[0];
+      if (!playerRow || playerRow.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+      if (Number(playerRow.level || 1) < CLAN_JOIN_LEVEL) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
+      }
+
+      const clanResult = await client.query(
+        `SELECT id, access, access_level, max_members
+         FROM clans
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [id]
+      );
+      const clanRow = clanResult.rows[0];
+      if (!clanRow) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const membershipResult = await client.query(
+        `SELECT cm.clan_id
+         FROM clan_members cm
+         JOIN clans c ON c.id = cm.clan_id
+         WHERE cm.player_id = $1 AND c.deleted_at IS NULL
+         LIMIT 1`,
+        [playerId]
+      );
+      if (membershipResult.rows.length) {
+        await client.query("ROLLBACK");
+        console.log(`[clan-invite] join blocked player=${playerId} clan=${id} reason=already-member memberClan=${Number(membershipResult.rows[0].clan_id || 0)} source=postgres duration=${Date.now() - startedAt}ms`);
+        return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
+      }
+      if (Number(clanRow.access || 0) === 0 || Number(clanRow.access_level || 0) > Number(playerRow.level || 0)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const memberCountResult = await client.query(
+        "SELECT COUNT(*)::int AS count FROM clan_members WHERE clan_id = $1",
+        [id]
+      );
+      if (Number(memberCountResult.rows[0]?.count || 0) >= Number(clanRow.max_members || CLAN_DEFAULT_MAX_MEMBERS)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
+      }
+
+      const existingInviteResult = await client.query(
+        "SELECT created_at FROM clan_invites WHERE clan_id = $1 AND player_id = $2",
+        [id, playerId]
+      );
+      const inviteCountResult = await client.query(
+        "SELECT COUNT(*)::int AS count FROM clan_invites WHERE player_id = $1",
+        [playerId]
+      );
+      if (!existingInviteResult.rows.length &&
+          Number(inviteCountResult.rows[0]?.count || 0) >= Number(account.clanMaxRequest || 10)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const insertResult = await client.query(
+        `INSERT INTO clan_invites (clan_id, player_id, created_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (clan_id, player_id) DO NOTHING
+         RETURNING created_at`,
+        [id, playerId]
+      );
+      let createdAt = insertResult.rows[0]?.created_at || existingInviteResult.rows[0]?.created_at;
+      if (!createdAt) {
+        const persistedInvite = await client.query(
+          "SELECT created_at FROM clan_invites WHERE clan_id = $1 AND player_id = $2",
+          [id, playerId]
+        );
+        createdAt = persistedInvite.rows[0]?.created_at;
+      }
+
+      await client.query("COMMIT");
+      committed = true;
+
+      const normalizedCreatedAt = postgresTimestamp(createdAt) || new Date().toISOString();
+      const memoryClan = clanById(id, { includeDeleted: true });
+      if (memoryClan) {
+        memoryClan.invites[String(playerId)] = {
+          playerId,
+          createdAt: normalizedCreatedAt
+        };
+      }
+      store.accounts[String(playerId)] = normalizeAccount({
+        ...account,
+        level: Number(playerRow.level || account.level || 1),
+        exp: Number(playerRow.exp || account.exp || 0),
+        name: String(playerRow.name || account.name || `Player ${playerId}`)
+      });
+
+      const inviteCount = Number(inviteCountResult.rows[0]?.count || 0) + (existingInviteResult.rows.length ? 0 : 1);
+      console.log(`[clan-invite] join player=${playerId} clan=${id} invites=${inviteCount} source=postgres duration=${Date.now() - startedAt}ms`);
+      return ok({ id });
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      console.error(`[postgres] clan invite join failed player=${playerId} clan=${id}`, error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 async function joinClan(account, url) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
+  if (pgPool) return await joinClanPostgres(account, clanId);
+  let clan = clanById(clanId);
   if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(account.level || 1) < CLAN_JOIN_LEVEL) return clanError(CLAN_ERROR.CLAN_USER_LVL_LESS);
   if (playerClanRecord(account.id)) return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
   if (Number(clan.access || 0) === 0 || Number(clan.accessLevel || 0) > Number(account.level || 0)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Object.keys(clan.members || {}).length >= Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS)) return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
-  if (playerInviteClanIds(account.id).length >= Number(account.clanMaxRequest || 10) && !clan.invites[String(account.id)]) {
+  const inviteClanIds = playerInviteClanIds(account.id);
+  if (inviteClanIds.length >= Number(account.clanMaxRequest || 10) && !inviteClanIds.includes(clanId)) {
     return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   }
+  // playerClanRecord()/playerInviteClanIds() normalize the JSON store and can
+  // replace clan records. Reacquire the live object before mutating it.
+  clan = clanById(clanId);
+  if (!clan) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   clan.invites[String(account.id)] = {
     playerId: Number(account.id),
     createdAt: new Date().toISOString()
@@ -4535,18 +10008,184 @@ function isClanOwner(account, clan) {
   return Number(clan?.ownerPlayerId || 0) === Number(account?.id || 0);
 }
 
+async function acceptClanInvitePostgres(account, clanId, userId) {
+  const id = Number(clanId || 0);
+  const ownerId = Number(account.id || 0);
+  const playerId = Number(userId || 0);
+  const startedAt = Date.now();
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const ownerResult = await client.query(
+        "SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE",
+        [ownerId]
+      );
+      const ownerRow = ownerResult.rows[0];
+      if (!ownerRow || ownerRow.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const clanResult = await client.query(
+        `SELECT id, owner_player_id, max_members
+         FROM clans
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [id]
+      );
+      const clanRow = clanResult.rows[0];
+      if (!clanRow || Number(clanRow.owner_player_id || 0) !== ownerId) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const playerResult = await client.query(
+        "SELECT id, cckey, level, exp, name FROM players WHERE id = $1 FOR UPDATE",
+        [playerId]
+      );
+      const playerRow = playerResult.rows[0];
+      if (!playerRow) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const inviteResult = await client.query(
+        "SELECT created_at FROM clan_invites WHERE clan_id = $1 AND player_id = $2 FOR UPDATE",
+        [id, playerId]
+      );
+      if (!inviteResult.rows.length) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const membershipResult = await client.query(
+        `SELECT cm.clan_id
+         FROM clan_members cm
+         JOIN clans c ON c.id = cm.clan_id
+         WHERE cm.player_id = $1 AND c.deleted_at IS NULL
+         LIMIT 1`,
+        [playerId]
+      );
+      if (membershipResult.rows.length) {
+        await client.query(
+          "DELETE FROM clan_invites WHERE clan_id = $1 AND player_id = $2",
+          [id, playerId]
+        );
+        await client.query("COMMIT");
+        committed = true;
+        const memoryClan = clanById(id, { includeDeleted: true });
+        if (memoryClan?.invites) delete memoryClan.invites[String(playerId)];
+        console.log(`[clan-invite] accept blocked owner=${ownerId} player=${playerId} clan=${id} reason=already-member memberClan=${Number(membershipResult.rows[0].clan_id || 0)} source=postgres duration=${Date.now() - startedAt}ms`);
+        return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
+      }
+
+      const memberCountResult = await client.query(
+        "SELECT COUNT(*)::int AS count FROM clan_members WHERE clan_id = $1",
+        [id]
+      );
+      if (Number(memberCountResult.rows[0]?.count || 0) >= Number(clanRow.max_members || CLAN_DEFAULT_MAX_MEMBERS)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
+      }
+
+      const joinedAt = new Date();
+      await client.query(
+        `INSERT INTO clan_members (
+           clan_id, player_id, role, member_level, money, clan_exp, exp_koef, player_exp, joined_at
+         )
+         VALUES ($1, $2, 'member', 1, 0, 0, 0, $3, $4)`,
+        [id, playerId, Number(playerRow.exp || 0), joinedAt]
+      );
+      await client.query("DELETE FROM clan_invites WHERE player_id = $1", [playerId]);
+      await client.query("COMMIT");
+      committed = true;
+
+      for (const memoryClan of activeClanRecords()) {
+        if (memoryClan.invites?.[String(playerId)]) delete memoryClan.invites[String(playerId)];
+      }
+      const userAccount = normalizeAccount({
+        ...(accountById(playerId) || {}),
+        id: playerId,
+        key: String(playerRow.cckey || ""),
+        level: Number(playerRow.level || 1),
+        exp: Number(playerRow.exp || 0),
+        name: String(playerRow.name || `Player ${playerId}`)
+      });
+      store.accounts[String(playerId)] = userAccount;
+      const member = normalizeClanMemberRecord({
+        playerId,
+        memberLevel: 1,
+        money: 0,
+        clanExp: 0,
+        expKoef: 0,
+        playerExp: Number(playerRow.exp || 0),
+        joinedAt: joinedAt.toISOString()
+      });
+      const memoryClan = clanById(id, { includeDeleted: true });
+      if (memoryClan) {
+        memoryClan.members[String(playerId)] = member;
+        memoryClan.updatedAt = joinedAt.toISOString();
+      }
+      refreshAccountClan(userAccount);
+
+      console.log(`[clan-invite] accept owner=${ownerId} player=${playerId} clan=${id} source=postgres duration=${Date.now() - startedAt}ms`);
+      return ok({
+        id: playerId,
+        i: clanMemberAccountPayload(member)
+      });
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      console.error(`[postgres] clan invite accept failed owner=${ownerId} player=${playerId} clan=${id}`, error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 async function acceptClanInvite(account, url) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
   const userId = Number(url.searchParams.get("uid") || 0);
+  if (pgPool) return await acceptClanInvitePostgres(account, clanId, userId);
+  let clan = clanById(clanId);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
-  const invite = clan.invites[String(userId)];
   const userAccount = accountById(userId);
-  if (!invite || !userAccount) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+  if (!userAccount) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+  const existingClan = playerClanRecord(userId);
+  if (existingClan) {
+    clan = clanById(clanId);
+    if (clan?.invites?.[String(userId)]) {
+      delete clan.invites[String(userId)];
+      clan.updatedAt = new Date().toISOString();
+      await saveClanState();
+    }
+    return clanError(CLAN_ERROR.CLAN_CREATE_YOU_ARE_IN_CLAN);
+  }
+  // activeClanRecords() performs the same normalization. Use only objects from
+  // this fresh collection for the remaining checks and mutations.
+  const clans = activeClanRecords();
+  clan = clans.find((candidate) => Number(candidate.id) === clanId) || null;
+  const invite = clan?.invites?.[String(userId)];
+  if (!clan || !isClanOwner(account, clan) || !invite) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Object.keys(clan.members || {}).length >= Number(clan.maxMembers || CLAN_DEFAULT_MAX_MEMBERS)) {
     return clanError(CLAN_ERROR.CLAN_MEMBER_MAX_COUNT);
   }
-  delete clan.invites[String(userId)];
+  let removedInvites = 0;
+  for (const otherClan of clans) {
+    if (!otherClan.invites?.[String(userId)]) continue;
+    delete otherClan.invites[String(userId)];
+    otherClan.updatedAt = new Date().toISOString();
+    removedInvites += 1;
+  }
   clan.members[String(userId)] = clanMemberRecordForAccount(userAccount, 1);
   clan.updatedAt = new Date().toISOString();
   await saveClanState();
@@ -4557,10 +10196,72 @@ async function acceptClanInvite(account, url) {
   });
 }
 
+async function rejectClanInvitePostgres(account, clanId, userId) {
+  const id = Number(clanId || 0);
+  const ownerId = Number(account.id || 0);
+  const playerId = Number(userId || 0);
+  const startedAt = Date.now();
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const ownerResult = await client.query(
+        "SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE",
+        [ownerId]
+      );
+      const ownerRow = ownerResult.rows[0];
+      if (!ownerRow || ownerRow.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const clanResult = await client.query(
+        `SELECT id, owner_player_id
+         FROM clans
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [id]
+      );
+      const clanRow = clanResult.rows[0];
+      if (!clanRow || Number(clanRow.owner_player_id || 0) !== ownerId) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const deleted = await client.query(
+        "DELETE FROM clan_invites WHERE clan_id = $1 AND player_id = $2",
+        [id, playerId]
+      );
+      await client.query("COMMIT");
+      committed = true;
+
+      const memoryClan = clanById(id, { includeDeleted: true });
+      if (memoryClan?.invites) delete memoryClan.invites[String(playerId)];
+      console.log(`[clan-invite] reject owner=${ownerId} player=${playerId} clan=${id} removed=${Number(deleted.rowCount || 0)} source=postgres duration=${Date.now() - startedAt}ms`);
+      return ok({ id: playerId });
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      console.error(`[postgres] clan invite reject failed owner=${ownerId} player=${playerId} clan=${id}`, error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 async function rejectClanInvite(account, url) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
   const userId = Number(url.searchParams.get("uid") || 0);
+  if (pgPool) return await rejectClanInvitePostgres(account, clanId, userId);
+  const clan = clanById(clanId);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   delete clan.invites[String(userId)];
   clan.updatedAt = new Date().toISOString();
@@ -4569,10 +10270,128 @@ async function rejectClanInvite(account, url) {
   return ok({ id: userId });
 }
 
-function removeClanMember(account, url, eventType = CLAN_EVENT_TYPE.DELETE_MEMBER) {
+async function removeClanMemberPostgres(account, clanId, userId, eventType) {
+  const id = Number(clanId || 0);
+  const actorId = Number(account.id || 0);
+  const playerId = Number(userId || 0);
+  const isLeave = Number(eventType) === CLAN_EVENT_TYPE.LEAVE_MEMBER;
+  const startedAt = Date.now();
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const actorResult = await client.query(
+        "SELECT id, cckey FROM players WHERE id = $1 FOR UPDATE",
+        [actorId]
+      );
+      const actorRow = actorResult.rows[0];
+      if (!actorRow || actorRow.cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      const clanResult = await client.query(
+        `SELECT id, owner_player_id
+         FROM clans
+         WHERE id = $1 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [id]
+      );
+      const clanRow = clanResult.rows[0];
+      if (!clanRow || (!isLeave && Number(clanRow.owner_player_id || 0) !== actorId)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+      if (isLeave && playerId !== actorId) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+      if (Number(clanRow.owner_player_id || 0) === playerId) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const memberResult = await client.query(
+        "SELECT player_id FROM clan_members WHERE clan_id = $1 AND player_id = $2 FOR UPDATE",
+        [id, playerId]
+      );
+      if (!memberResult.rows.length) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      await client.query(
+        "DELETE FROM clan_members WHERE clan_id = $1 AND player_id = $2",
+        [id, playerId]
+      );
+      const expResult = await client.query(
+        "SELECT COALESCE(SUM(clan_exp), 0)::int AS exp FROM clan_members WHERE clan_id = $1",
+        [id]
+      );
+      const nextClanExp = Number(expResult.rows[0]?.exp || 0);
+      await client.query(
+        "UPDATE clans SET exp = $2, updated_at = now() WHERE id = $1",
+        [id, nextClanExp]
+      );
+
+      const expiresAt = new Date(Date.now() + 1000);
+      const eventResult = await client.query(
+        `INSERT INTO clan_events (clan_id, event_type, creator_player_id, data, expires_at, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, now())
+         RETURNING id, created_at`,
+        [id, Number(eventType), actorId, JSON.stringify({ uid: playerId }), expiresAt]
+      );
+      const eventRow = eventResult.rows[0];
+      await client.query("COMMIT");
+      committed = true;
+
+      const memoryClan = clanById(id, { includeDeleted: true });
+      if (memoryClan) {
+        if (memoryClan.members?.[String(playerId)]) delete memoryClan.members[String(playerId)];
+        memoryClan.exp = nextClanExp;
+        memoryClan.updatedAt = new Date().toISOString();
+        const event = normalizeClanEventRecord({
+          id: Number(eventRow?.id || 0),
+          clanId: id,
+          type: Number(eventType),
+          creatorPlayerId: actorId,
+          data: { uid: playerId },
+          expiresAt: expiresAt.toISOString(),
+          createdAt: postgresTimestamp(eventRow?.created_at) || new Date().toISOString()
+        });
+        if (event) {
+          memoryClan.events = (memoryClan.events || []).filter((current) => Number(current.id) !== Number(event.id));
+          memoryClan.events.push(event);
+          store.clans.nextEventId = Math.max(Number(store.clans.nextEventId || 1), Number(event.id) + 1);
+        }
+      }
+      const targetAccount = playerId === actorId ? account : accountById(playerId);
+      if (targetAccount) refreshAccountClan(targetAccount);
+      console.log(`[clan-member] ${isLeave ? "leave" : "remove"} actor=${actorId} player=${playerId} clan=${id} members=${Object.keys(memoryClan?.members || {}).length} source=postgres duration=${Date.now() - startedAt}ms`);
+      return ok();
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      console.error(`[postgres] clan member ${isLeave ? "leave" : "remove"} failed actor=${actorId} player=${playerId} clan=${id}`, error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function removeClanMember(account, url, eventType = CLAN_EVENT_TYPE.DELETE_MEMBER) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
   const userId = eventType === CLAN_EVENT_TYPE.LEAVE_MEMBER ? Number(account.id) : Number(url.searchParams.get("uid") || 0);
+  if (pgPool) return await removeClanMemberPostgres(account, clanId, userId, eventType);
+  const clan = clanById(clanId);
   if (!clan || !clan.members[String(userId)]) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (eventType !== CLAN_EVENT_TYPE.LEAVE_MEMBER && !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(clan.ownerPlayerId) === Number(userId)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
@@ -4584,9 +10403,117 @@ function removeClanMember(account, url, eventType = CLAN_EVENT_TYPE.DELETE_MEMBE
   return ok();
 }
 
+async function deleteClanPostgres(account, clanId) {
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    let committed = false;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const clanResult = await client.query("SELECT * FROM clans WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", [Number(clanId)]);
+      const clanRow = clanResult.rows[0];
+      if (!clanRow || Number(clanRow.owner_player_id || 0) !== Number(account.id)) {
+        await client.query("ROLLBACK");
+        return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+      }
+
+      const expiresAt = new Date(Date.now() + 1000).toISOString();
+      const eventResult = await client.query(
+        `INSERT INTO clan_events (clan_id, event_type, creator_player_id, data, expires_at, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, now())
+         RETURNING id, created_at`,
+        [Number(clanId), CLAN_EVENT_TYPE.DELETE, Number(account.id), JSON.stringify({}), expiresAt]
+      );
+      // Contract tables intentionally do not reference the legacy `clans`
+      // snapshot: savePostgresStore rebuilds that table.  Delete the detached
+      // contract ledger explicitly in the same transaction as clan deletion.
+      if (CLAN_CONTRACTS_ENABLED) {
+        await client.query("DELETE FROM clan_contract_wallet_events WHERE clan_id = $1", [Number(clanId)]);
+        await client.query("DELETE FROM clan_contract_operations WHERE clan_id = $1", [Number(clanId)]);
+        await client.query("DELETE FROM clan_contract_wallets WHERE clan_id = $1", [Number(clanId)]);
+        await client.query("DELETE FROM clan_contract_cycles WHERE clan_id = $1", [Number(clanId)]);
+      }
+      // Clean cosmetics even when their rollout flag is off. Never run this
+      // cleanup from savePostgresStore's snapshot replacement.
+      if (clanBannerSchemaReady) {
+        await client.query("DELETE FROM clan_banner_ownership WHERE clan_id = $1", [Number(clanId)]);
+        if (!CLAN_CONTRACTS_ENABLED) {
+          await client.query("DELETE FROM clan_contract_operations WHERE clan_id = $1 AND operation_kind IN ('buy_banner', 'equip_banner')", [Number(clanId)]);
+        }
+      }
+      if (clanBannerAppearanceReady) {
+        await client.query("DELETE FROM clan_banner_appearance WHERE clan_id = $1", [Number(clanId)]);
+      }
+      await client.query("DELETE FROM clan_invites WHERE clan_id = $1", [Number(clanId)]);
+      await client.query("DELETE FROM clan_members WHERE clan_id = $1", [Number(clanId)]);
+      const deletedClanResult = await client.query(
+        "UPDATE clans SET deleted_at = now(), updated_at = now() WHERE id = $1 RETURNING deleted_at, updated_at",
+        [Number(clanId)]
+      );
+      await client.query("COMMIT");
+      committed = true;
+
+      const clan = clanById(clanId, { includeDeleted: true });
+      if (clan) {
+        const eventRow = eventResult.rows[0];
+        const event = normalizeClanEventRecord({
+          id: Number(eventRow?.id || 0),
+          clanId: Number(clanId),
+          type: CLAN_EVENT_TYPE.DELETE,
+          creatorPlayerId: Number(account.id),
+          data: {},
+          expiresAt,
+          createdAt: postgresTimestamp(eventRow?.created_at) || new Date().toISOString()
+        });
+        if (event) {
+          clan.events = (clan.events || []).filter((current) => Number(current.id) !== Number(event.id));
+          clan.events.push(event);
+          store.clans.nextEventId = Math.max(Number(store.clans.nextEventId || 1), Number(event.id) + 1);
+        }
+        clan.deletedAt = postgresTimestamp(deletedClanResult.rows[0]?.deleted_at) || new Date().toISOString();
+        clan.members = {};
+        clan.invites = {};
+        clan.updatedAt = postgresTimestamp(deletedClanResult.rows[0]?.updated_at) || new Date().toISOString();
+      }
+      refreshAllAccountClanSummaries(store);
+      refreshAccountClan(account);
+      console.log(`[clan-delete] pg player=${account.id} clan=${clanId} event=${Number(eventResult.rows[0]?.id || 0)} membership=0 profileClan=${account.clan ? Number(account.clan.cid || 0) : 0}`);
+      return clanBaseResponse(account, { id: 0, cinfo: {} });
+    } catch (error) {
+      try {
+        if (client && !committed) await client.query("ROLLBACK");
+      } catch {
+        // Keep the original error visible.
+      }
+      if (committed) {
+        // PostgreSQL is authoritative after COMMIT. Never tell the original
+        // client that deletion failed or leave a stale process-local clan
+        // projection alive because only the memory synchronization failed.
+        const clan = clanById(clanId, { includeDeleted: true });
+        if (clan) {
+          clan.deletedAt = clan.deletedAt || new Date().toISOString();
+          clan.members = {};
+          clan.invites = {};
+        }
+        refreshAllAccountClanSummaries(store);
+        refreshAccountClan(account);
+        console.error("[postgres] clan delete memory sync failed after commit", error);
+        return clanBaseResponse(account, { id: 0, cinfo: {} });
+      }
+      console.error("[postgres] clan delete failed", error);
+      return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 function deleteClan(account, url) {
   account = ensureClanAccount(account);
-  const clan = clanById(url.searchParams.get("cid"));
+  const clanId = Number(url.searchParams.get("cid") || 0);
+  if (pgPool) return deleteClanPostgres(account, clanId);
+  const clan = clanById(clanId);
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   addClanEvent(clan, CLAN_EVENT_TYPE.DELETE, {}, Number(account.id));
   clan.deletedAt = new Date().toISOString();
@@ -4594,7 +10521,8 @@ function deleteClan(account, url) {
   clan.invites = {};
   clan.updatedAt = new Date().toISOString();
   saveClanState();
-  return ok();
+  refreshAccountClan(account);
+  return clanBaseResponse(account, { id: 0, cinfo: {} });
 }
 
 function expandClan(account, url) {
@@ -4626,7 +10554,7 @@ function addClanMoney(account, url) {
   clan.updatedAt = new Date().toISOString();
   saveClanState();
   console.log(`[clan-treasury] add player=${account.id} clan=${clan.id} money=${money} playerMoney=${account.money} clanMoney=${clan.money} event=${event.id}`);
-  return ok({ id: Number(event.id), cid: Number(clan.id) });
+  return clanTreasuryAddResponse(account, clan, event.id);
 }
 
 function changeClanName(account, url) {
@@ -4668,6 +10596,9 @@ function changeClanArm(account, url) {
   if (!clan || !isClanOwner(account, clan)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (!armId) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(clan.armId || 0) === armId) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
+  if (CLAN_CONTRACTS_ENABLED && CLAN_CONTRACT_ARM_PRODUCT_BY_ID.has(armId) && !clanOwnsArm(clan, armId)) {
+    return { result: false, code: CLAN_ERROR.CLAN_ACCESS_DISABLE, error: "contract_shop_required" };
+  }
   const price = clanArmCostForClan(clan, armId);
   if (Number(clan.money || 0) < price) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
   clan.money = Number(clan.money || 0) - price;
@@ -4728,7 +10659,7 @@ function changeClanKoef(account, url) {
   return ok({ cid: Number(clan.id), id: Number(account.id), val: Number(clan.members[String(account.id)].expKoef) });
 }
 
-function buyClanEnhancer(account, url) {
+async function buyClanEnhancer(account, url) {
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const enhancerId = Number(url.searchParams.get("id") || 0);
@@ -4736,23 +10667,27 @@ function buyClanEnhancer(account, url) {
   const item = canonicalEnhancersById.get(enhancerId);
   if (!clan || !isClanOwner(account, clan) || !item || Number(item.iC || 0) !== 1) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   const price = shopDurationPrice(item, duration);
+  if (!isValidShopPrice(price)) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   if (Number(clan.money || 0) < price) return clanError(CLAN_ERROR.MISSING_MONEY_TREASURY);
   clan.money = Number(clan.money || 0) - price;
-  const seconds = shopDurationSeconds(duration);
-  const expiresAt = seconds > 0 ? currentUnixSeconds() + seconds : 0;
+  const key = `2:${enhancerId}`;
+  const existingItem = (clan.inventory || []).find(
+    (owned) => String(owned.itemKey || inventoryItemKey(owned)) === key
+  );
+  const purchasedItem = withPurchasedDuration(item, duration, existingItem);
   const inventoryItem = {
-    ...clone(item),
+    ...purchasedItem,
     it: 2,
     itype: 2,
     iC: 1,
-    eD: expiresAt
+    itemKey: key,
+    createdAt: existingItem?.createdAt || new Date().toISOString()
   };
-  const key = `2:${enhancerId}`;
   clan.inventory = (clan.inventory || []).filter((owned) => String(owned.itemKey || inventoryItemKey(owned)) !== key);
-  clan.inventory.push({ ...inventoryItem, itemKey: key });
+  clan.inventory.push(inventoryItem);
   addClanTreasuryEvent(clan, account.id, -price, CLAN_TREASURY_EVENT_TYPE.BUY_ENHANCER);
   clan.updatedAt = new Date().toISOString();
-  saveClanState();
+  await saveClanState();
   return ok();
 }
 
@@ -4773,14 +10708,110 @@ function deleteClanEvent(account, url) {
   return ok({ cid: Number(clan.id), eid: eventId });
 }
 
+function clanAuditSnapshot(clan, account = null) {
+  if (!clan) return null;
+  return {
+    id: Number(clan.id),
+    name: String(clan.name || ""),
+    tag: String(clan.tag || ""),
+    ownerPlayerId: Number(clan.ownerPlayerId || 0),
+    money: Number(clan.money || 0),
+    level: Number(clan.level || 1),
+    exp: Number(clan.exp || 0),
+    members: Object.keys(clan.members || {}).length,
+    maxMembers: Number(clan.maxMembers || 0),
+    armId: Number(clan.armId || 0),
+    access: Number(clan.access || 0),
+    accessLevel: Number(clan.accessLevel || 0),
+    playerBalance: account ? Number(account.money || 0) : undefined
+  };
+}
+
+async function auditClanMutation(account, url, act, response, beforeClan, beforePlayerMoney) {
+  if (!pgPool || response?.result !== true) return;
+  const requestedClanId = Number(url.searchParams.get("cid") || response.id || beforeClan?.id || 0);
+  const afterClanRecord = clanById(requestedClanId, { includeDeleted: true });
+  const afterClan = clanAuditSnapshot(afterClanRecord, account);
+  const targetPlayerId = Number(url.searchParams.get("uid") || account.id || 0);
+  const money = Number(url.searchParams.get("money") || 0);
+  const config = {
+    create: ["clan_create", "clan", `Создан клан ${afterClan?.name || response.id || ""}`],
+    del: ["clan_delete", "clan", `Удалён клан ${beforeClan?.name || requestedClanId}`],
+    join: ["clan_join_request", "clan", `Подана заявка на вступление в клан #${requestedClanId}`],
+    accept: ["clan_join", "clan", `Игрок #${targetPlayerId} принят в клан`],
+    reject: ["clan_join_reject", "clan", `Заявка игрока #${targetPlayerId} отклонена`],
+    remove: ["clan_member_remove", "clan", `Игрок #${targetPlayerId} исключён из клана`],
+    leave: ["clan_leave", "clan", "Игрок вышел из клана"],
+    amoney: ["clan_treasury_deposit", "economy", `Внесено ${money} монет в казну клана`],
+    cname: ["clan_rename", "clan", `Клан переименован: ${beforeClan?.name || ""} → ${afterClan?.name || ""}`],
+    ctag: ["clan_tag_change", "clan", `Изменён тег клана: ${beforeClan?.tag || ""} → ${afterClan?.tag || ""}`],
+    carm: ["clan_emblem_change", "clan", "Изменена эмблема клана"],
+    cowner: ["clan_owner_change", "clan", `Переданы права владельца игроку #${Number(url.searchParams.get("nid") || 0)}`],
+    expand: ["clan_capacity_change", "clan", "Увеличено максимальное число участников"],
+    bench: ["clan_purchase", "clan", "Куплен клановый усилитель"],
+    curl: ["clan_profile_change", "clan", "Изменена ссылка клана"],
+    cdesc: ["clan_profile_change", "clan", "Изменено описание клана"],
+    caccess: ["clan_access_change", "clan", "Изменён режим доступа клана"],
+    caccesslvl: ["clan_access_change", "clan", "Изменён минимальный уровень вступления"],
+    ckoef: ["clan_exp_share_change", "clan", "Изменён коэффициент опыта участника"],
+    buyReq: ["clan_request_limit_purchase", "economy", "Куплены дополнительные заявки в кланы"]
+  }[act];
+  if (!config) return;
+  const subjectPlayerId = ["accept", "reject", "remove"].includes(act) ? targetPlayerId : Number(account.id);
+  await auditGameEvent(pgPool, {
+    playerId: subjectPlayerId,
+    clanId: requestedClanId || afterClan?.id || beforeClan?.id,
+    clanName: afterClan?.name || beforeClan?.name || "",
+    eventType: config[0],
+    category: config[1],
+    severity: ["del", "remove", "cowner"].includes(act) ? "warning" : "notice",
+    description: config[2],
+    oldValue: beforeClan ? { ...beforeClan, playerBalance: beforePlayerMoney } : { playerBalance: beforePlayerMoney },
+    newValue: afterClan || { playerBalance: Number(account.money || 0) },
+    metadata: { act, actorPlayerId: Number(account.id), requestedClanId }
+  });
+}
+
 async function routeClan(account, url, act, requestOrigin = null) {
   ensureClanStore();
   account = ensureClanAccount(account);
+
+  const mutationHandlers = {
+    create: () => createClan(account, url),
+    del: () => deleteClan(account, url),
+    join: () => joinClan(account, url),
+    accept: () => acceptClanInvite(account, url),
+    reject: () => rejectClanInvite(account, url),
+    buyReq: () => buyClanRequests(account),
+    expand: () => expandClan(account, url),
+    remove: () => removeClanMember(account, url, CLAN_EVENT_TYPE.DELETE_MEMBER),
+    leave: () => removeClanMember(account, url, CLAN_EVENT_TYPE.LEAVE_MEMBER),
+    bench: () => buyClanEnhancer(account, url),
+    cname: () => changeClanName(account, url),
+    ctag: () => changeClanTag(account, url),
+    carm: () => changeClanArm(account, url),
+    curl: () => changeClanText(account, url, "homepage"),
+    cdesc: () => changeClanText(account, url, "desc"),
+    cowner: () => changeClanOwner(account, url),
+    caccess: () => changeClanAccess(account, url, "access"),
+    caccesslvl: () => changeClanAccess(account, url, "accessLevel"),
+    amoney: () => addClanMoney(account, url),
+    ckoef: () => changeClanKoef(account, url)
+  };
+  if (mutationHandlers[act]) {
+    const currentClan = playerClanRecord(account.id) || clanById(url.searchParams.get("cid"), { includeDeleted: true });
+    const beforeClan = clanAuditSnapshot(currentClan, account);
+    const beforePlayerMoney = Number(account.money || 0);
+    const response = await mutationHandlers[act]();
+    await auditClanMutation(account, url, act, response, beforeClan, beforePlayerMoney);
+    return response;
+  }
 
   switch (act) {
     case "g":
       return clanListPayload(url, account);
     case "gextra":
+      await refreshClanBannerAppearance(url.searchParams.get("cid"));
       return clanExtraPayload(account, url.searchParams.get("cid"));
     case "src": {
       const value = clanFormValue(url, "v").toLowerCase();
@@ -4792,11 +10823,21 @@ async function routeClan(account, url, act, requestOrigin = null) {
       return clanBaseResponse(account, { d: clans.map((clan) => clanPayload(clan)) });
     }
     case "m": {
-      const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
+      const clanId = Number(url.searchParams.get("cid") || 0);
+      if (pgPool) {
+        const members = await clanMemberListPostgres(clanId);
+        return members === null ? clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE) : ok({ mlist: members });
+      }
+      const clan = clanById(clanId, { includeDeleted: true });
       return ok({ mlist: clan ? clanMemberList(clan) : [] });
     }
     case "inv": {
-      const clan = clanById(url.searchParams.get("cid"), { includeDeleted: true });
+      const clanId = Number(url.searchParams.get("cid") || 0);
+      if (pgPool) {
+        const invites = await clanInviteListPostgres(clanId);
+        return invites === null ? clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE) : ok({ inv: invites });
+      }
+      const clan = clanById(clanId, { includeDeleted: true });
       return ok({ inv: clan ? clanInviteList(clan) : [] });
     }
     case "arms":
@@ -4816,9 +10857,9 @@ async function routeClan(account, url, act, requestOrigin = null) {
     case "expand":
       return expandClan(account, url);
     case "remove":
-      return removeClanMember(account, url, CLAN_EVENT_TYPE.DELETE_MEMBER);
+      return await removeClanMember(account, url, CLAN_EVENT_TYPE.DELETE_MEMBER);
     case "leave":
-      return removeClanMember(account, url, CLAN_EVENT_TYPE.LEAVE_MEMBER);
+      return await removeClanMember(account, url, CLAN_EVENT_TYPE.LEAVE_MEMBER);
     case "bench":
       return buyClanEnhancer(account, url);
     case "cname":
@@ -4838,7 +10879,7 @@ async function routeClan(account, url, act, requestOrigin = null) {
     case "caccesslvl":
       return changeClanAccess(account, url, "accessLevel");
     case "amoney":
-      return addClanMoney(account, url);
+      return await addClanMoney(account, url);
     case "ckoef":
       return changeClanKoef(account, url);
     case "gevnt":
@@ -4852,7 +10893,7 @@ async function routeClan(account, url, act, requestOrigin = null) {
 
 function normalizeShopDuration(value) {
   const duration = Number(value);
-  return Object.values(SHOP_DURATION).includes(duration) ? duration : SHOP_DURATION.PERMANENT;
+  return PURCHASABLE_TIMED_DURATIONS.has(duration) ? duration : null;
 }
 
 function shopDurationSeconds(duration) {
@@ -4863,7 +10904,6 @@ function shopDurationSeconds(duration) {
       return SHOP_DAY_SECONDS * 7;
     case SHOP_DURATION.MONTH:
       return SHOP_DAY_SECONDS * 30;
-    case SHOP_DURATION.PERMANENT:
     default:
       return 0;
   }
@@ -4874,11 +10914,12 @@ function shopDurationPrice(item, duration) {
   const keyByDuration = {
     [SHOP_DURATION.DAY]: "t1v",
     [SHOP_DURATION.WEEK]: "t7v",
-    [SHOP_DURATION.MONTH]: "t30v",
-    [SHOP_DURATION.PERMANENT]: "tPv"
+    [SHOP_DURATION.MONTH]: "t30v"
   };
-  const value = Number(sc[keyByDuration[normalizeShopDuration(duration)]]);
-  return Number.isFinite(value) ? value : itemPrice(item);
+  const selectedDuration = normalizeShopDuration(duration);
+  if (selectedDuration === null) return null;
+  const value = Number(sc[keyByDuration[selectedDuration]]);
+  return isValidShopPrice(value) ? value : null;
 }
 
 function findOwnedInventoryItem(account, item) {
@@ -4901,6 +10942,701 @@ function withPurchasedDuration(item, duration, existingItem = null, now = curren
   const base = Number.isFinite(existingExpiry) && existingExpiry > now ? existingExpiry : now;
   itemData.eD = base + seconds;
   return itemData;
+}
+
+function normalizeClanBannerId(value) {
+  const id = String(value || "default");
+  return CLAN_BANNER_PRODUCT_BY_ID.has(id) ? id : "default";
+}
+
+function normalizeClanBannerRevision(value) {
+  const revision = Number(value || 0);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+}
+
+async function refreshClanBannerSchema(client) {
+  const schema = await client.query(`SELECT
+    to_regclass('public.clan_banner_appearance') AS appearance,
+    to_regclass('public.clan_banner_ownership') AS ownership,
+    EXISTS (SELECT 1 FROM pg_constraint
+      WHERE conrelid = to_regclass('public.clan_contract_operations')
+        AND conname = 'clan_contract_operations_operation_kind_check'
+        AND pg_get_constraintdef(oid) LIKE '%buy_banner%'
+        AND pg_get_constraintdef(oid) LIKE '%equip_banner%') AS operations_ready`);
+  clanBannerAppearanceReady = Boolean(schema.rows[0]?.appearance);
+  clanBannerSchemaReady = Boolean(clanBannerAppearanceReady && schema.rows[0]?.ownership && schema.rows[0]?.operations_ready);
+}
+
+function clanBannersAvailable() {
+  return Boolean(CLAN_BANNERS_ENABLED && clanBannerSchemaReady && clanContractsAvailable());
+}
+
+function applyClanBannerAppearance(clanId, appearance) {
+  const clan = clanById(clanId);
+  if (!clan || !appearance || normalizeClanBannerRevision(appearance.revision) < normalizeClanBannerRevision(clan.bannerRevision)) return;
+  clan.bannerId = normalizeClanBannerId(appearance.selectedId);
+  clan.bannerRevision = normalizeClanBannerRevision(appearance.revision);
+  for (const playerId of Object.keys(clan.members || {})) {
+    const account = accountById(Number(playerId));
+    if (account) refreshAccountClan(account);
+  }
+}
+
+async function readClanBannerAppearance(client, clan) {
+  if (!clanBannerAppearanceReady) {
+    return { selectedId: normalizeClanBannerId(clan.bannerId), revision: normalizeClanBannerRevision(clan.bannerRevision) };
+  }
+  const result = await client.query("SELECT banner_id, revision FROM clan_banner_appearance WHERE clan_id = $1", [Number(clan.id)]);
+  return {
+    selectedId: normalizeClanBannerId(result.rows[0]?.banner_id),
+    revision: normalizeClanBannerRevision(result.rows[0]?.revision)
+  };
+}
+
+async function refreshClanBannerAppearance(clanId) {
+  const clan = clanById(clanId);
+  if (!clan || !pgPool || !clanBannerAppearanceReady) return;
+  try {
+    applyClanBannerAppearance(clan.id, await readClanBannerAppearance(pgPool, clan));
+  } catch (error) {
+    // An optional cosmetic refresh must not make legacy clan views unusable.
+    console.error(`[clan-banners] appearance refresh failed clan=${clan.id} code=${error.code || "unknown"}`);
+  }
+}
+
+async function clanBannerState(client, clan) {
+  const appearance = await readClanBannerAppearance(client, clan);
+  const ownedRows = clanBannerSchemaReady
+    ? await client.query("SELECT banner_id FROM clan_banner_ownership WHERE clan_id = $1", [Number(clan.id)])
+    : { rows: [] };
+  const owned = new Set(["default", ...ownedRows.rows.map((row) => String(row.banner_id))]);
+  const enabled = clanBannersAvailable();
+  return {
+    state: { enabled, clanId: Number(clan.id), ...appearance },
+    catalog: CLAN_BANNER_PRODUCTS.map((product) => ({ ...product, owned: owned.has(product.id), available: enabled }))
+  };
+}
+
+async function mutateClanBanner(account, action, bannerId, requestId, clanId, expectedRevision, requestOrigin) {
+  if (!clanBannersAvailable()) return { result: false, error: "banners_disabled" };
+  const product = CLAN_BANNER_PRODUCT_BY_ID.get(String(bannerId || ""));
+  const requestedClanId = Number(clanId);
+  const revision = Number(expectedRevision);
+  const clan = playerClanRecord(account.id);
+  if (!clan || !Number.isSafeInteger(requestedClanId) || requestedClanId <= 0 || requestedClanId !== Number(clan.id)) {
+    return { result: false, error: "banner_clan_changed" };
+  }
+  if (!product || !validClanContractRequestId(requestId) || !["buy_banner", "equip_banner"].includes(action)) {
+    return { result: false, error: "invalid_banner_request" };
+  }
+  if (action === "equip_banner" && (expectedRevision === null || expectedRevision === "" || !Number.isSafeInteger(revision) || revision < 0)) {
+    return { result: false, error: "invalid_banner_revision" };
+  }
+  return enqueuePostgresMutation(async () => {
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      // Lock before reading the receipt so concurrent requests for this clan
+      // on another API instance serialize too. Recheck actual membership.
+      const owner = await client.query(
+        `SELECT c.owner_player_id FROM clans c
+         JOIN clan_members m ON m.clan_id = c.id AND m.player_id = $2
+         WHERE c.id = $1 AND c.deleted_at IS NULL FOR UPDATE OF c`,
+        [requestedClanId, Number(account.id)]
+      );
+      if (!owner.rows[0] || Number(owner.rows[0].owner_player_id) !== Number(account.id)) throw new Error("clan_owner_required");
+      const currentClan = playerClanRecord(account.id);
+      if (!currentClan || Number(currentClan.id) !== requestedClanId) throw new Error("banner_clan_changed");
+      const previous = await client.query(
+        `SELECT clan_id, actor_player_id, operation_kind, product_key, result_data
+         FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`, [requestId]
+      );
+      const operation = previous.rows[0];
+      const productKey = `banner:${product.id}`;
+      if (operation) {
+        if (Number(operation.clan_id) !== requestedClanId || Number(operation.actor_player_id) !== Number(account.id)
+          || operation.operation_kind !== action || operation.product_key !== productKey) throw new Error("contract_request_collision");
+        const contracts = await clanContractState(client, account, currentClan, requestOrigin);
+        await client.query("COMMIT");
+        applyClanBannerAppearance(requestedClanId, contracts.banners);
+        return ok({ contracts, replayed: true });
+      }
+
+      await client.query("INSERT INTO clan_banner_appearance (clan_id) VALUES ($1) ON CONFLICT (clan_id) DO NOTHING", [requestedClanId]);
+      const selected = await client.query("SELECT banner_id, revision FROM clan_banner_appearance WHERE clan_id = $1 FOR UPDATE", [requestedClanId]);
+      const appearance = selected.rows[0];
+      const ownership = await client.query("SELECT banner_id FROM clan_banner_ownership WHERE clan_id = $1 AND banner_id = $2", [requestedClanId, product.id]);
+      const owned = product.id === "default" || Boolean(ownership.rows[0]);
+      let amount = 0;
+      if (action === "buy_banner" && !owned) {
+        amount = product.price;
+        await changeClanContractWallet(client, requestedClanId, account.id, -amount, "shop_banner", "banner", product.id, { price: amount });
+        await client.query(
+          "INSERT INTO clan_banner_ownership (clan_id, banner_id, purchased_by) VALUES ($1, $2, $3)",
+          [requestedClanId, product.id, Number(account.id)]
+        );
+        await client.query("UPDATE clan_banner_appearance SET revision = revision + 1, updated_by = $2, updated_at = now() WHERE clan_id = $1", [requestedClanId, Number(account.id)]);
+      }
+      if (action === "equip_banner") {
+        if (!owned) throw new Error("banner_not_owned");
+        if (appearance.banner_id !== product.id) {
+          if (normalizeClanBannerRevision(appearance.revision) !== revision) throw new Error("banner_revision_conflict");
+          await client.query(
+            "UPDATE clan_banner_appearance SET banner_id = $2, revision = revision + 1, updated_by = $3, updated_at = now() WHERE clan_id = $1",
+            [requestedClanId, product.id, Number(account.id)]
+          );
+        }
+      }
+      const result = { bannerId: product.id, alreadyOwned: owned, amount };
+      await client.query(
+        `INSERT INTO clan_contract_operations (clan_id, actor_player_id, request_id, operation_kind, product_key, amount, result_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+        [requestedClanId, Number(account.id), requestId, action, productKey, amount, JSON.stringify(result)]
+      );
+      const contracts = await clanContractState(client, account, currentClan, requestOrigin);
+      await auditGameEvent(client, {
+        playerId: account.id, clanId: requestedClanId, clanName: currentClan.name, category: "clan",
+        eventType: action === "buy_banner" ? "clan_banner_purchase" : "clan_banner_equip",
+        description: action === "buy_banner" ? `Клан получил баннер «${product.title}» за ${amount} знаков` : `Установлен баннер «${product.title}»`,
+        metadata: { bannerId: product.id, requestId, amount, revision: contracts.banners.revision }
+      });
+      await client.query("COMMIT");
+      // Never expose an uncommitted appearance through the in-memory snapshot.
+      applyClanBannerAppearance(requestedClanId, contracts.banners);
+      return ok({ contracts });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      const allowed = new Set(["clan_owner_required", "banner_clan_changed", "contract_request_collision", "banner_not_owned", "banner_revision_conflict"]);
+      const errorCode = error.code === "INSUFFICIENT_CONTRACT_MARKS" ? "insufficient_contract_marks"
+        : error.code === "23505" ? "contract_request_collision"
+          : allowed.has(error.message) ? error.message : "banner_operation_failed";
+      if (errorCode === "banner_operation_failed") console.error(`[clan-banners] mutation failed clan=${requestedClanId} code=${error.code || "unknown"}`);
+      return { result: false, error: errorCode };
+    } finally {
+      client.release();
+    }
+  });
+}
+
+function clanContractsAvailable() {
+  return Boolean(CLAN_CONTRACTS_ENABLED && pgPool);
+}
+
+function clanContractTier(level) {
+  const normalized = Math.max(1, Number(level || 1));
+  return normalized >= 10 ? 3 : normalized >= 5 ? 2 : 1;
+}
+
+function clanContractCycleWindow(now = new Date()) {
+  // Moscow has a fixed UTC+3 offset. Moving the instant by (UTC+3 - reset
+  // hour) lets UTC calendar components represent the operation day safely.
+  const shifted = new Date(now.getTime() + (3 - CLAN_CONTRACT_RESET_HOUR_MOSCOW) * 60 * 60 * 1000);
+  const cycleKey = shifted.toISOString().slice(0, 10);
+  const year = Number(cycleKey.slice(0, 4));
+  const month = Number(cycleKey.slice(5, 7));
+  const day = Number(cycleKey.slice(8, 10));
+  const resetAt = new Date(Date.UTC(year, month - 1, day + 1, CLAN_CONTRACT_RESET_HOUR_MOSCOW - 3, 0, 0));
+  return { cycleKey, resetAt };
+}
+
+function clanContractObjectiveOrder(clanId, cycleKey) {
+  const pool = Object.keys(CLAN_CONTRACT_OBJECTIVES);
+  const hash = crypto.createHash("sha256").update(`clan-contracts:v1:${Number(clanId)}:${cycleKey}`).digest();
+  for (let index = pool.length - 1; index > 0; index -= 1) {
+    const next = hash[pool.length - 1 - index] % (index + 1);
+    [pool[index], pool[next]] = [pool[next], pool[index]];
+  }
+  return pool.slice(0, 3);
+}
+
+function validClanContractRequestId(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+async function ensureClanContractWallet(client, clanId) {
+  await client.query(
+    `INSERT INTO clan_contract_wallets (clan_id)
+     VALUES ($1)
+     ON CONFLICT (clan_id) DO NOTHING`,
+    [Number(clanId)]
+  );
+  const wallet = await client.query(
+    `SELECT clan_id, balance, earned_total, spent_total, revision, updated_at
+     FROM clan_contract_wallets
+     WHERE clan_id = $1
+     FOR UPDATE`,
+    [Number(clanId)]
+  );
+  return wallet.rows[0];
+}
+
+async function ensureClanContractCycle(client, clan) {
+  const window = clanContractCycleWindow();
+  const tier = clanContractTier(clan.level);
+  const config = CLAN_CONTRACT_TIER_CONFIG[tier];
+  await client.query(
+    `INSERT INTO clan_contract_cycles (clan_id, cycle_key, tier, reset_at, completion_bonus)
+     VALUES ($1, $2::date, $3, $4, $5)
+     ON CONFLICT (clan_id, cycle_key) DO NOTHING`,
+    [Number(clan.id), window.cycleKey, tier, window.resetAt.toISOString(), config.completionBonus]
+  );
+  const cycleResult = await client.query(
+    `SELECT id, clan_id, cycle_key, tier, reset_at, completion_bonus, bonus_completed_at
+     FROM clan_contract_cycles
+     WHERE clan_id = $1 AND cycle_key = $2::date
+     FOR UPDATE`,
+    [Number(clan.id), window.cycleKey]
+  );
+  const cycle = cycleResult.rows[0];
+  const existing = await client.query(
+    `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at, objective_spec, objective_state
+     FROM clan_contract_entries
+     WHERE cycle_id = $1
+     ORDER BY slot
+     FOR UPDATE`,
+    [Number(cycle.id)]
+  );
+  if (existing.rows.length === 0) {
+    const objectives = buildQuestSet(clan.id, window.cycleKey);
+    for (let index = 0; index < objectives.length; index += 1) {
+      const definition = objectives[index];
+      await client.query(
+        `INSERT INTO clan_contract_entries (cycle_id, slot, objective_key, target_value, reward, objective_spec)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [Number(cycle.id), index + 1, definition.key, definition.target, definition.reward, JSON.stringify(definition.spec)]
+      );
+    }
+  }
+  const entries = existing.rows.length === 0
+    ? await client.query(
+      `SELECT id, slot, objective_key, target_value, current_value, reward, completed_at, objective_spec, objective_state
+       FROM clan_contract_entries WHERE cycle_id = $1 ORDER BY slot FOR UPDATE`,
+      [Number(cycle.id)]
+    )
+    : existing;
+  return { cycle, entries: entries.rows };
+}
+
+async function changeClanContractWallet(client, clanId, actorPlayerId, amount, reason, referenceType, referenceId, metadata = {}) {
+  const wallet = await ensureClanContractWallet(client, clanId);
+  const delta = Math.trunc(Number(amount || 0));
+  const before = Number(wallet.balance || 0);
+  const balance = before + delta;
+  if (balance < 0) {
+    const error = new Error("insufficient_contract_marks");
+    error.code = "INSUFFICIENT_CONTRACT_MARKS";
+    throw error;
+  }
+  const earned = Number(wallet.earned_total || 0) + Math.max(0, delta);
+  const spent = Number(wallet.spent_total || 0) + Math.max(0, -delta);
+  const updated = await client.query(
+    `UPDATE clan_contract_wallets
+     SET balance = $2, earned_total = $3, spent_total = $4,
+         revision = revision + 1, updated_at = now()
+     WHERE clan_id = $1
+     RETURNING balance, earned_total, spent_total, revision, updated_at`,
+    [Number(clanId), balance, earned, spent]
+  );
+  await client.query(
+    `INSERT INTO clan_contract_wallet_events (
+       clan_id, actor_player_id, amount, balance_after, reason,
+       reference_type, reference_id, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+    [Number(clanId), Number(actorPlayerId) || null, delta, balance, reason, referenceType || "", String(referenceId || ""), JSON.stringify(metadata || {})]
+  );
+  return updated.rows[0];
+}
+
+function contractArmCatalog(clan, requestOrigin) {
+  return CLAN_CONTRACT_ARM_PRODUCTS.map((product) => ({
+    armId: product.armId,
+    price: product.price,
+    minLevel: product.minLevel,
+    owned: clanOwnsArm(clan, product.armId),
+    available: Number(clan.level || 1) >= product.minLevel,
+    url: clanArmImageUrl(product.armId, requestOrigin)
+  }));
+}
+
+function contractCaseCatalog() {
+  return Object.values(CLAN_CONTRACT_CASES).map((item) => ({
+    key: item.key,
+    name: item.name,
+    price: item.price,
+    armChance: item.armChance,
+    enhancerHours: Math.round(item.enhancerSeconds / 3600)
+  }));
+}
+
+function eligibleContractArmProducts(clan) {
+  return CLAN_CONTRACT_ARM_PRODUCTS.filter(
+    (product) => Number(clan.level || 1) >= product.minLevel && !clanOwnsArm(clan, product.armId)
+  );
+}
+
+function eligibleContractEnhancers(clan) {
+  return CLAN_ENHANCER_IDS
+    .map((id) => canonicalEnhancersById.get(Number(id)))
+    .filter((item) => item && Number(item.iC || 0) === 1 && Number(item.nlvl || 1) <= Number(clan.level || 1));
+}
+
+function contractCaseReward(clan, caseDefinition) {
+  const arms = eligibleContractArmProducts(clan);
+  const enhancers = eligibleContractEnhancers(clan);
+  const armWins = arms.length > 0 && (enhancers.length === 0 || crypto.randomInt(0, 100) < caseDefinition.armChance);
+  if (armWins) {
+    const product = arms[crypto.randomInt(0, arms.length)];
+    return { kind: "arm", armId: product.armId, name: `Герб #${product.armId}` };
+  }
+  if (enhancers.length > 0) {
+    const item = enhancers[crypto.randomInt(0, enhancers.length)];
+    return { kind: "enhancer", enhancerId: Number(item.e_id || 0), name: String(item.sn || item.sname || "Клановый усилитель"), seconds: caseDefinition.enhancerSeconds };
+  }
+  if (arms.length > 0) {
+    const product = arms[crypto.randomInt(0, arms.length)];
+    return { kind: "arm", armId: product.armId, name: `Герб #${product.armId}` };
+  }
+  return { kind: "refund", amount: Math.floor(caseDefinition.price / 2), name: "Возврат знаков" };
+}
+
+async function persistContractArm(client, clan, armId, source) {
+  const changed = ensureClanOwnedArm(clan, armId, source);
+  if (!changed) return false;
+  const item = clan.inventory.find((entry) => String(entry.itemKey || "") === clanArmInventoryKey(armId));
+  await client.query(
+    `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
+     VALUES ($1, $2, $3::jsonb, NULL, now())
+     ON CONFLICT (clan_id, item_key) DO UPDATE SET item_data = EXCLUDED.item_data, expires_at = NULL`,
+    [Number(clan.id), clanArmInventoryKey(armId), JSON.stringify(item)]
+  );
+  return true;
+}
+
+async function persistContractEnhancer(client, clan, enhancerId, seconds, source) {
+  const canonical = canonicalEnhancersById.get(Number(enhancerId));
+  if (!canonical || Number(canonical.iC || 0) !== 1) return null;
+  const key = `2:${Number(enhancerId)}`;
+  const now = currentUnixSeconds();
+  const existing = (clan.inventory || []).find((item) => String(item.itemKey || inventoryItemKey(item)) === key) || null;
+  const item = clone(canonical);
+  item.it = 2;
+  item.itype = 2;
+  item.iC = 1;
+  item.itemKey = key;
+  item.eD = Math.max(Number(existing?.eD || 0), now) + Math.max(1, Number(seconds || 0));
+  item.createdAt = existing?.createdAt || new Date().toISOString();
+  item.source = source;
+  clan.inventory = (clan.inventory || []).filter((entry) => String(entry.itemKey || inventoryItemKey(entry)) !== key);
+  clan.inventory.push(item);
+  await client.query(
+    `INSERT INTO clan_inventory (clan_id, item_key, item_data, expires_at, created_at)
+     VALUES ($1, $2, $3::jsonb, to_timestamp($4), now())
+     ON CONFLICT (clan_id, item_key) DO UPDATE SET item_data = EXCLUDED.item_data, expires_at = EXCLUDED.expires_at`,
+    [Number(clan.id), key, JSON.stringify(item), Number(item.eD)]
+  );
+  return item;
+}
+
+async function clanContractState(client, account, clan, requestOrigin) {
+  const wallet = await ensureClanContractWallet(client, clan.id);
+  const cycleState = await ensureClanContractCycle(client, clan);
+  const entryIds = cycleState.entries.map((entry) => Number(entry.id));
+  const contributionRows = entryIds.length
+    ? await client.query(
+      `SELECT contract_id, player_id, value
+       FROM clan_contract_contributions
+       WHERE contract_id = ANY($1::bigint[])
+       ORDER BY value DESC, player_id ASC`,
+      [entryIds]
+    )
+    : { rows: [] };
+  const contributions = new Map();
+  for (const row of contributionRows.rows) {
+    const list = contributions.get(Number(row.contract_id)) || [];
+    list.push(row);
+    contributions.set(Number(row.contract_id), list);
+  }
+  const recent = await client.query(
+    `SELECT reason, amount, balance_after, reference_type, reference_id, metadata, created_at
+     FROM clan_contract_wallet_events
+     WHERE clan_id = $1
+     ORDER BY id DESC LIMIT 12`,
+    [Number(clan.id)]
+  );
+  const operations = await client.query(
+    `SELECT operation_kind, product_key, result_data, created_at
+     FROM clan_contract_operations
+     WHERE clan_id = $1
+     ORDER BY id DESC LIMIT 1`,
+    [Number(clan.id)]
+  );
+  const isOwner = isClanOwner(account, clan);
+  const banners = await clanBannerState(client, clan);
+  return {
+    enabled: true,
+    timezone: CLAN_CONTRACTS_TIMEZONE,
+    canSpend: isOwner,
+    resetAt: new Date(cycleState.cycle.reset_at).toISOString(),
+    wallet: {
+      balance: Number(wallet.balance || 0),
+      earned: Number(wallet.earned_total || 0),
+      spent: Number(wallet.spent_total || 0),
+      revision: Number(wallet.revision || 0)
+    },
+    cycle: {
+      key: String(cycleState.cycle.cycle_key).slice(0, 10),
+      tier: Number(cycleState.cycle.tier),
+      completionBonus: Number(cycleState.cycle.completion_bonus),
+      bonusCompleted: Boolean(cycleState.cycle.bonus_completed_at)
+    },
+    contracts: cycleState.entries.map((entry) => {
+      const rows = contributions.get(Number(entry.id)) || [];
+      const own = rows.find((row) => Number(row.player_id) === Number(account.id));
+      return {
+        id: Number(entry.id),
+        key: entry.objective_key,
+        title: CLAN_CONTRACT_OBJECTIVES[entry.objective_key]?.title || entry.objective_key,
+        text: CLAN_CONTRACT_OBJECTIVES[entry.objective_key]?.text || "Выполните задачу вместе с командой.",
+        ...questPresentation(entry),
+        target: Number(entry.target_value),
+        progress: Number(entry.current_value),
+        reward: Number(entry.reward),
+        completed: Boolean(entry.completed_at),
+        contribution: Number(own?.value || 0),
+        contributors: rows.slice(0, 3).map((row) => ({
+          userId: Number(row.player_id),
+          name: accountById(Number(row.player_id))?.name || "Боец",
+          value: Number(row.value)
+        }))
+      };
+    }),
+    banners: banners.state,
+    catalog: { arms: contractArmCatalog(clan, requestOrigin), cases: contractCaseCatalog(), banners: banners.catalog },
+    history: recent.rows.map((row) => ({
+      reason: String(row.reason || ""),
+      amount: Number(row.amount || 0),
+      balance: Number(row.balance_after || 0),
+      referenceType: String(row.reference_type || ""),
+      referenceId: String(row.reference_id || ""),
+      metadata: jsonValue(row.metadata, {}),
+      at: new Date(row.created_at).toISOString()
+    })),
+    lastOperation: operations.rows[0] ? {
+      kind: String(operations.rows[0].operation_kind),
+      product: String(operations.rows[0].product_key),
+      result: jsonValue(operations.rows[0].result_data, {}),
+      at: new Date(operations.rows[0].created_at).toISOString()
+    } : null
+  };
+}
+
+async function clanContractStateResponse(account, requestOrigin) {
+  const clan = playerClanRecord(account.id);
+  if (!clan) return ok({ contracts: { enabled: false, reason: "no_clan" } });
+  if (!clanContractsAvailable()) {
+    const banners = await clanBannerState(pgPool, clan);
+    applyClanBannerAppearance(clan.id, banners.state);
+    return ok({ contracts: { enabled: false, banners: banners.state, catalog: { banners: banners.catalog } } });
+  }
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const contracts = await clanContractState(client, account, clan, requestOrigin);
+    await client.query("COMMIT");
+    applyClanBannerAppearance(clan.id, contracts.banners);
+    return ok({ contracts });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error(`[clan-contracts] state failed clan=${clan.id} player=${account.id}`, error);
+    return { result: false, error: "contract_state_failed" };
+  } finally {
+    client.release();
+  }
+}
+
+async function purchaseClanContractArm(account, armId, requestId, requestOrigin) {
+  if (!clanContractsAvailable()) return { result: false, error: "contracts_disabled" };
+  const product = CLAN_CONTRACT_ARM_PRODUCT_BY_ID.get(Number(armId));
+  const clan = playerClanRecord(account.id);
+  if (!clan || !product || !validClanContractRequestId(requestId)) return { result: false, error: "invalid_contract_purchase" };
+  return enqueuePostgresMutation(async () => {
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      const previous = await client.query(
+        `SELECT clan_id, actor_player_id, operation_kind, product_key, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
+        [requestId]
+      );
+      if (previous.rows[0]) {
+        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)
+          || previous.rows[0].operation_kind !== "buy_arm" || previous.rows[0].product_key !== `arm:${product.armId}`) throw new Error("contract_request_collision");
+        const contracts = await clanContractState(client, account, clan, requestOrigin);
+        await client.query("COMMIT");
+        return ok({ contracts, grantedArmId: Number(jsonValue(previous.rows[0].result_data, {}).grantedArmId || 0), replayed: true });
+      }
+      const owner = await client.query("SELECT owner_player_id, level FROM clans WHERE id = $1 FOR UPDATE", [Number(clan.id)]);
+      if (!owner.rows[0] || Number(owner.rows[0].owner_player_id) !== Number(account.id)) throw new Error("clan_owner_required");
+      if (Number(owner.rows[0].level || 1) < product.minLevel || clanOwnsArm(clan, product.armId)) throw new Error("contract_arm_unavailable");
+      await changeClanContractWallet(client, clan.id, account.id, -product.price, "shop_arm", "arm", product.armId, { price: product.price });
+      await persistContractArm(client, clan, product.armId, "clan_contract_shop");
+      const result = { grantedArmId: product.armId, reward: { kind: "arm", armId: product.armId } };
+      await client.query(
+        `INSERT INTO clan_contract_operations (clan_id, actor_player_id, request_id, operation_kind, product_key, amount, result_data)
+         VALUES ($1, $2, $3, 'buy_arm', $4, $5, $6::jsonb)`,
+        [Number(clan.id), Number(account.id), requestId, `arm:${product.armId}`, product.price, JSON.stringify(result)]
+      );
+      const contracts = await clanContractState(client, account, clan, requestOrigin);
+      await auditGameEvent(client, {
+        playerId: account.id, clanId: clan.id, clanName: clan.name, eventType: "clan_contract_arm_purchase", category: "clan",
+        description: `Клан получил герб #${product.armId} за ${product.price} знаков контракта`, metadata: { armId: product.armId, requestId }
+      });
+      await client.query("COMMIT");
+      return ok({ contracts, ...result });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      const errorCode = error.code === "INSUFFICIENT_CONTRACT_MARKS" ? "insufficient_contract_marks" : String(error.message || "contract_arm_purchase_failed");
+      return { result: false, error: errorCode };
+    } finally {
+      client.release();
+    }
+  });
+}
+
+async function openClanContractCase(account, caseKey, requestId, requestOrigin) {
+  if (!clanContractsAvailable()) return { result: false, error: "contracts_disabled" };
+  const definition = CLAN_CONTRACT_CASES[String(caseKey || "")];
+  const clan = playerClanRecord(account.id);
+  if (!clan || !definition || !validClanContractRequestId(requestId)) return { result: false, error: "invalid_contract_case" };
+  return enqueuePostgresMutation(async () => {
+    const client = await pgPool.connect();
+    try {
+      await client.query("BEGIN");
+      const previous = await client.query(
+        `SELECT clan_id, actor_player_id, operation_kind, product_key, result_data FROM clan_contract_operations WHERE request_id = $1 FOR UPDATE`,
+        [requestId]
+      );
+      if (previous.rows[0]) {
+        if (Number(previous.rows[0].clan_id) !== Number(clan.id) || Number(previous.rows[0].actor_player_id) !== Number(account.id)
+          || previous.rows[0].operation_kind !== "open_case" || previous.rows[0].product_key !== definition.key) throw new Error("contract_request_collision");
+        const result = jsonValue(previous.rows[0].result_data, {});
+        const contracts = await clanContractState(client, account, clan, requestOrigin);
+        await client.query("COMMIT");
+        return ok({ contracts, ...result, replayed: true });
+      }
+      const owner = await client.query("SELECT owner_player_id FROM clans WHERE id = $1 FOR UPDATE", [Number(clan.id)]);
+      if (!owner.rows[0] || Number(owner.rows[0].owner_player_id) !== Number(account.id)) throw new Error("clan_owner_required");
+      await changeClanContractWallet(client, clan.id, account.id, -definition.price, "case_open", "case", definition.key, { price: definition.price });
+      const reward = contractCaseReward(clan, definition);
+      if (reward.kind === "arm") await persistContractArm(client, clan, reward.armId, "clan_contract_case");
+      if (reward.kind === "enhancer") await persistContractEnhancer(client, clan, reward.enhancerId, reward.seconds, "clan_contract_case");
+      if (reward.kind === "refund") await changeClanContractWallet(client, clan.id, account.id, reward.amount, "case_refund", "case", definition.key, { source: "empty_catalog" });
+      const result = { reward, grantedArmId: reward.kind === "arm" ? reward.armId : 0 };
+      await client.query(
+        `INSERT INTO clan_contract_operations (clan_id, actor_player_id, request_id, operation_kind, product_key, amount, result_data)
+         VALUES ($1, $2, $3, 'open_case', $4, $5, $6::jsonb)`,
+        [Number(clan.id), Number(account.id), requestId, definition.key, definition.price, JSON.stringify(result)]
+      );
+      const contracts = await clanContractState(client, account, clan, requestOrigin);
+      await auditGameEvent(client, {
+        playerId: account.id, clanId: clan.id, clanName: clan.name, eventType: "clan_contract_case_open", category: "clan",
+        description: `Открыт ${definition.name}`, metadata: { caseKey: definition.key, requestId, reward }
+      });
+      await client.query("COMMIT");
+      return ok({ contracts, ...result });
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      const errorCode = error.code === "INSUFFICIENT_CONTRACT_MARKS" ? "insufficient_contract_marks" : String(error.message || "contract_case_open_failed");
+      return { result: false, error: errorCode };
+    } finally {
+      client.release();
+    }
+  });
+}
+
+async function advanceClanContractsFromSummary(client, event, playerId, details) {
+  if (!clanContractsAvailable() || event.contractEligible !== true) return null;
+  const matchInstanceId = String(event.matchInstanceId || "");
+  if (!validClanContractRequestId(matchInstanceId)) return null;
+  const metricEnd = event.eventData?.contractMetrics?.endedAt;
+  if (event.eventData?.contractMetrics?.version === 2) {
+    const ended = new Date(metricEnd);
+    if (!Number.isFinite(ended.getTime()) || clanContractCycleWindow(ended).cycleKey !== clanContractCycleWindow().cycleKey) return null;
+  }
+  const clan = playerClanRecord(playerId);
+  if (!clan || clan.deletedAt) return null;
+  // Match state/shop lock order: wallet -> cycle -> entries.
+  await ensureClanContractWallet(client, clan.id);
+  const cycleState = await ensureClanContractCycle(client, clan);
+  const receipt = await client.query(
+    `INSERT INTO clan_contract_match_receipts (clan_id, player_id, match_instance_id, cycle_id)
+     VALUES ($1, $2, $3::uuid, $4)
+     ON CONFLICT DO NOTHING
+     RETURNING match_instance_id`,
+    [Number(clan.id), Number(playerId), matchInstanceId, Number(cycleState.cycle.id)]
+  );
+  if (receipt.rows.length === 0) return null;
+  const deltas = {
+    battles: 1,
+    eliminations: Math.max(0, Math.trunc(eventNumber(event, details, "kills", 0))),
+    headshots: Math.max(0, Math.trunc(eventNumber(event, details, "headshots", 0))),
+    victories: Boolean(event.won ?? details.won) ? 1 : 0
+  };
+  const completed = [];
+  for (const entry of cycleState.entries) {
+    const advanced = entry.objective_spec?.version === 2 ? advanceQuest(entry, event, playerId) : null;
+    if (advanced && !entry.completed_at) {
+      await client.query('UPDATE clan_contract_entries SET objective_state=$2::jsonb WHERE id=$1', [Number(entry.id), JSON.stringify(advanced.state)]);
+    }
+    const offered = advanced ? Math.max(0, advanced.progress - Number(entry.current_value || 0)) : Number(deltas[entry.objective_key] || 0);
+    if (offered <= 0 || entry.completed_at) continue;
+    const before = Number(entry.current_value || 0);
+    const target = Number(entry.target_value || 0);
+    const accepted = Math.min(offered, Math.max(0, target - before));
+    if (accepted <= 0) continue;
+    const next = before + accepted;
+    const isCompleted = next >= target;
+    await client.query(
+      `UPDATE clan_contract_entries
+       SET current_value = $2, completed_at = CASE WHEN $3 THEN now() ELSE completed_at END
+       WHERE id = $1`,
+      [Number(entry.id), next, isCompleted]
+    );
+    await client.query(
+      `INSERT INTO clan_contract_contributions (contract_id, player_id, value)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (contract_id, player_id) DO UPDATE
+       SET value = clan_contract_contributions.value + EXCLUDED.value, updated_at = now()`,
+      [Number(entry.id), Number(playerId), accepted]
+    );
+    if (isCompleted) {
+      await changeClanContractWallet(client, clan.id, playerId, Number(entry.reward), "contract_complete", "contract", entry.id, { objective: entry.objective_key });
+      completed.push(entry.objective_key);
+    }
+  }
+  const completedCount = await client.query(
+    `SELECT COUNT(*)::int AS count FROM clan_contract_entries WHERE cycle_id = $1 AND completed_at IS NOT NULL`,
+    [Number(cycleState.cycle.id)]
+  );
+  let bonus = 0;
+  if (Number(completedCount.rows[0]?.count || 0) === 3 && !cycleState.cycle.bonus_completed_at) {
+    const claimed = await client.query(
+      `UPDATE clan_contract_cycles SET bonus_completed_at = now()
+       WHERE id = $1 AND bonus_completed_at IS NULL
+       RETURNING completion_bonus`,
+      [Number(cycleState.cycle.id)]
+    );
+    bonus = Number(claimed.rows[0]?.completion_bonus || 0);
+    if (bonus > 0) {
+      await changeClanContractWallet(client, clan.id, playerId, bonus, "cycle_complete", "cycle", cycleState.cycle.id, { cycleKey: String(cycleState.cycle.cycle_key) });
+    }
+  }
+  if (completed.length || bonus) {
+    await auditGameEvent(client, {
+      playerId, clanId: clan.id, clanName: clan.name, eventType: "clan_contract_progress", category: "clan",
+      description: "Обновлён прогресс ежедневных контрактов", metadata: { matchInstanceId, completed, bonus }
+    });
+  }
+  return { clanId: Number(clan.id), completed, bonus };
 }
 
 function hasInventoryItem(account, item) {
@@ -4969,14 +11705,7 @@ async function buyItemPostgres(account, item, price) {
       }
 
       const nextMoney = money - price;
-      const currentView = jsonValue(row.view, {});
-      const currentWeapons = jsonValue(row.weap, {});
-      const nextView = viewAfterPurchasedWear(currentView, itemData);
-      const nextWeapons = weaponSelectionAfterPurchasedWeapon(currentWeapons, itemData);
-      await client.query(
-        "UPDATE players SET money = $2, view = $3::jsonb, weap = $4::jsonb, updated_at = now() WHERE id = $1",
-        [Number(account.id), nextMoney, JSON.stringify(nextView), JSON.stringify(nextWeapons)]
-      );
+      await client.query("UPDATE players SET money = $2, updated_at = now() WHERE id = $1", [Number(account.id), nextMoney]);
       await client.query(
         `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
          VALUES ($1, $2, $3, $4::jsonb, now())
@@ -4998,23 +11727,15 @@ async function buyItemPostgres(account, item, price) {
           JSON.stringify(itemData)
         ]
       );
-      if (itemType === 1 || itemType === 3) {
-        await client.query(
-          `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
-           VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, now())
-           ON CONFLICT (player_id) DO UPDATE SET
-             view = EXCLUDED.view,
-             weap = EXCLUDED.weap,
-             updated_at = now()`,
-          [
-            Number(account.id),
-            JSON.stringify(nextView),
-            JSON.stringify(nextWeapons),
-            JSON.stringify(jsonValue(row.taun, {}))
-          ]
-        );
-      }
-
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "purchase",
+        category: itemType === 1 ? "weapons" : itemType === 3 ? "clothes" : "inventory",
+        description: `Покупка ${itemData.name || itemData.sn || inventoryItemKey(itemData)} за ${price} монет`,
+        oldValue: { balance: money },
+        newValue: { balance: nextMoney, itemKey: inventoryItemKey(itemData), itemId: inventoryItemId(itemData), itemType },
+        metadata: { price: Number(price), item: itemData }
+      });
       await client.query("COMMIT");
 
       const fresh = await loadPostgresAccount(account.id);
@@ -5022,7 +11743,7 @@ async function buyItemPostgres(account, item, price) {
         store.accounts[String(fresh.id)] = fresh;
       }
 
-      console.log(`[buy-item] pg player=${account.id} type=${itemType} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney} view=${viewSelectionSummary(nextView)} weap=${weaponSelectionSummary(nextWeapons)}`);
+      console.log(`[buy-item] pg player=${account.id} type=${itemType} key=${inventoryItemKey(itemData)} item=${inventoryItemId(itemData)} price=${price} before=${money} after=${nextMoney}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
       try {
@@ -5045,7 +11766,9 @@ async function buyItem(account, item) {
     console.error(`[buy-item] invalid weapon price player=${account.id} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price}`);
     return { result: false, err: [1] };
   }
-  if (pgPool) return buyItemPostgres(account, item, price);
+  if (pgPool) {
+    return buyItemPostgres(account, item, price);
+  }
   if (isWeaponItem(item) && hasInventoryItem(account, item)) {
     return ok({ req: "", vcur: account.money });
   }
@@ -5053,17 +11776,15 @@ async function buyItem(account, item) {
   if (!hasInventoryItem(account, item)) {
     account.inventory.push(clone(item));
   }
-  account.view = viewAfterPurchasedWear(account.view, item);
-  account.weap = weaponSelectionAfterPurchasedWeapon(account.weap, item);
   const beforeMoney = Number(account.money || 0);
   account.money -= price;
   recordPurchase(account, item, price);
   persist(account);
-  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money} view=${viewSelectionSummary(account.view)} weap=${weaponSelectionSummary(account.weap)}`);
+  console.log(`[buy-item] json player=${account.id} type=${Number(item?.itype || 0)} key=${inventoryItemKey(item)} item=${inventoryItemId(item)} price=${price} before=${beforeMoney} after=${account.money}`);
   return ok({ req: "", vcur: account.money });
 }
 
-async function buyEnhancerPostgres(account, item, duration, price) {
+async function buyTimedItemPostgres(account, item, duration, price) {
   return enqueuePostgresMutation(async () => {
     let client = null;
     try {
@@ -5103,7 +11824,8 @@ async function buyEnhancerPostgres(account, item, duration, price) {
       );
       await client.query(
         `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
-         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
+         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)
+        `,
         [
           Number(account.id),
           itemKey,
@@ -5113,6 +11835,15 @@ async function buyEnhancerPostgres(account, item, duration, price) {
           JSON.stringify(itemData)
         ]
       );
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "purchase",
+        category: Number(itemData?.itype || 0) === 4 ? "taunts" : "enhancers",
+        description: `Покупка ${itemData.name || itemData.sn || itemKey} на ${duration} за ${price} монет`,
+        oldValue: { balance: money, item: jsonValue(existing.rows[0]?.item_data, null) },
+        newValue: { balance: nextMoney, item: itemData },
+        metadata: { price: Number(price), duration, itemKey }
+      });
 
       await client.query("COMMIT");
 
@@ -5128,7 +11859,7 @@ async function buyEnhancerPostgres(account, item, duration, price) {
       } catch {
         // The original error is more useful for diagnostics.
       }
-      console.error("[postgres] buy enhancer failed", error);
+      console.error(`[postgres] buy timed item failed type=${Number(item?.itype || 0)} item=${inventoryItemId(item)}`, error);
       return { result: false, err: [1] };
     } finally {
       if (client) client.release();
@@ -5141,7 +11872,8 @@ async function buyEnhancer(account, item, duration) {
   if (Number(item.iC || 0) === 1) return { result: false, err: [1] };
   const selectedDuration = normalizeShopDuration(duration);
   const price = shopDurationPrice(item, selectedDuration);
-  if (pgPool) return buyEnhancerPostgres(account, item, selectedDuration, price);
+  if (!isValidShopPrice(price)) return { result: false, err: [1] };
+  if (pgPool) return buyTimedItemPostgres(account, item, selectedDuration, price);
   if (account.money < price) return { result: false, err: [2] };
   if (!Array.isArray(account.inventory)) account.inventory = [];
 
@@ -5156,6 +11888,29 @@ async function buyEnhancer(account, item, duration) {
   }
 
   account.money -= price;
+  persist(account);
+  return ok({ req: "", vcur: account.money });
+}
+
+async function buyTaunt(account, item, duration) {
+  if (!item) return { result: false, err: [1] };
+  const selectedDuration = normalizeShopDuration(duration);
+  const price = shopDurationPrice(item, selectedDuration);
+  if (!isValidShopPrice(price)) return { result: false, err: [1] };
+  if (pgPool) {
+    return buyTimedItemPostgres(account, item, selectedDuration, price);
+  }
+  if (account.money < price) return { result: false, err: [2] };
+  if (!Array.isArray(account.inventory)) account.inventory = [];
+
+  const existingItem = findOwnedInventoryItem(account, item);
+  const itemData = withPurchasedDuration(item, selectedDuration, existingItem);
+  const itemKey = inventoryItemKey(itemData);
+  const existingIndex = account.inventory.findIndex((owned) => inventoryItemKey(owned) === itemKey);
+  if (existingIndex >= 0) account.inventory[existingIndex] = itemData;
+  else account.inventory.push(itemData);
+  account.money -= price;
+  recordPurchase(account, itemData, price);
   persist(account);
   return ok({ req: "", vcur: account.money });
 }
@@ -5223,7 +11978,8 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
       );
       await client.query(
         `INSERT INTO purchase_history (player_id, item_key, item_type, item_id, price, currency, item_data)
-         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)`,
+         VALUES ($1, $2, $3, $4, $5, 'vcur', $6::jsonb)
+        `,
         [
           Number(account.id),
           itemKey,
@@ -5233,6 +11989,16 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
           JSON.stringify(itemData)
         ]
       );
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "weapon_upgrade",
+        category: "workshop",
+        severity: "notice",
+        description: `Улучшение оружия ${itemData.name || itemData.sn || itemKey} за ${price} монет`,
+        oldValue: { balance: money, item: existingItem },
+        newValue: { balance: nextMoney, item: itemData },
+        metadata: { price: Number(price), itemKey, upgradeId: inventoryItemId(itemData) }
+      });
 
       await client.query("COMMIT");
 
@@ -5264,7 +12030,9 @@ async function buyWeaponUpgrade(account, upgrade) {
     console.error(`[buy-weapon-upgrade] invalid price player=${account.id} key=${inventoryItemKey(upgrade)} item=${inventoryItemId(upgrade)} price=${price}`);
     return { result: false, err: [1] };
   }
-  if (pgPool) return buyWeaponUpgradePostgres(account, upgrade, price);
+  if (pgPool) {
+    return buyWeaponUpgradePostgres(account, upgrade, price);
+  }
   if (account.money < price) return { result: false, err: [2] };
   if (!Array.isArray(account.inventory)) account.inventory = [];
 
@@ -5552,11 +12320,21 @@ async function changeName(account, url) {
   if (initialSetRequested && !account.namePending) return { result: false, names: [], err: [{ n: 1 }] };
   if (invalidLength) return { result: false, names: [], err: [{ n: 301 }] };
   if (nameExists) return { result: false, names: [], err: [{ n: 302 }] };
+  const previousName = account.name;
   account.name = name;
   if (initialSetRequested) account.namePending = false;
   persist(account);
   refreshAllAccountClanSummaries(store);
   saveStore(store);
+  await auditGameEvent(pgPool, {
+    playerId: account.id,
+    eventType: "player_name_change",
+    category: "profile",
+    severity: "notice",
+    description: `Ник изменён: ${previousName} → ${account.name}`,
+    oldValue: { name: previousName },
+    newValue: { name: account.name }
+  });
   return ok({
     names: [],
     name: account.name,
@@ -5622,6 +12400,16 @@ async function buyAbilityPostgres(account, url) {
         [Number(account.id), Number(next.i), Number(next.l)]
       );
 
+      await auditGameEvent(client, {
+        playerId: account.id,
+        eventType: "purchase",
+        category: "abilities",
+        description: `Покупка способности #${next.i}, уровень ${next.l} за ${price} монет`,
+        oldValue: { balance: money, ability: abilities.find((owned) => Number(owned.i) === id) || null },
+        newValue: { balance: nextMoney, ability: { id: Number(next.i), level: Number(next.l) } },
+        metadata: { price: Number(price) }
+      });
+
       await client.query("COMMIT");
 
       const fresh = await loadPostgresAccount(account.id);
@@ -5658,6 +12446,271 @@ async function buyAbility(account, url) {
   return ok({ req: "" });
 }
 
+// Expedition persistent inventory is intentionally separate from the legacy weapon/
+// clothing inventory.  Its contents are only written by the battle-service endpoint.
+const EXPEDITION_STASH_WIDTH = 5;
+const EXPEDITION_STASH_HEIGHT = 4;
+const EXPEDITION_PAGE_COSTS = { 3: 10000, 4: 15000 };
+const EXPEDITION_ITEM_META = {
+  mat_industrial_dye: { type: "material", width: 1, height: 1 },
+  mat_rare_fabric: { type: "material", width: 1, height: 2 },
+  mat_chemical_reagents: { type: "material", width: 1, height: 1 },
+  mat_microchips: { type: "material", width: 1, height: 1 },
+  mat_rare_electronics: { type: "material", width: 2, height: 2 },
+  mat_weapon_alloy: { type: "material", width: 2, height: 1 },
+  mat_armored_fiber: { type: "material", width: 2, height: 2 },
+  coupon_100: { type: "coupon", width: 1, height: 1, value: 100 },
+  coupon_300: { type: "coupon", width: 1, height: 1, value: 300 },
+};
+
+function expeditionRunId(value) {
+  const id = String(value || "").trim().toLowerCase();
+  return /^[0-9a-f]{32}$/.test(id) ? id : "";
+}
+
+async function ensureExpeditionPages(client, playerId) {
+  await client.query(
+    `INSERT INTO expedition_stash_pages (player_id, page_index, unlocked)
+     VALUES ($1, 1, TRUE), ($1, 2, TRUE), ($1, 3, FALSE), ($1, 4, FALSE)
+     ON CONFLICT (player_id, page_index) DO NOTHING`,
+    [Number(playerId)]
+  );
+}
+
+function expeditionItemPayload(row) {
+  return {
+    id: String(row.id), itemId: row.item_id, type: row.item_type,
+    amount: Number(row.amount), value: Number(row.coupon_value || 0),
+    page: Number(row.page_index), x: Number(row.slot_x), y: Number(row.slot_y),
+    width: Number(row.width), height: Number(row.height),
+  };
+}
+
+async function expeditionState(account) {
+  if (!pgPool) return { result: false, error: "postgres_required" };
+  let client = null;
+  try {
+    client = await pgPool.connect();
+    await ensureExpeditionPages(client, account.id);
+    const [pages, items] = await Promise.all([
+      client.query(`SELECT page_index, unlocked FROM expedition_stash_pages WHERE player_id = $1 ORDER BY page_index`, [Number(account.id)]),
+      client.query(`SELECT id, page_index, slot_x, slot_y, width, height, item_id, item_type, amount, coupon_value
+                    FROM expedition_stash_items WHERE player_id = $1 ORDER BY page_index, slot_y, slot_x, id`, [Number(account.id)]),
+    ]);
+    return ok({
+      expedition: {
+        width: EXPEDITION_STASH_WIDTH, height: EXPEDITION_STASH_HEIGHT,
+        pages: pages.rows.map((page) => ({ index: Number(page.page_index), unlocked: Boolean(page.unlocked), price: EXPEDITION_PAGE_COSTS[Number(page.page_index)] || 0 })),
+        items: items.rows.map(expeditionItemPayload),
+      }
+    });
+  } catch (error) {
+    console.error(`[expedition] state failed player=${account?.id || 0}`, error);
+    return { result: false, error: "expedition_state_failed" };
+  } finally {
+    if (client) client.release();
+  }
+}
+
+async function expeditionUnlockPage(account, requestedPage) {
+  if (!pgPool) return { result: false, error: "postgres_required" };
+  const page = Number(requestedPage || 0);
+  const price = EXPEDITION_PAGE_COSTS[page];
+  if (!price) return { result: false, error: "invalid_page" };
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+      await ensureExpeditionPages(client, account.id);
+      const pageResult = await client.query(
+        `SELECT unlocked FROM expedition_stash_pages WHERE player_id = $1 AND page_index = $2 FOR UPDATE`,
+        [Number(account.id), page]
+      );
+      if (pageResult.rows[0]?.unlocked) {
+        await client.query("COMMIT");
+        return ok({ page, unlocked: true, idempotent: true, vcur: Number(account.money || 0) });
+      }
+      const playerResult = await client.query(`SELECT money FROM players WHERE id = $1 FOR UPDATE`, [Number(account.id)]);
+      const money = Number(playerResult.rows[0]?.money || 0);
+      if (money < price) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "not_enough_contrabucks" };
+      }
+      const nextMoney = money - price;
+      await client.query(`UPDATE players SET money = $2, updated_at = now() WHERE id = $1`, [Number(account.id), nextMoney]);
+      await client.query(`UPDATE expedition_stash_pages SET unlocked = TRUE, unlocked_at = now() WHERE player_id = $1 AND page_index = $2`, [Number(account.id), page]);
+      await client.query("COMMIT");
+      account.money = nextMoney;
+      const cached = store.accounts[String(account.id)];
+      if (cached && cached.key === account.key) cached.money = nextMoney;
+      return ok({ page, unlocked: true, price, vcur: nextMoney });
+    } catch (error) {
+      try { if (client) await client.query("ROLLBACK"); } catch {}
+      console.error(`[expedition] unlock failed player=${account?.id || 0}`, error);
+      return { result: false, error: "expedition_unlock_failed" };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function expeditionClaimCoupon(account, rawItemId) {
+  if (!pgPool) return { result: false, error: "postgres_required" };
+  const itemId = Number(rawItemId || 0);
+  if (!Number.isSafeInteger(itemId) || itemId <= 0) return { result: false, error: "invalid_coupon" };
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+      const itemResult = await client.query(
+        `SELECT id, coupon_value FROM expedition_stash_items
+         WHERE id = $1 AND player_id = $2 AND item_type = 'coupon' FOR UPDATE`,
+        [itemId, Number(account.id)]
+      );
+      const item = itemResult.rows[0];
+      if (!item) {
+        const redeemed = await client.query(`SELECT value FROM expedition_coupon_redemptions WHERE stash_item_id = $1 AND player_id = $2`, [itemId, Number(account.id)]);
+        await client.query("COMMIT");
+        return redeemed.rows[0]
+          ? ok({ couponId: String(itemId), awarded: Number(redeemed.rows[0].value), idempotent: true, vcur: Number(account.money || 0) })
+          : { result: false, error: "coupon_not_found" };
+      }
+      const value = Number(item.coupon_value || 0);
+      if (value <= 0) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "invalid_coupon" };
+      }
+      const redemption = await client.query(
+        `INSERT INTO expedition_coupon_redemptions (stash_item_id, player_id, value)
+         VALUES ($1, $2, $3) ON CONFLICT (stash_item_id) DO NOTHING RETURNING value`,
+        [itemId, Number(account.id), value]
+      );
+      if (!redemption.rows[0]) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "coupon_already_redeemed" };
+      }
+      const playerResult = await client.query(`SELECT money FROM players WHERE id = $1 FOR UPDATE`, [Number(account.id)]);
+      const nextMoney = Number(playerResult.rows[0]?.money || 0) + value;
+      await client.query(`DELETE FROM expedition_stash_items WHERE id = $1 AND player_id = $2`, [itemId, Number(account.id)]);
+      await client.query(`UPDATE players SET money = $2, updated_at = now() WHERE id = $1`, [Number(account.id), nextMoney]);
+      await client.query("COMMIT");
+      account.money = nextMoney;
+      const cached = store.accounts[String(account.id)];
+      if (cached && cached.key === account.key) cached.money = nextMoney;
+      return ok({ couponId: String(itemId), awarded: value, vcur: nextMoney });
+    } catch (error) {
+      try { if (client) await client.query("ROLLBACK"); } catch {}
+      console.error(`[expedition] coupon claim failed player=${account?.id || 0} item=${itemId}`, error);
+      return { result: false, error: "expedition_coupon_failed" };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+function expeditionSlotFits(items, page, x, y, width, height) {
+  for (const item of items) {
+    if (Number(item.page_index) !== page) continue;
+    const overlapX = x < Number(item.slot_x) + Number(item.width) && x + width > Number(item.slot_x);
+    const overlapY = y < Number(item.slot_y) + Number(item.height) && y + height > Number(item.slot_y);
+    if (overlapX && overlapY) return false;
+  }
+  return true;
+}
+
+function expeditionFirstFreeSlot(items, pages, meta) {
+  for (const page of pages) {
+    if (!page.unlocked) continue;
+    for (let y = 0; y <= EXPEDITION_STASH_HEIGHT - meta.height; y += 1) {
+      for (let x = 0; x <= EXPEDITION_STASH_WIDTH - meta.width; x += 1) {
+        if (expeditionSlotFits(items, Number(page.page_index), x, y, meta.width, meta.height)) return { page: Number(page.page_index), x, y };
+      }
+    }
+  }
+  return null;
+}
+
+function expeditionSanitizeLoot(rawLoot) {
+  if (!Array.isArray(rawLoot) || rawLoot.length > 36) return null;
+  const result = [];
+  for (const raw of rawLoot) {
+    const itemId = String(raw?.itemId || raw?.id || "").trim();
+    const meta = EXPEDITION_ITEM_META[itemId];
+    const amount = Number(raw?.amount || 0);
+    if (!meta || !Number.isInteger(amount) || amount < 1 || amount > 100) return null;
+    result.push({ itemId, amount, meta });
+  }
+  return result;
+}
+
+async function battleExpeditionComplete(body) {
+  if (!pgPool) return { ok: false, error: "postgres_required", status: 503 };
+  const playerId = Number(body?.playerId || 0);
+  const runId = expeditionRunId(body?.runId || body?.clientRunId);
+  const result = String(body?.result || "").toLowerCase();
+  const highestWave = Math.max(0, Math.min(50, Math.trunc(Number(body?.highestWave || 0))));
+  const playerCount = Math.max(1, Math.min(4, Math.trunc(Number(body?.playerCount || 1))));
+  const roomName = String(body?.roomName || "").slice(0, 96);
+  const loot = expeditionSanitizeLoot(body?.loot || []);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0 || !runId || !["evacuated", "wiped"].includes(result) || !loot) return { ok: false, error: "invalid_expedition_result", status: 400 };
+  if (result === "wiped" && loot.length) return { ok: false, error: "wiped_run_cannot_transfer_loot", status: 400 };
+  return enqueuePostgresMutation(async () => {
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+      await ensureExpeditionPages(client, playerId);
+      const existingResult = await client.query(
+        `SELECT state FROM expedition_runs WHERE player_id = $1 AND client_run_id = $2 FOR UPDATE`, [playerId, runId]
+      );
+      if (existingResult.rows[0]) {
+        await client.query("COMMIT");
+        return { ok: true, idempotent: true, result: existingResult.rows[0].state };
+      }
+      const pagesResult = await client.query(`SELECT page_index, unlocked FROM expedition_stash_pages WHERE player_id = $1 ORDER BY page_index FOR UPDATE`, [playerId]);
+      const itemsResult = await client.query(`SELECT page_index, slot_x, slot_y, width, height FROM expedition_stash_items WHERE player_id = $1 FOR UPDATE`, [playerId]);
+      const staged = [];
+      const occupied = itemsResult.rows.slice();
+      if (result === "evacuated") {
+        for (const lootItem of loot) {
+          for (let amountIndex = 0; amountIndex < lootItem.amount; amountIndex += 1) {
+            const slot = expeditionFirstFreeSlot(occupied, pagesResult.rows, lootItem.meta);
+            if (!slot) {
+              await client.query("ROLLBACK");
+              return { ok: false, error: "expedition_stash_full", status: 409 };
+            }
+            const row = { page_index: slot.page, slot_x: slot.x, slot_y: slot.y, width: lootItem.meta.width, height: lootItem.meta.height };
+            occupied.push(row);
+            staged.push({ ...row, itemId: lootItem.itemId, meta: lootItem.meta });
+          }
+        }
+        for (const item of staged) {
+          await client.query(
+            `INSERT INTO expedition_stash_items (player_id, page_index, slot_x, slot_y, width, height, item_id, item_type, amount, coupon_value)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,$9)`,
+            [playerId, item.page_index, item.slot_x, item.slot_y, item.width, item.height, item.itemId, item.meta.type, Number(item.meta.value || 0)]
+          );
+        }
+      }
+      await client.query(
+        `INSERT INTO expedition_runs (player_id, client_run_id, room_name, player_count, state, highest_wave, loot, finished_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now())`,
+        [playerId, runId, roomName, playerCount, result, highestWave, JSON.stringify(loot.map(({ itemId, amount }) => ({ itemId, amount })))]
+      );
+      await client.query("COMMIT");
+      return { ok: true, result, transferredItems: staged.length };
+    } catch (error) {
+      try { if (client) await client.query("ROLLBACK"); } catch {}
+      console.error(`[expedition] battle completion failed player=${playerId} run=${runId}`, error);
+      return { ok: false, error: "expedition_complete_failed", status: 500 };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
 async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
   const { page, act } = normalizedAjaxRoute(url);
   let account = resolvedAccount || accountFrom(url);
@@ -5665,6 +12718,9 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     return { result: false, error: "1" };
   }
   if (!resolvedAccount && !isEquipmentSelectionSaveRequest(url)) account = await refreshAccountFromPostgres(account);
+
+  if (page === "staff") return staffAjaxPayload(pgPool, account, act, url.searchParams);
+  if (page === "clan_wars") return clanWars.ajax(Number(account.id), act || "state", url.searchParams);
 
   if (page === "auth" && act === "g") {
     return ok({ user_id: String(account.id), key: account.key });
@@ -5676,10 +12732,45 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "cname" || act === "cpname") return changeName(account, url);
   }
 
+  if (page === "bp" && act === "state") {
+    if (!pgPool) {
+      return { result: false, error: "postgres_required" };
+    }
+    const state = await loadStoreEntitlements(pgPool, Number(account.id), false);
+    const season = await loadActiveBattlePassSeason(pgPool);
+    const casePending = await pendingCaseOpeningForPlayer(pgPool, Number(account.id));
+    return ok({
+      battlePass: storeEntitlementPayload(state, season),
+      caseOpen: battlePassCaseAccessPayload(account, requestOrigin),
+      casePending
+    });
+  }
+
+  if (page === "expedition" || page === "rogue") {
+    if (act === "state") return expeditionState(account);
+    if (act === "unlock_page") return expeditionUnlockPage(account, url.searchParams.get("page"));
+    if (act === "claim_coupon") return expeditionClaimCoupon(account, url.searchParams.get("item") || url.searchParams.get("itemId"));
+    // The battle service, not the client, creates a run result and transfers its loot.
+    if (act === "start") return ok({ expedition: { accepted: true } });
+    if (act === "complete") return { result: false, error: "battle_service_required" };
+    return { result: false, error: "unknown_expedition_action" };
+  }
+
+
   if (page === "pl") {
     if (act === "i") {
       const objectLoadout = usesProfileObjectLoadout(account, url);
-      return advancedStatsPayload(await profileAccountForView(account, url), { objectLoadout });
+      const payload = advancedStatsPayload(
+        await profileAccountForView(account, url),
+        { objectLoadout }
+      );
+      if (url.searchParams.get("ai") === "1") {
+        const deliveredItems = await claimPendingInventoryDeliveries(account.id);
+        if (deliveredItems.length) {
+          payload.addItem = deliveredItems;
+        }
+      }
+      return payload;
     }
     if (act === "inv") return inventoryPayload(account);
     if (act === "map") return mapsPayload();
@@ -5708,8 +12799,15 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "bweap") return await buyItem(account, findShopItem(shopWeapons, "w_id", id));
     if (act === "bweapupg") return await buyWeaponUpgrade(account, shopWeaponUpgradesById.get(id));
     if (act === "bwear") return await buyItem(account, findShopItem(shopWears, "w_id", id));
-    if (act === "btaunt") return await buyItem(account, findShopItem(shopTaunts, "t_id", id));
-    if (act === "benh") return await buyEnhancer(account, findShopItem(shopEnhancers, "e_id", id), url.searchParams.get("dur"));
+    if (act === "btaunt") return await buyTaunt(account, findShopItem(shopTaunts, "t_id", id), url.searchParams.get("dur"));
+    if (act === "benh") {
+      const enhancerItem = canonicalEnhancersById.get(id);
+      return await buyEnhancer(
+        account,
+        enhancerItem && Number(enhancerItem.iC || 0) === 0 ? enhancerItem : null,
+        url.searchParams.get("dur")
+      );
+    }
     if (act === "babil") return await buyAbility(account, url);
     if (act === "bmap") return ok({ req: "" });
     return { result: false, err: [1] };
@@ -5719,7 +12817,32 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
     if (act === "league") return await leaguePayload(account);
     if (act === "ybest") return await yesterdayBestPayload(account);
     if (act === "rat") return await ratingPayload(account, url);
-    if (act === "reset") return ok({ req: "" });
+    if (act === "reset") return await resetStatistic(account, url);
+  }
+
+  if (page === "clan_contracts") {
+    if (act === "state") return await clanContractStateResponse(account, requestOrigin);
+    if (act === "buy_banner" || act === "equip_banner") {
+      return await mutateClanBanner(account, act, url.searchParams.get("banner"), url.searchParams.get("rid"),
+        url.searchParams.get("cid"), url.searchParams.get("revision"), requestOrigin);
+    }
+    if (act === "buy") {
+      return await purchaseClanContractArm(
+        account,
+        Number(url.searchParams.get("arm") || 0),
+        url.searchParams.get("rid"),
+        requestOrigin
+      );
+    }
+    if (act === "open_case") {
+      return await openClanContractCase(
+        account,
+        url.searchParams.get("case"),
+        url.searchParams.get("rid"),
+        requestOrigin
+      );
+    }
+    return { result: false, error: "unknown_contract_action" };
   }
 
   if (page === "clan") {
@@ -5730,13 +12853,14 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
 }
 
 function requestPublicOrigin(req, url) {
-  const forwardedHost = TRUST_PROXY_HEADERS
+  const trustedCloudFront = hasValidCloudFrontOrigin(req);
+  const forwardedHost = trustedCloudFront
     ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim()
     : "";
   const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
   if (!host) return url.origin;
-  const forwardedProto = TRUST_PROXY_HEADERS
-    ? String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
+  const forwardedProto = trustedCloudFront
+    ? String(req.headers["cloudfront-forwarded-proto"] || req.headers["x-forwarded-proto"] || "").split(",")[0].trim()
     : "";
   const proto = forwardedProto || url.protocol.replace(/:$/, "") || "http";
   return `${proto}://${host}`;
@@ -5752,8 +12876,13 @@ function securityHeaders() {
   };
 }
 
-function sendJson(res, payload, status = 200, headers = {}) {
-  const body = JSON.stringify(payload);
+function jsonAsciiEscape(body) {
+  return body.replace(/[\u007f-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+function sendJson(res, payload, status = 200, headers = {}, options = {}) {
+  const json = JSON.stringify(payload);
+  const body = options.ascii ? jsonAsciiEscape(json) : json;
   res.writeHead(status, {
     ...securityHeaders(),
     "content-type": "application/json; charset=utf-8",
@@ -5777,9 +12906,11 @@ function sendHtml(res, html, status = 200, headers = {}) {
   res.end(html);
 }
 
-function createAccountPage(url, requestOrigin = null) {
+async function createAccountPage(url, requestOrigin = null) {
   const code = url.searchParams.get("code") || "";
+  const submitted = url.searchParams.has("name") || url.searchParams.has("count");
   const name = cleanName(url.searchParams.get("name") || "");
+  const requestedCount = Number(url.searchParams.get("count") || 1);
   if (code && !safeTokenEquals(code, CREATE_CODE)) {
     return {
       status: 403,
@@ -5787,31 +12918,59 @@ function createAccountPage(url, requestOrigin = null) {
     };
   }
 
-  if (safeTokenEquals(code, CREATE_CODE) && name) {
-    const account = createNewAccount(name);
-    const session = sessionPayload(account, requestOrigin);
-    console.log(`[game-link] create player=${account.id} name=${account.name} link=${session.loginLink}`);
+  if (safeTokenEquals(code, CREATE_CODE) && submitted) {
+    if (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > CREATE_BATCH_MAX) {
+      return {
+        status: 400,
+        html: `<h1>\u041d\u0435\u0432\u0435\u0440\u043d\u043e\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e</h1><p>\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0446\u0435\u043b\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442 1 \u0434\u043e ${CREATE_BATCH_MAX}.</p>`
+      };
+    }
+
+    let accounts;
+    try {
+      accounts = await createNewAccounts(name, requestedCount);
+    } catch (error) {
+      console.error(`[game-link] batch create failed count=${requestedCount}`, error);
+      return {
+        status: 500,
+        html: "<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442\u044b \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u044b</h1><p>\u041f\u0430\u043a\u0435\u0442\u043d\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u0430\u0437\u0443 \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043b\u043e\u0433 API.</p>"
+      };
+    }
+
+    const created = accounts.map((account) => ({
+      account,
+      session: sessionPayload(account, requestOrigin)
+    }));
+    const firstId = accounts[0]?.id || 0;
+    const lastId = accounts[accounts.length - 1]?.id || 0;
+    console.log(`[game-link] batch created count=${accounts.length} ids=${firstId}-${lastId}`);
+    const links = created.map(({ session }) => session.loginLink).join("\n");
+    const rows = created.map(({ account, session }, index) =>
+      `<li><b>${index + 1}. #${account.id}</b> \u2014 <a href="${escapeHtml(session.loginLink)}">${escapeHtml(session.loginLink)}</a></li>`
+    ).join("\n");
     return {
       status: 200,
-      html: `<h1>\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0441\u043e\u0437\u0434\u0430\u043d</h1>
-<p>\u041d\u0438\u043a: <b>${escapeHtml(account.name)}</b></p>
-<p>\u0421\u0442\u0430\u0440\u0442: \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${account.level}, \u043c\u043e\u043d\u0435\u0442\u044b ${account.money}, \u043e\u043f\u044b\u0442 ${account.exp}</p>
-<p>\u0418\u0433\u0440\u043e\u0432\u0430\u044f \u0441\u0441\u044b\u043b\u043a\u0430:</p>
-<p><code>${escapeHtml(session.loginLink)}</code></p>
-<p>SessionAuth:</p>
-<p><code>${escapeHtml(session.sessionAuth)}</code></p>
-<p>\u0412 \u043a\u043b\u0438\u0435\u043d\u0442\u0435 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0432\u0445\u043e\u0434 \u0447\u0435\u0440\u0435\u0437 \u043f\u043e\u043b\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443, \u0432\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u044d\u0442\u0443 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438 \u043d\u0430\u0436\u043c\u0438\u0442\u0435 "\u0412\u043e\u0439\u0442\u0438".</p>`
+      html: `<main style="font:16px/1.45 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 20px">
+<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u043e \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432: ${accounts.length}</h1>
+<p>\u0412\u0441\u0435 \u0438\u0433\u0440\u043e\u0432\u044b\u0435 \u0441\u0441\u044b\u043b\u043a\u0438 \u043f\u043e \u043e\u0434\u043d\u043e\u0439 \u043d\u0430 \u0441\u0442\u0440\u043e\u043a\u0435. \u041a\u043b\u0438\u043a\u043d\u0438\u0442\u0435 \u0432 \u043f\u043e\u043b\u0435, \u043d\u0430\u0436\u043c\u0438\u0442\u0435 Ctrl+A, \u0437\u0430\u0442\u0435\u043c Ctrl+C.</p>
+<textarea readonly rows="${Math.min(30, Math.max(4, accounts.length))}" style="box-sizing:border-box;width:100%;font:13px/1.5 ui-monospace,monospace;padding:12px">${escapeHtml(links)}</textarea>
+<ol style="padding-left:24px;overflow-wrap:anywhere">${rows}</ol>
+<p><a href="/create?code=${encodeURIComponent(code)}">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0435\u0449\u0451 \u043e\u0434\u0438\u043d \u043f\u0430\u043a\u0435\u0442</a></p>
+</main>`
     };
   }
 
   return {
     status: 200,
-    html: `<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430 Contra City</h1>
+    html: `<main style="font:16px/1.45 system-ui,sans-serif;max-width:680px;margin:32px auto;padding:0 20px">
+<h1>\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432 Contra City</h1>
 <form method="GET" action="/create">
-  <label>\u041a\u043e\u0434<br><input name="code" value="${escapeHtml(code)}" style="width:320px"></label><br><br>
-  <label>\u041d\u0438\u043a<br><input name="name" value="ContraCity" maxlength="24" style="width:320px"></label><br><br>
-  <button type="submit">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0430\u043a\u043a\u0430\u0443\u043d\u0442</button>
-</form>`
+  <label>\u041a\u043e\u0434<br><input name="code" value="${escapeHtml(code)}" required style="box-sizing:border-box;width:100%;padding:8px"></label><br><br>
+  <label>\u0421\u0442\u0430\u0440\u0442\u043e\u0432\u044b\u0439 \u043d\u0438\u043a<br><input name="name" value="ContraCity" maxlength="24" required style="box-sizing:border-box;width:100%;padding:8px"></label><br><br>
+  <label>\u0421\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0441\u044b\u043b\u043e\u043a \u0441\u043e\u0437\u0434\u0430\u0442\u044c (1\u2013${CREATE_BATCH_MAX})<br><input type="number" name="count" value="1" min="1" max="${CREATE_BATCH_MAX}" step="1" required style="box-sizing:border-box;width:100%;padding:8px"></label><br><br>
+  <button type="submit" style="padding:10px 18px">\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0441\u0441\u044b\u043b\u043a\u0438</button>
+</form>
+</main>`
   };
 }
 
@@ -5840,6 +12999,22 @@ function tryServeAssetBundle(req, res, url) {
     return true;
   }
 
+  const remoteUrl = REMOTE_ASSET_BUNDLE_URLS.get(fileName.toLowerCase());
+  if (remoteUrl) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return true;
+    }
+    res.writeHead(302, {
+      location: remoteUrl,
+      "cache-control": "no-store, no-cache, must-revalidate",
+      pragma: "no-cache",
+      expires: "0"
+    });
+    res.end();
+    return true;
+  }
+
   const filePath = path.join(ASSET_BUNDLE_DIR, fileName);
   if (!fs.existsSync(filePath)) {
     sendJson(res, { ok: false, error: "asset_bundle_not_found", file: fileName }, 404);
@@ -5855,6 +13030,111 @@ function tryServeAssetBundle(req, res, url) {
     "expires": "0"
   });
   fs.createReadStream(filePath).pipe(res);
+  return true;
+}
+
+function tryServeLauncherRelease(req, res, url) {
+  const manifestRequest = url.pathname === "/launcher/update.json";
+  const signatureRequest = url.pathname === "/launcher/update.json.sig";
+  const releaseMatch = /^\/launcher\/releases\/([0-9A-Za-z._-]{1,64})\/ContraCityLauncher\.exe$/.exec(url.pathname);
+  const fixedRuntimeMatch = /^\/launcher\/webview2-fixed\/([0-9.]{1,32})\/(Microsoft\.WebView2\.FixedVersionRuntime\.([0-9.]{1,32})\.x64\.cab)$/.exec(url.pathname);
+  if (!manifestRequest && !signatureRequest && !releaseMatch && !fixedRuntimeMatch) return false;
+
+  if (fixedRuntimeMatch && fixedRuntimeMatch[1] !== fixedRuntimeMatch[3]) {
+    sendJson(res, { ok: false, error: "launcher_release_not_found" }, 404);
+    return true;
+  }
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+    return true;
+  }
+
+  let filePath;
+  let contentType;
+  let cacheControl;
+  if (manifestRequest) {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, "update.json");
+    contentType = "application/json; charset=utf-8";
+    cacheControl = "no-store, no-cache, must-revalidate";
+  } else if (signatureRequest) {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, "update.json.sig");
+    contentType = "text/plain; charset=us-ascii";
+    cacheControl = "no-store, no-cache, must-revalidate";
+  } else if (fixedRuntimeMatch) {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, "webview2-fixed", fixedRuntimeMatch[1], fixedRuntimeMatch[2]);
+    contentType = "application/vnd.ms-cab-compressed";
+    cacheControl = "public, max-age=31536000, immutable";
+  } else {
+    filePath = path.join(LAUNCHER_RELEASE_DIR, releaseMatch[1], "ContraCityLauncher.exe");
+    contentType = "application/octet-stream";
+    cacheControl = "public, max-age=31536000, immutable";
+  }
+
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    sendJson(res, { ok: false, error: "launcher_release_not_found" }, 404);
+    return true;
+  }
+
+  const stat = fs.statSync(filePath);
+  // update.json is signed byte-for-byte. Some deployment paths append a final
+  // line break to text files, so publish the canonical JSON bytes that the
+  // release signer produced. The signature file itself is trimmed by the
+  // launcher after download and does not need normalization here.
+  let canonicalManifest = null;
+  if (manifestRequest) {
+    canonicalManifest = fs.readFileSync(filePath);
+    let canonicalLength = canonicalManifest.length;
+    while (canonicalLength > 0 && (canonicalManifest[canonicalLength - 1] === 0x0a || canonicalManifest[canonicalLength - 1] === 0x0d)) {
+      canonicalLength -= 1;
+    }
+    canonicalManifest = canonicalManifest.subarray(0, canonicalLength);
+  }
+  const responseSize = canonicalManifest ? canonicalManifest.length : stat.size;
+  const headers = {
+    ...securityHeaders(),
+    "content-type": contentType,
+    "cache-control": cacheControl,
+    "accept-ranges": "bytes",
+    "last-modified": stat.mtime.toUTCString()
+  };
+  if (releaseMatch) headers["content-disposition"] = "attachment; filename=\"ContraCityLauncher.exe\"";
+  if (fixedRuntimeMatch) headers["content-disposition"] = `attachment; filename="${fixedRuntimeMatch[2]}"`;
+
+  let start = 0;
+  let end = responseSize - 1;
+  let status = 200;
+  const range = String(req.headers.range || "").trim();
+  if (range) {
+    const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+    if (!match) {
+      res.writeHead(416, { ...headers, "content-range": `bytes */${responseSize}`, "content-length": "0" });
+      res.end();
+      return true;
+    }
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : end;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= responseSize || end < start) {
+      res.writeHead(416, { ...headers, "content-range": `bytes */${responseSize}`, "content-length": "0" });
+      res.end();
+      return true;
+    }
+    end = Math.min(end, responseSize - 1);
+    status = 206;
+    headers["content-range"] = `bytes ${start}-${end}/${responseSize}`;
+  }
+
+  headers["content-length"] = String(end - start + 1);
+  res.writeHead(status, headers);
+  if (req.method === "HEAD") {
+    res.end();
+    return true;
+  }
+  if (canonicalManifest) {
+    res.end(canonicalManifest.subarray(start, end + 1));
+    return true;
+  }
+  fs.createReadStream(filePath, { start, end }).pipe(res);
   return true;
 }
 
@@ -5984,11 +13264,13 @@ function battleEventPlayerName(event, details, playerId, fallbackName = "") {
   const currentId = Number(event?.playerId || 0);
   const killerId = Number(event?.killerPlayerId || details?.killerPlayerId || 0);
   const victimId = Number(event?.victimPlayerId || details?.victimPlayerId || 0);
+  const targetId = Number(event?.targetPlayerId || details?.targetPlayerId || 0);
   const playerData = asBattleJson(event?.playerData);
   const candidates = [
     id === currentId ? event?.playerName : "",
     id === killerId ? (event?.killerPlayerName || details?.killerPlayerName) : "",
     id === victimId ? (event?.victimPlayerName || details?.victimPlayerName) : "",
+    id === targetId ? (event?.targetPlayerName || details?.targetPlayerName) : "",
     id === currentId ? (playerData.name || playerData.n || playerData.un) : "",
     fallbackName
   ];
@@ -6108,6 +13390,29 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
     return;
   }
 
+  if (type === "exp") {
+    const expAwarded = eventNumber(event, details, "expAwarded", 0);
+    if (playerId > 0 && expAwarded > 0) {
+      const expResult = await awardPlayerExperience(client, playerId, expAwarded, "battle_server_enhancer");
+      if (expResult) {
+        details.expAwarded = expAwarded;
+        details.expResult = expResult;
+      }
+      const clan = playerClanRecord(playerId);
+      const member = clan?.members?.[String(playerId)];
+      const exp2clan = eventNumber(event, details, "exp2clan", 0)
+        || Math.round(expAwarded * Number(member?.expKoef || 0) / 100);
+      if (exp2clan > 0) {
+        const clanExpResult = await awardClanExperience(client, playerId, exp2clan);
+        if (clanExpResult) {
+          details.exp2clan = exp2clan;
+          details.clanExpResult = clanExpResult;
+        }
+      }
+    }
+    return;
+  }
+
   if (type === "death" || type === "score") {
     const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
     const victimPlayerId = Number(event.victimPlayerId || details.victimPlayerId || playerId || 0);
@@ -6150,7 +13455,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
         nuts
       });
       if (expAwarded > 0) {
-        const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded);
+        const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded, "battle_server");
         if (expResult) {
           details.expAwarded = expAwarded;
           details.expResult = expResult;
@@ -6194,7 +13499,38 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
         [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false]
       );
     }
+    // Contract accounting consumes only the authoritative per-session summary
+    // produced by battle-server. Death/score events intentionally do not
+    // advance this system, otherwise one elimination can be counted twice.
+    const contracts = await advanceClanContractsFromSummary(client, event, playerId, details);
+    if (contracts) details.contracts = contracts;
   }
+}
+
+async function recordBattleSecurityEvent(event = {}) {
+  if (!pgPool) return { ok: true, storage: "json-file", ignored: true };
+  const kind = String(event.kind || event.type || "udp_suspicious_activity").replace(/[^a-z0-9_-]/gi, "_").slice(0, 80);
+  const playerId = Number(event.playerId || event.accountId || 0);
+  const ipAddress = String(event.ipAddress || event.ip || "").slice(0, 128);
+  const severity = ["notice", "warning", "critical"].includes(event.severity) ? event.severity : "warning";
+  await writeAuditEvent(pgPool, {
+    playerId: Number.isInteger(playerId) && playerId > 0 ? playerId : null,
+    eventType: `security_${kind}`,
+    category: "security",
+    severity,
+    suspicious: true,
+    description: String(event.description || `Подозрительная UDP-активность: ${kind}`).slice(0, 1000),
+    source: "battle_server_security",
+    ipAddress,
+    metadata: {
+      ...asBattleJson(event.metadata || event.details || {}),
+      port: Number(event.port || 0),
+      count: Number(event.count || 0),
+      durationMs: Number(event.durationMs || 0),
+      stage: String(event.stage || "preauth").slice(0, 40),
+    },
+  });
+  return { ok: true, storage: "postgres", type: kind };
 }
 
 async function recordBattleEvent(event) {
@@ -6208,6 +13544,9 @@ async function recordBattleEvent(event) {
   const mode = normalizeStatsMode(event.mode || 2);
   const maxPlayers = Number(event.maxPlayers || 8);
   const playerId = Number(event.playerId || account.id || 1);
+  if (await activePlayerBan(playerId)) {
+    return { ok: false, status: 403, error: "account_banned" };
+  }
   const actorId = Number(event.actorId || 1);
   const team = Number(event.team ?? -1);
   const health = Number(event.health ?? 100);
@@ -6228,6 +13567,9 @@ async function recordBattleEvent(event) {
     if (type === "death" || type === "score") {
       await upsertBattleEventPlayer(client, event, details, Number(event.killerPlayerId || details.killerPlayerId || 0));
       await upsertBattleEventPlayer(client, event, details, Number(event.victimPlayerId || details.victimPlayerId || 0));
+    }
+    if (type === "player_report") {
+      await upsertBattleEventPlayer(client, event, details, Number(event.targetPlayerId || details.targetPlayerId || 0));
     }
 
     const room = await client.query(
@@ -6281,10 +13623,31 @@ async function recordBattleEvent(event) {
          VALUES ($1, $2, $3, $4, $5)`,
         [roomId, playerId, actorId, Number(event.channel || 0), String(event.message).slice(0, 500)]
       );
+    } else if (type === "player_report") {
+      const targetPlayerId = Number(event.targetPlayerId || details.targetPlayerId || 0);
+      const targetActorId = Number(event.targetActorId || details.targetActorId || 0);
+      const reportReason = String(event.reportReason || details.reason || "").trim().toLowerCase();
+      const reportDetails = String(event.reportDetails || details.details || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 700);
+      if (!Number.isInteger(targetPlayerId) || targetPlayerId <= 0 || targetPlayerId === playerId) {
+        throw new Error("invalid_player_report_target");
+      }
+      if (!["cheats", "abuse", "voice_abuse", "griefing", "other"].includes(reportReason)) {
+        throw new Error("invalid_player_report_reason");
+      }
+      if (reportReason === "other" && reportDetails.length < 3) {
+        throw new Error("player_report_details_required");
+      }
+      await client.query(
+        `INSERT INTO player_reports (
+           room_id, reporter_player_id, target_player_id, reporter_actor_id, target_actor_id,
+           room_name, map_name, mode, reason, details
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [roomId, playerId, targetPlayerId, actorId, targetActorId, roomName, mapName, mode, reportReason, reportDetails]
+      );
     }
 
     await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
-
     const achievements = [];
     const achievementPlayerIds = new Set();
     if (type === "death" || type === "score") {
@@ -6295,7 +13658,74 @@ async function recordBattleEvent(event) {
       achievementPlayerIds.add(playerId);
     }
     for (const achievementPlayerId of achievementPlayerIds) {
-      achievements.push(...await syncPostgresAchievements(client, achievementPlayerId));
+      const newlyCompleted = await syncPostgresAchievements(client, achievementPlayerId);
+      achievements.push(...newlyCompleted);
+    }
+
+    const remoteIp = String(event.playerData?.remote || details.remote || "").slice(0, 128);
+    if (type === "join" || type === "leave") {
+      await touchPlayerActivity(client, {
+        playerId,
+        kind: type === "join" ? "login" : "logout",
+        ipAddress: remoteIp,
+        source: "battle_server"
+      });
+      await writeAuditEvent(client, {
+        playerId,
+        playerName: event.playerName,
+        eventType: type === "join" ? "player_login" : "player_logout",
+        category: "session",
+        severity: "info",
+        description: type === "join" ? `Игрок вошёл в бой ${roomName}` : `Игрок вышел из боя ${roomName}`,
+        source: "battle_server",
+        ipAddress: remoteIp,
+        metadata: { roomName, mapName, mode, actorId, serverPort }
+      });
+    }
+    if (type === "summary") {
+      await writeAuditEvent(client, {
+        playerId,
+        playerName: event.playerName,
+        eventType: "statistics_change",
+        category: "battle",
+        description: `Обновлена статистика матча на карте ${mapName}`,
+        newValue: details,
+        source: "battle_server",
+        metadata: { roomName, mapName, mode }
+      });
+    }
+    if (type === "death" || type === "score") {
+      const killerId = Number(event.killerPlayerId || details.killerPlayerId || 0);
+      const victimId = Number(event.victimPlayerId || details.victimPlayerId || 0);
+      const combatValue = {
+        roomName,
+        mapName,
+        mode,
+        weaponId: Number(event.weaponId || details.weaponId || 0),
+        hitZone: Number(event.hitZone || details.hitZone || 0),
+        killerPlayerId: killerId,
+        victimPlayerId: victimId
+      };
+      if (killerId > 0 && killerId !== victimId) {
+        await writeAuditEvent(client, {
+          playerId: killerId,
+          eventType: "battle_kill",
+          category: "battle",
+          description: `Убийство игрока #${victimId} на карте ${mapName}`,
+          newValue: combatValue,
+          source: "battle_server"
+        });
+      }
+      if (victimId > 0) {
+        await writeAuditEvent(client, {
+          playerId: victimId,
+          eventType: "battle_death",
+          category: "battle",
+          description: `Смерть от игрока #${killerId} на карте ${mapName}`,
+          newValue: combatValue,
+          source: "battle_server"
+        });
+      }
     }
 
     await client.query("COMMIT");
@@ -6310,17 +13740,72 @@ async function recordBattleEvent(event) {
 
 ensureDesktopAccount();
 
-const server = http.createServer(async (req, res) => {
+function acquireHttpRequestSlot(req, res) {
+  const ip = requestClientIp(req);
+  const ipActive = Number(httpInFlightByIp.get(ip) || 0);
+  if (httpInFlight >= MAX_HTTP_IN_FLIGHT || ipActive >= MAX_HTTP_IN_FLIGHT_PER_IP) return false;
+  httpInFlight += 1;
+  httpInFlightByIp.set(ip, ipActive + 1);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    httpInFlight = Math.max(0, httpInFlight - 1);
+    const remaining = Number(httpInFlightByIp.get(ip) || 0) - 1;
+    if (remaining > 0) httpInFlightByIp.set(ip, remaining);
+    else httpInFlightByIp.delete(ip);
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  return true;
+}
+
+function serviceErrorStatus(error) {
+  const message = String(error?.message || "").toLowerCase();
+  const code = String(error?.code || "").toUpperCase();
+  if (
+    code === "DATABASE_BUSY" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code.startsWith("08") ||
+    ["57P01", "57P02", "57P03", "53300", "53400"].includes(code) ||
+    message.includes("database_busy") ||
+    message.includes("timeout") ||
+    message.includes("connection") ||
+    message.includes("connect econn") ||
+    message.includes("too many connections")
+  ) return 503;
+  if (message.includes("body_too_large")) return 413;
+  if (message.includes("invalid_json")) return 400;
+  return 500;
+}
+
+async function handleHttpRequest(req, res) {
   if (Buffer.byteLength(req.url || "", "utf8") > MAX_REQUEST_URL_BYTES) {
     sendJson(res, { ok: false, error: "uri_too_long" }, 414);
     return;
   }
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-  if (!allowHttpRequest(req, url.pathname)) {
+  if (!allowPlayerFacingOrigin(req, url.pathname)) {
+    sendJson(res, { ok: false, error: "not_found" }, 404);
+    return;
+  }
+  if (!allowHttpRequest(req, url)) {
     sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
     return;
   }
   const requestOrigin = requestPublicOrigin(req, url);
+
+  if (process.env.SECURITY_TEST_FORCE_DB_OUTAGE === "1" && url.pathname === "/__security-test/db-outage") {
+    const error = new Error("connect ECONNREFUSED simulated runtime PostgreSQL outage");
+    error.code = "ECONNREFUSED";
+    throw error;
+  }
+
+  if (await adminLogsApi.handle(req, res, url)) {
+    return;
+  }
 
   if (url.pathname === "/" || url.pathname === "/auth") {
     sendHtml(res, "<h1>Contra City legacy API</h1><p>API online.</p>");
@@ -6328,6 +13813,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (tryServeAssetBundle(req, res, url)) {
+    return;
+  }
+
+  if (tryServeLauncherRelease(req, res, url)) {
     return;
   }
 
@@ -6350,6 +13839,206 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (url.pathname === "/admin/promocodes" || url.pathname === "/admin/promocodes/status") {
+    if (!hasValidPromoAdminToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
+    try {
+      if (url.pathname === "/admin/promocodes" && req.method === "GET") {
+        const result = await listPromoCodes(url.searchParams.get("limit"));
+        sendJson(res, result, result.status || 200);
+        return;
+      }
+
+      if (req.method !== "POST") {
+        sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+        return;
+      }
+      const body = await readJsonBody(req, 16 * 1024);
+      const result = url.pathname === "/admin/promocodes"
+        ? await createPromoCode(body)
+        : await setPromoCodeActive(body);
+      if (result.ok) {
+        const promo = result.promo;
+        await writeAuditEvent(pgPool, {
+          eventType: url.pathname === "/admin/promocodes" ? "promo_created" : "promo_status_changed",
+          category: "economy",
+          severity: "notice",
+          description: url.pathname === "/admin/promocodes"
+            ? `Создан промокод ${promo.code}: ${promo.rewardAmount} контрабаксов`
+            : `Промокод ${promo.code} ${promo.active ? "включён" : "выключен"}`,
+          source: "telegram_admin",
+          ipAddress: requestClientIp(req),
+          device: String(req.headers["user-agent"] || "").slice(0, 300),
+          newValue: promo,
+          metadata: {
+            telegramAdminId: Number(body?.createdByTelegramId || body?.adminTelegramId || 0) || null
+          }
+        });
+      }
+      sendJson(res, result, result.status || (result.ok ? 200 : 400));
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (error.message || "promo_admin_failed") }, status);
+    }
+    return;
+  }
+
+  if (url.pathname === "/donate/catalog") {
+    if (req.method !== "GET") {
+      sendJson(
+        res,
+        { ok: false, error: "method_not_allowed" },
+        405,
+        { "access-control-allow-origin": "*" }
+      );
+      return;
+    }
+    try {
+      const result = await listDonateProducts();
+      sendJson(
+        res,
+        result,
+        result.status || (result.ok ? 200 : 503),
+        {
+          "access-control-allow-origin": "*",
+          "cache-control": "no-store"
+        }
+      );
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(
+        res,
+        {
+          ok: false,
+          error: status === 503
+            ? "service_unavailable"
+            : "donate_catalog_failed"
+        },
+        status,
+        { "access-control-allow-origin": "*" }
+      );
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/bot/telegram")) {
+    if (!hasValidTelegramLinkApiToken(req)) {
+      sendJson(res, { ok: false, error: "not_found" }, 404);
+      return;
+    }
+    try {
+      let result;
+      if (url.pathname === "/bot/telegram/account" ||
+          url.pathname === "/bot/telegram/confirmations" ||
+          url.pathname === "/bot/telegram/links" ||
+          url.pathname === "/bot/telegram/store/catalog") {
+        if (req.method !== "GET") {
+          sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+          return;
+        }
+        if (url.pathname === "/bot/telegram/store/catalog") {
+          result = await listDonateProducts();
+        } else if (url.pathname === "/bot/telegram/account") {
+          const telegramUserId = Number(url.searchParams.get("telegramUserId") || 0);
+          if (!allowTelegramIdentityRequest(req, telegramUserId, "account", { limit: 120 })) {
+            sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+            return;
+          }
+          result = await botTelegramAccountStatus(telegramUserId);
+        } else if (url.pathname === "/bot/telegram/confirmations") {
+          result = await listBotTelegramConfirmations(url.searchParams.get("limit"));
+        } else {
+          result = await listTelegramBindings(url.searchParams.get("limit"));
+        }
+      } else {
+        if (req.method !== "POST") {
+          sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+          return;
+        }
+        const body = await readJsonBody(req, 16 * 1024);
+        const telegramUserId = Number(
+          body?.telegram?.id || body?.telegramUserId || body?.adminTelegramId || 0
+        );
+        const codeCreation = url.pathname === "/bot/telegram/code/create";
+        if (telegramUserId && !allowTelegramIdentityRequest(
+          req,
+          telegramUserId,
+          codeCreation ? "code-create" : url.pathname,
+          codeCreation
+            ? { windowMs: 10 * 60 * 1000, limit: 5 }
+            : { windowMs: 60000, limit: 120 }
+        )) {
+          sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+          return;
+        }
+
+        if (url.pathname === "/bot/telegram/code/create") {
+          result = await createBotTelegramPairingCode(body?.telegram, body?.chatId);
+        } else if (url.pathname === "/bot/telegram/store/order") {
+          result = await createDonateOrder(body?.telegramUserId, body?.productId);
+        } else if (url.pathname === "/bot/telegram/store/precheckout") {
+          result = await validateDonateCheckout(
+            body?.orderId,
+            body?.telegramUserId,
+            body?.currency,
+            body?.totalAmount
+          );
+        } else if (url.pathname === "/bot/telegram/store/settle") {
+          result = await settleDonatePayment(body);
+        } else if (url.pathname === "/bot/telegram/store/admin/stock/reset") {
+          result = await resetDonateLimitedStock(
+            body?.adminTelegramId,
+            body?.productId
+          );
+        } else if (url.pathname === "/bot/telegram/code/message") {
+          result = await attachBotTelegramPairingMessage(body);
+        } else if (url.pathname === "/bot/telegram/confirmation/notified") {
+          result = await markBotTelegramConfirmationNotified(body);
+        } else if (url.pathname === "/bot/telegram/code/decision") {
+          result = await decideTelegramPairing(
+            body?.requestId,
+            body?.telegram,
+            body?.decision
+          );
+        } else if (url.pathname === "/bot/telegram/admin/reset-player") {
+          result = await resetTelegramBindingForPlayer(
+            body?.playerId,
+            body?.adminTelegramId
+          );
+        } else if (url.pathname === "/bot/telegram/admin/reset-link") {
+          result = await resetLauncherGameLinkForTelegramAdmin(
+            body?.playerId,
+            body?.adminTelegramId,
+            requestOrigin
+          );
+        } else if (url.pathname === "/bot/telegram/admin/reset-all/prepare") {
+          result = await prepareGlobalTelegramBindingReset(body?.adminTelegramId);
+        } else if (url.pathname === "/bot/telegram/admin/reset-all/execute") {
+          result = await executeGlobalTelegramBindingReset(
+            body?.requestId,
+            body?.adminTelegramId
+          );
+        } else {
+          sendJson(res, { ok: false, error: "not_found" }, 404);
+          return;
+        }
+      }
+      const responseStatus = !result.ok && Number.isInteger(result.status)
+        ? result.status
+        : 200;
+      sendJson(res, result, responseStatus);
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(res, {
+        ok: false,
+        error: status === 503 ? "service_unavailable" : (error.message || "telegram_link_failed")
+      }, status);
+    }
+    return;
+  }
+
   if (url.pathname === "/launcher-device/challenge") {
     if (req.method !== "POST") {
       sendJson(res, { result: false, error: "method_not_allowed" }, 405);
@@ -6362,6 +14051,10 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { result: false, error: "invalid_session" }, 403);
         return;
       }
+      if (!allowResolvedIdentityRequest(req, account, body)) {
+        sendJson(res, { result: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
       const device = await loadLauncherDevice(account.id);
       const deviceKeyId = normalizeLauncherDeviceKeyId(body?.deviceKeyId);
       if (!device || !deviceKeyId || device.deviceKeyId !== deviceKeyId) {
@@ -6371,7 +14064,8 @@ const server = http.createServer(async (req, res) => {
       const challenge = createLauncherDeviceChallenge(account, deviceKeyId);
       sendJson(res, { result: true, ...challenge });
     } catch (error) {
-      sendJson(res, { result: false, error: error.message || "device_challenge_failed" }, 500);
+      const status = serviceErrorStatus(error);
+      sendJson(res, { result: false, error: status === 503 ? "service_unavailable" : (error.message || "device_challenge_failed") }, status);
     }
     return;
   }
@@ -6392,11 +14086,102 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { ok: false, error: "invalid_ccid" }, 400);
         return;
       }
-      const removed = await resetLauncherDeviceBinding(ccid);
-      console.log(`[launcher-device] admin reset player=${ccid} removed=${removed}`);
-      sendJson(res, { ok: true, ccid, removed });
+      const rotated = await rotateLauncherGameLink(ccid);
+      if (!rotated?.account) {
+        sendJson(res, { ok: false, error: "player_not_found" }, 404);
+        return;
+      }
+      console.log(
+        `[game-link] admin rotated player=${ccid} deviceRemoved=${rotated.bindingRemoved} ` +
+        `telegramRemoved=${rotated.telegramBindingRemoved ? 1 : 0}`
+      );
+      await writeAuditEvent(pgPool, {
+        playerId: ccid,
+        eventType: "admin_game_link_reset",
+        category: "security",
+        severity: "warning",
+        description: `Администратор удалил старую игровую ссылку, привязку устройства и Telegram`,
+        source: "legacy_admin_token",
+        ipAddress: requestClientIp(req),
+        device: String(req.headers["user-agent"] || "").slice(0, 300),
+        newValue: {
+          linkRotated: true,
+          deviceBindingRemoved: rotated.bindingRemoved,
+          telegramBindingRemoved: rotated.telegramBindingRemoved
+        }
+      });
+      sendJson(res, {
+        ok: true,
+        ccid,
+        removed: rotated.bindingRemoved,
+        telegramRemoved: rotated.telegramBindingRemoved,
+        linkRotated: true,
+        loginLink: loginLink(rotated.account, requestOrigin)
+      });
     } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "device_reset_failed" }, 500);
+      const status = serviceErrorStatus(error);
+      sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (error.message || "game_link_reset_failed") }, status);
+    }
+    return;
+  }
+
+  if (url.pathname === "/launcher/telegram/request" ||
+      url.pathname === "/launcher/telegram/code/claim" ||
+      url.pathname === "/launcher/telegram/status") {
+    if (req.method !== "POST") {
+      sendJson(res, { result: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const launcherAuth = await accountFromLauncherSessionBody(body);
+      if (!launcherAuth.ok) {
+        sendJson(res, { result: false, error: launcherAuth.error }, launcherAuth.status || 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, launcherAuth.account, body)) {
+        sendJson(res, { result: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      let result;
+      if (url.pathname === "/launcher/telegram/request") {
+        result = await createTelegramLoginRequest(
+          launcherAuth.account,
+          launcherAuth.device,
+          req
+        );
+      } else if (url.pathname === "/launcher/telegram/code/claim") {
+        result = await claimTelegramPairingCode(
+          launcherAuth.account,
+          launcherAuth.device,
+          req,
+          body
+        );
+      } else {
+        result = await latestTelegramPairingStatus(
+          launcherAuth.account,
+          launcherAuth.device,
+          req,
+          body?.loginRequestId
+        );
+      }
+      if (!result.ok) {
+        sendJson(res, {
+          result: false,
+          error: result.error,
+          ...(Number.isFinite(Number(result.remainingAttempts))
+            ? { remainingAttempts: Number(result.remainingAttempts) }
+            : {})
+        }, result.status || 400);
+        return;
+      }
+      sendJson(res, { result: true, ...result }, 200, {}, { ascii: true });
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(res, {
+        result: false,
+        error: status === 503 ? "service_unavailable" : (error.message || "telegram_link_failed")
+      }, status);
     }
     return;
   }
@@ -6407,7 +14192,7 @@ const server = http.createServer(async (req, res) => {
       try {
         body = await readJsonBody(req, 32 * 1024);
       } catch (error) {
-        sendJson(res, { result: false, error: error.message || "invalid_json", news: launcherNewsPayload() }, 400);
+        sendJson(res, { result: false, error: error.message || "invalid_json", news: launcherNewsPayload() }, 400, {}, { ascii: true });
         return;
       }
     }
@@ -6416,7 +14201,11 @@ const server = http.createServer(async (req, res) => {
       ? await accountFromLauncherDeviceBody(body, url)
       : await accountFromRequest(url);
     if (!account) {
-      sendJson(res, { result: false, error: "invalid_session", news: launcherNewsPayload() }, 403);
+      sendJson(res, { result: false, error: "invalid_session", news: launcherNewsPayload() }, 403, {}, { ascii: true });
+      return;
+    }
+    if (!allowResolvedIdentityRequest(req, account, body)) {
+      sendJson(res, { result: false, error: "rate_limited", news: launcherNewsPayload() }, 429, { "retry-after": "60" }, { ascii: true });
       return;
     }
 
@@ -6425,15 +14214,81 @@ const server = http.createServer(async (req, res) => {
       deviceAccess = await verifyLauncherDeviceAccess(account, body, req);
     } catch (error) {
       console.error("[launcher-device] access check failed", error);
-      sendJson(res, { result: false, error: "device_binding_failed", news: launcherNewsPayload() }, 500);
+      const status = serviceErrorStatus(error);
+      sendJson(res, { result: false, error: status === 503 ? "service_unavailable" : "device_binding_failed", news: launcherNewsPayload() }, status, {}, { ascii: true });
       return;
     }
     if (!deviceAccess.ok) {
-      sendJson(res, { result: false, error: deviceAccess.error, news: launcherNewsPayload() }, deviceAccess.status || 403);
+      sendJson(res, { result: false, error: deviceAccess.error, news: launcherNewsPayload() }, deviceAccess.status || 403, {}, { ascii: true });
       return;
     }
 
-    sendJson(res, launcherStatePayload(account), 200, { "Set-Cookie": cookieHeaders(account) });
+    const telegram = await launcherTelegramStatus(account, req);
+    const launcherSession = createLauncherSession(account, body?.deviceKeyId);
+    sendJson(res, {
+      ...launcherStatePayload(account),
+      telegram: telegramStatusPayload(telegram),
+      sessionToken: launcherSession.token,
+      sessionExpiresInSeconds: launcherSession.expiresInSeconds
+    }, 200, { "Set-Cookie": cookieHeaders(account) }, { ascii: true });
+    return;
+  }
+
+  if (url.pathname === "/launcher/promo/redeem") {
+    if (req.method !== "POST") {
+      sendJson(res, { result: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 16 * 1024);
+      const launcherAuth = await accountFromLauncherSessionBody(body);
+      if (!launcherAuth.ok) {
+        sendJson(res, { result: false, error: launcherAuth.error }, launcherAuth.status || 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, launcherAuth.account, body)) {
+        sendJson(res, { result: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const telegram = await launcherTelegramStatus(launcherAuth.account, req);
+      if (!telegram.verified) {
+        sendJson(res, { result: false, error: "telegram_verification_required" }, 403);
+        return;
+      }
+
+      const redemption = await redeemPromoCode(launcherAuth.account, body?.code, {
+        deviceKeyId: launcherAuth.device.deviceKeyId,
+        ipAddress: requestClientIp(req)
+      });
+      if (!redemption.ok) {
+        sendJson(res, { result: false, error: redemption.error }, redemption.status || 400);
+        return;
+      }
+
+      launcherAuth.account.money = Number(redemption.balance);
+      const cached = store.accounts[String(launcherAuth.account.id)];
+      if (cached) {
+        cached.money = Number(redemption.balance);
+        cached.updatedAt = new Date().toISOString();
+      }
+      console.log(
+        `[promo] player=${launcherAuth.account.id} code=${redemption.promo.code} ` +
+        `reward=${redemption.rewardAmount} balance=${redemption.balance} ` +
+        `already=${redemption.alreadyRedeemed ? 1 : 0}`
+      );
+      sendJson(res, {
+        result: true,
+        status: redemption.status,
+        alreadyRedeemed: redemption.alreadyRedeemed,
+        code: redemption.promo.code,
+        reward: { contrabucks: redemption.rewardAmount },
+        balance: redemption.balance,
+        redeemedAt: redemption.redeemedAt
+      }, 200, {}, { ascii: true });
+    } catch (error) {
+      const status = serviceErrorStatus(error);
+      sendJson(res, { result: false, error: status === 503 ? "service_unavailable" : (error.message || "promo_redeem_failed") }, status);
+    }
     return;
   }
 
@@ -6445,6 +14300,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const launcherSession = createLauncherSession(account);
+    await recordPlayerAccess(account, req, "login", "launcher_session");
     sendJson(res, {
       result: true,
       ccid: account.id,
@@ -6462,6 +14318,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { result: false, error: "invalid_session" }, 403);
       return;
     }
+    await recordPlayerAccess(account, req, "login", "web_session");
     sendJson(res, {
       result: true,
       ...sessionPayload(account, requestOrigin)
@@ -6475,6 +14332,7 @@ const server = http.createServer(async (req, res) => {
       sendHtml(res, "<h1>Contra City login</h1><p>Ссылка входа недействительна.</p>", 403);
       return;
     }
+    await recordPlayerAccess(account, req, "login", "login_link");
     sendHtml(
       res,
       `<h1>Contra City login</h1><p>Ссылка активна для ${escapeHtml(account.name)} (#${account.id}).</p>`,
@@ -6485,8 +14343,84 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/create") {
-    const result = createAccountPage(url, requestOrigin);
+    const result = await createAccountPage(url, requestOrigin);
     sendHtml(res, result.html, result.status);
+    return;
+  }
+
+  if (url.pathname === "/battle-pass/case/open") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 8 * 1024);
+      const parsedAccess = parseSummerCaseAccessToken(body.token);
+      if (!parsedAccess) {
+        sendJson(res, { ok: false, error: "case_access_invalid" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: parsedAccess.playerId }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const auditContext = {
+        ipAddress: requestClientIp(req),
+        device: String(req.headers["user-agent"] || "").slice(0, 300),
+        geo: requestGeo(req),
+        source: "battle_pass_case"
+      };
+      const result = await requestAuditContext.run(
+        auditContext,
+        () => openBattlePassCase(body)
+      );
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(
+        res,
+        { ok: false, error: error.message || "case_open_failed" },
+        serviceErrorStatus(error)
+      );
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle-pass/case/resolve") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 8 * 1024);
+      const parsedAccess = parseSummerCaseAccessToken(body.token);
+      if (!parsedAccess) {
+        sendJson(res, { ok: false, error: "case_access_invalid" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: parsedAccess.playerId }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const auditContext = {
+        ipAddress: requestClientIp(req),
+        device: String(req.headers["user-agent"] || "").slice(0, 300),
+        geo: requestGeo(req),
+        source: "battle_pass_case_resolution"
+      };
+      const result = await requestAuditContext.run(
+        auditContext,
+        () => resolveBattlePassCaseReward(body)
+      );
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(
+        res,
+        { ok: false, error: error.message || "case_resolution_failed" },
+        serviceErrorStatus(error)
+      );
+    }
     return;
   }
 
@@ -6497,12 +14431,79 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { result: false, error: "1" }, 403);
       return;
     }
-    sendJson(res, await routeAjax(url, account, requestOrigin), 200, { "Set-Cookie": cookieHeaders(account) });
+    await recordGameLoginOnce(account, req);
+    const auditContext = {
+      ipAddress: requestClientIp(req),
+      device: String(req.headers["user-agent"] || "").slice(0, 300),
+      geo: requestGeo(req),
+      source: "game_api"
+    };
+    const payload = await requestAuditContext.run(auditContext, () => routeAjax(url, account, requestOrigin));
+    sendJson(res, payload, 200, { "Set-Cookie": cookieHeaders(account) });
     return;
   }
 
   if (url.pathname === "/health") {
-    sendJson(res, { ok: true, build: API_BUILD_ID, storage: pgPool ? "postgres" : "json-file" });
+    sendJson(res, {
+      ok: true,
+      build: API_BUILD_ID,
+      storage: pgPool ? "postgres" : "json-file",
+      battleHost: BATTLE_HOST,
+      ...(process.env.SECURITY_TEST_METRICS === "1" ? {
+        securityMetrics: {
+          rateLimitBuckets: rateLimitBuckets.size,
+          httpInFlight,
+          httpInFlightIps: httpInFlightByIp.size,
+          postgresMutationQueueDepth,
+        },
+      } : {}),
+    });
+    return;
+  }
+
+  if (url.pathname === "/battle/admin/action") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.actorPlayerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const result = await executeBattleStaffAction(pgPool, body);
+      if (result.invalidateBanPlayerId) {
+        playerBanCache.delete(Number(result.invalidateBanPlayerId));
+      }
+      const { status, invalidateBanPlayerId, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/clan-wars") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      const result = await clanWars.service(body);
+      sendJson(res, result, result.ok ? 200 : 409);
+    } catch (error) {
+      sendJson(res, { ok: false, error: "clan_wars_unavailable" }, serviceErrorStatus(error));
+    }
     return;
   }
 
@@ -6520,7 +14521,71 @@ const server = http.createServer(async (req, res) => {
       const result = await battleSocialRequest(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "battle_social_failed" }, 500);
+      sendJson(res, { ok: false, error: error.message || "battle_social_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/clan-events") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      sendJson(res, await battleClanTreasuryEvents(body));
+    } catch (error) {
+      console.error("[clan-live] treasury-feed failed", error);
+      sendJson(res, { ok: false, error: error.message || "clan_treasury_feed_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/security") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 32 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.playerId || body.accountId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      sendJson(res, await recordBattleSecurityEvent(body));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "battle_security_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/expedition") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req, 128 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.playerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
+      const result = await battleExpeditionComplete(body);
+      sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "battle_expedition_failed" }, serviceErrorStatus(error));
     }
     return;
   }
@@ -6536,10 +14601,14 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, { ok: false, error: "invalid_token" }, 403);
         return;
       }
+      if (!allowResolvedIdentityRequest(req, { id: Number(body.playerId || 0) }, body)) {
+        sendJson(res, { ok: false, error: "rate_limited" }, 429, { "retry-after": "60" });
+        return;
+      }
       const result = await recordBattleEvent(body);
       sendJson(res, result, result.status || (result.ok === false ? 400 : 200));
     } catch (error) {
-      sendJson(res, { ok: false, error: error.message || "battle_event_failed" }, 500);
+      sendJson(res, { ok: false, error: error.message || "battle_event_failed" }, serviceErrorStatus(error));
     }
     return;
   }
@@ -6553,7 +14622,7 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       storage: pgPool ? "postgres" : "json-file",
       schema: pgPool
-        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events"
+        ? "players/player_inventory/player_abilities/player_equipment/purchase_history/player_weapon_stats/player_achievements/player_match_stats/clans/clan_members/player_friends/catalog_items/battle_rooms/battle_room_players/battle_spawn_events/battle_score_events/battle_chat_events/player_reports/player_staff_roles/player_staff_chat_messages/player_staff_actions"
         : "accounts-json",
       accounts: Object.keys(store.accounts).length,
       databaseUrlConfigured: Boolean(DATABASE_URL)
@@ -6563,11 +14632,36 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");
+}
+
+const server = http.createServer((req, res) => {
+  if (!acquireHttpRequestSlot(req, res)) {
+    sendJson(res, { ok: false, error: "server_busy" }, 503, { "retry-after": "1" });
+    return;
+  }
+  handleHttpRequest(req, res).catch((error) => {
+    console.error("[http] unhandled request error", error);
+    if (!res.headersSent) {
+      sendJson(res, { ok: false, error: serviceErrorStatus(error) === 503 ? "service_unavailable" : "request_failed" }, serviceErrorStatus(error));
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+  });
 });
 
 server.listen(PORT, () => {
   console.log(`Contra City legacy API listening on ${PORT} build=${API_BUILD_ID}`);
+  if (!adminLogsStatus?.configured) console.warn(`[admin-logs] owner account is not configured reason=${adminLogsStatus?.reason || "unknown"}`);
+  else console.log(`[admin-logs] owner ready id=${adminLogsStatus.ownerId}`);
   if (!BATTLE_EVENT_TOKEN) console.warn("[security] BATTLE_EVENT_TOKEN is missing; battle service endpoints reject all calls");
+  if (!TELEGRAM_LINK_API_TOKEN) {
+    console.warn("[security] TELEGRAM_LINK_API_TOKEN is missing; launcher Telegram verification is unavailable");
+  }
+  if (!Number.isSafeInteger(TELEGRAM_ADMIN_ID) || TELEGRAM_ADMIN_ID <= 0) {
+    console.warn("[security] TELEGRAM_ADMIN_ID is invalid; Telegram binding resets are disabled");
+  }
+  if (!CLOUDFRONT_ORIGIN_SECRET) console.warn(`[security] CLOUDFRONT_ORIGIN_SECRET is missing; origin guard mode=${ORIGIN_GUARD_MODE}`);
+  console.log(`[security] originGuard=${ORIGIN_GUARD_MODE} viewerIp=cloudfront-viewer-address rateBuckets=${RATE_LIMIT_BUCKET_CAP} connections=${MAX_HTTP_CONNECTIONS} inFlight=${MAX_HTTP_IN_FLIGHT}/ip${MAX_HTTP_IN_FLIGHT_PER_IP} pgPool=${POSTGRES_POOL_MAX} pgQueryTimeout=${POSTGRES_QUERY_TIMEOUT_MS}ms pgQueue=${POSTGRES_MUTATION_QUEUE_MAX}`);
   if (!ADMIN_API_TOKEN) console.warn("[security] ADMIN_API_TOKEN is missing; /db is disabled");
   if (!CREATE_CODE) console.warn("[security] CREATE_CODE is not set; /create account creation is disabled.");
   if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
@@ -6577,8 +14671,12 @@ server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
 server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
 server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
 server.maxHeadersCount = 64;
+server.maxConnections = MAX_HTTP_CONNECTIONS;
+server.dropMaxConnection = true;
 server.on("clientError", (_error, socket) => {
   if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
 });
+
+
 
 
