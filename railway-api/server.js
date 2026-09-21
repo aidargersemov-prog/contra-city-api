@@ -66,7 +66,7 @@ const LEVEL_EXP_STEP = Math.max(1, Number(process.env.LEVEL_EXP_STEP || START_EX
 // настраиваются независимо в shop-prices.js.
 const SHOP_PRICE = 100;
 const RETIRED_BATTLE_HOST = "54.145.212.225";
-const DEFAULT_BATTLE_HOST = "3.76.0.237";
+const DEFAULT_BATTLE_HOST = "13.62.98.107"; // 3.76.0.237
 const CONFIGURED_BATTLE_HOST = String(process.env.BATTLE_HOST || "").trim();
 const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRED_BATTLE_HOST
   ? DEFAULT_BATTLE_HOST
