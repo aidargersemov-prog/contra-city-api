@@ -1,0 +1,32 @@
+[Unit]
+Description=Contra City Photon TCP Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/opt/contra-tcp-relay
+Environment=TCP_RELAY_LISTEN_HOST=0.0.0.0
+Environment=TCP_RELAY_LISTEN_PORT=5055
+Environment=TCP_RELAY_UPSTREAM_HOST=3.76.0.237
+Environment=TCP_RELAY_UPSTREAM_PORT=5055
+Environment=TCP_RELAY_MAX_CONNECTIONS=512
+Environment=TCP_RELAY_CONNECT_TIMEOUT_MS=10000
+Environment=TCP_RELAY_IDLE_TIMEOUT_MS=120000
+ExecStart=/usr/bin/node /opt/contra-tcp-relay/photon-tcp-relay.cjs
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+LimitNOFILE=4096
+MemoryMax=128M
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
