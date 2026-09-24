@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-23-clan-arm-scoreboard-v330";
+const BUILD_ID = "battle-server-2026-09-24-zombie-actor-snapshot-v331";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -142,9 +142,9 @@ const ZOMBIE_ROUND_RESTART_MS = 10500;
 // It is intentionally shared with zombie rounds so all modes have one round cadence.
 const STANDARD_ROUND_RESTART_MS = Math.max(1000, Number(process.env.STANDARD_ROUND_RESTART_MS || ZOMBIE_ROUND_RESTART_MS));
 const ZOMBIE_REGULAR_INFECTION_HITS = Math.max(2, Math.min(3, Number(process.env.ZOMBIE_REGULAR_INFECTION_HITS || 4) || 4));
-const ZOMBIE_REGULAR_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_REGULAR_MAX_HEALTH || 2500) || 2500);
-const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 3000) || 3000);
-const ZOMBIE_REGEN_TICK_MS = Math.max(250, Number(process.env.ZOMBIE_REGEN_TICK_MS || 3000) || 3000);
+const ZOMBIE_REGULAR_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_REGULAR_MAX_HEALTH || 1500) || 1500);
+const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 5000) || 5000);
+const ZOMBIE_REGEN_TICK_MS = Math.max(250, Number(process.env.ZOMBIE_REGEN_TICK_MS || 4000) || 4000);
 const ZOMBIE_REGULAR_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_REGULAR_REGEN_MIN || 20) || 20);
 const ZOMBIE_REGULAR_REGEN_MAX = Math.max(ZOMBIE_REGULAR_REGEN_MIN, Number(process.env.ZOMBIE_REGULAR_REGEN_MAX || 35) || 35);
 const ZOMBIE_BOSS_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_BOSS_REGEN_MIN || 50) || 50);
@@ -6772,6 +6772,23 @@ function sendZombiePayloadsToReadyRoom(room, payloads, channel = 0, currentSessi
   return sent;
 }
 
+function announceZombieRoundActors(players, channel = 0, currentSession = null, currentResponses = null) {
+  let sent = 0;
+  for (const source of players) {
+    const actorJoin = makeActorJoinEvent(source);
+    for (const target of players) {
+      if (target === source) continue;
+      if (target === currentSession && Array.isArray(currentResponses)) {
+        currentResponses.push(actorJoin);
+        sent += 1;
+      } else if (sendReliableToSession(target, actorJoin, channel)) {
+        sent += 1;
+      }
+    }
+  }
+  return sent;
+}
+
 function isStandardRoundRoom(room) {
   const mode = Number(room?.mode || 0);
   return mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_TEAM_DEATHMATCH || mode === MAP_MODE_CAPTURE_THE_FLAG || mode === MAP_MODE_CONTROL_POINTS;
@@ -7330,6 +7347,11 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
   room.zombieRoundWinnerTeam = 0;
   room.startedAt = photonNow();
 
+  // A ready actor may still be absent from another client's Players table.
+  // Re-send the original actor contract before the round's Spawn events.
+  const actorSnapshots = reason === "post-gamestate"
+    ? announceZombieRoundActors(players, channel, currentSession, currentResponses)
+    : 0;
   let sent = 0;
   for (const playerSession of players) {
     resetZombieParticipantForHumanStart(playerSession);
@@ -7341,7 +7363,7 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
   scheduleZombieMain(room, channel);
   scheduleZombieRoundLimit(room, channel);
   const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-round-start");
-  console.log(`[zombie] start room=${room.name} map=${room.map} reason=${reason} ready=${players.length}/${ZOMBIE_MIN_PLAYERS} boss=random-after-spawn infectionMs=${ZOMBIE_BOSS_INFECTION_MS} regularHits=${ZOMBIE_REGULAR_INFECTION_HITS} sent=${sent} repairTargets=${repairTargets}`);
+  console.log(`[zombie] start room=${room.name} map=${room.map} reason=${reason} ready=${players.length}/${ZOMBIE_MIN_PLAYERS} actorSnapshots=${actorSnapshots} boss=random-after-spawn infectionMs=${ZOMBIE_BOSS_INFECTION_MS} regularHits=${ZOMBIE_REGULAR_INFECTION_HITS} sent=${sent} repairTargets=${repairTargets}`);
   return sent;
 }
 
