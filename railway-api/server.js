@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-20-clan-war-ten-minute-schedule-v119";
+const API_BUILD_ID = "railway-api-2026-09-26-statistics-map-mode-reset-v122";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -1781,7 +1781,12 @@ const abilityValueDefinitions = {
   8: { type: "1", key: "wmdam", values: [1, 2, 3, 4, 5] },
   9: { type: "1", key: "wmxdam", values: [1, 2, 3, 4, 5] },
   10: { type: "1", key: "wacc", values: [1, 2, 3, 4, 5] },
-  11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] }
+  11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] },
+  12: { type: "2", key: "zzdam", values: [5, 10, 15, 20, 25] },
+  13: { type: "1", key: "zzheal", values: [50, 70, 80, 95, 110] },
+  14: { type: "2", key: "zzdecdam", values: [2, 4, 6, 8, 10] },
+  15: { type: "2", key: "zhdam", values: [2, 4, 6, 8, 10] },
+  16: { type: "2", key: "zhdecdam", values: [5, 10, 15, 20, 25] }
 };
 
 // Пять цен: для 1, 2, 3, 4 и 5 уровня способности.
@@ -1796,7 +1801,12 @@ const abilityPrices = {
   8: [130, 160, 210, 420, 1260], // Немаленький
   9: [130, 160, 210, 420, 1260], // Максималист
   10: [180, 200, 300, 600, 1800], // Точность по ГОСТу
-  11: [130, 160, 210, 420, 1260] // Охотник за головами
+  11: [130, 160, 210, 420, 1260], // Охотник за головами
+  12: [500, 500, 500, 500, 500],
+  13: [500, 500, 500, 500, 500],
+  14: [500, 500, 500, 500, 500],
+  15: [500, 500, 500, 500, 500],
+  16: [500, 500, 500, 500, 500]
 };
 const abilityCatalog = [];
 
@@ -1998,6 +2008,7 @@ let clanBannerSchemaReady = false;
 let pgSaveChain = Promise.resolve();
 const viewSelectionSaveVersions = new Map();
 const weaponSelectionSaveVersions = new Map();
+const tauntSelectionSaveVersions = new Map();
 const MANAGED_CATALOG_ITEM_TYPES = [1, 2, 3, 4];
 
 function enqueuePostgresMutation(operation) {
@@ -2036,6 +2047,17 @@ function nextViewSelectionSaveVersion(accountId) {
 
 function isLatestViewSelectionSaveVersion(accountId, version) {
   return Number(viewSelectionSaveVersions.get(String(accountId || 0)) || 0) === Number(version);
+}
+
+function nextTauntSelectionSaveVersion(accountId) {
+  const key = String(accountId || 0);
+  const version = Number(tauntSelectionSaveVersions.get(key) || 0) + 1;
+  tauntSelectionSaveVersions.set(key, version);
+  return version;
+}
+
+function isLatestTauntSelectionSaveVersion(accountId, version) {
+  return Number(tauntSelectionSaveVersions.get(String(accountId || 0)) || 0) === Number(version);
 }
 
 function jsonValue(value, fallback) {
@@ -3074,7 +3096,7 @@ function isWeaponSelectionSaveRequest(url) {
 
 function isEquipmentSelectionSaveRequest(url) {
   const { page, act } = normalizedAjaxRoute(url);
-  return page === "pl" && (act === "sweap" || act === "sview");
+  return page === "pl" && (act === "sweap" || act === "sview" || act === "staunt");
 }
 
 function accountFrom(url) {
@@ -3238,6 +3260,7 @@ async function loadPostgresAccount(id) {
     `SELECT mode, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
      FROM player_match_stats
      WHERE player_id = $1
+       AND id > COALESCE((SELECT mode_after_match_id FROM player_stat_reset_baselines WHERE player_id = $1), 0)
      GROUP BY mode
      ORDER BY play_time DESC, mode`,
     [Number(row.id)]
@@ -3246,6 +3269,7 @@ async function loadPostgresAccount(id) {
     `SELECT map_name, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
      FROM player_match_stats
      WHERE player_id = $1
+       AND id > COALESCE((SELECT map_after_match_id FROM player_stat_reset_baselines WHERE player_id = $1), 0)
      GROUP BY map_name
      ORDER BY play_time DESC, map_name`,
     [Number(row.id)]
@@ -8105,7 +8129,7 @@ function statsBlock(account) {
 }
 
 function isSupportedStatisticResetType(type) {
-  return type === 1 || type === 2;
+  return Number.isInteger(type) && type >= 1 && type <= 4;
 }
 
 function applyStatisticResetToAccount(account, type) {
@@ -8116,6 +8140,14 @@ function applyStatisticResetToAccount(account, type) {
   if (type === 2) {
     account.stats = {};
     return "common";
+  }
+  if (type === 3) {
+    account.modeStats = [];
+    return "mode";
+  }
+  if (type === 4) {
+    account.mapStats = [];
+    return "map";
   }
   return "";
 }
@@ -8143,12 +8175,20 @@ async function resetStatisticPostgres(account, type) {
         return { result: false, err: [2] };
       }
 
-      const scope = type === 1 ? "weapon" : "common";
+      const scope = ["", "weapon", "common", "mode", "map"][type];
       if (type === 1) {
         await client.query("DELETE FROM player_weapon_stats WHERE player_id = $1", [Number(account.id)]);
-      } else {
+      } else if (type === 2) {
         await client.query(
           "UPDATE players SET stats = '{}'::jsonb WHERE id = $1",
+          [Number(account.id)]
+        );
+      } else {
+        const column = type === 3 ? "mode_after_match_id" : "map_after_match_id";
+        await client.query(
+          `INSERT INTO player_stat_reset_baselines (player_id, ${column})
+           VALUES ($1, COALESCE((SELECT MAX(id) FROM player_match_stats WHERE player_id = $1), 0))
+           ON CONFLICT (player_id) DO UPDATE SET ${column} = EXCLUDED.${column}`,
           [Number(account.id)]
         );
       }
@@ -8162,7 +8202,12 @@ async function resetStatisticPostgres(account, type) {
         playerId: account.id,
         eventType: "statistics_reset",
         category: "statistics",
-        description: scope === "weapon" ? "Сброшена статистика оружия" : "Сброшена общая статистика",
+        description: {
+          weapon: "Сброшена статистика оружия",
+          common: "Сброшена общая статистика",
+          mode: "Сброшена статистика режимов",
+          map: "Сброшена статистика карт"
+        }[scope],
         oldValue: { balance: money },
         newValue: { balance: nextMoney, type, scope },
         metadata: { cost: STATISTIC_RESET_COST, type, scope }
@@ -8172,8 +8217,7 @@ async function resetStatisticPostgres(account, type) {
       const fresh = await loadPostgresAccount(account.id);
       if (fresh) store.accounts[String(fresh.id)] = fresh;
       account.money = nextMoney;
-      if (type === 1) account.weaponStats = [];
-      else account.stats = {};
+      applyStatisticResetToAccount(account, type);
       console.log(`[stats-reset] pg player=${account.id} type=${type} scope=${scope} before=${money} after=${nextMoney}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
@@ -12283,11 +12327,87 @@ async function saveWeapons(account, url) {
   return ok({ weap: clone(account.weap) });
 }
 
-function saveTaunts(account, url) {
+function requestedTauntSelection(url, baseSelection = {}) {
+  const selection = { ...baseSelection };
   for (let i = 1; i <= 3; i += 1) {
-    if (url.searchParams.has(`i${i}`)) account.taun[`i${i - 1}`] = Number(url.searchParams.get(`i${i}`) || 0);
+    if (url.searchParams.has(`i${i}`)) selection[`i${i - 1}`] = Number(url.searchParams.get(`i${i}`) || 0);
   }
+  return selection;
+}
+
+function tauntSelectionSummary(selection = {}) {
+  return Array.from({ length: 3 }, (_, slot) => `${slot}:${Number(selection?.[`i${slot}`] || 0)}`).join(",");
+}
+
+async function saveTauntsPostgres(account, url, requestedSelection, saveVersion) {
+  return enqueuePostgresMutation(async () => {
+    if (!isLatestTauntSelectionSaveVersion(account.id, saveVersion)) {
+      console.log(`[save] staunt skip stale id=${account.id} version=${saveVersion} req=${tauntSelectionSummary(requestedSelection)}`);
+      return ok();
+    }
+
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query("SELECT cckey, taun FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      if (!player.rows[0] || player.rows[0].cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      if (!isLatestTauntSelectionSaveVersion(account.id, saveVersion)) {
+        await client.query("ROLLBACK");
+        console.log(`[save] staunt skip stale id=${account.id} version=${saveVersion} req=${tauntSelectionSummary(requestedSelection)}`);
+        return ok();
+      }
+
+      const selection = requestedTauntSelection(url, jsonValue(player.rows[0].taun, {}));
+      const now = new Date().toISOString();
+      await client.query(
+        "UPDATE players SET taun = $2::jsonb, updated_at = $3 WHERE id = $1",
+        [Number(account.id), JSON.stringify(selection), now]
+      );
+      await client.query(
+        `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
+         SELECT id, view, weap, $2::jsonb, now() FROM players WHERE id = $1
+         ON CONFLICT (player_id) DO UPDATE SET
+           taun = EXCLUDED.taun,
+           updated_at = now()`,
+        [Number(account.id), JSON.stringify(selection)]
+      );
+      await client.query("COMMIT");
+
+      const current = store.accounts[String(account.id)];
+      if (current && current.key === account.key) {
+        current.taun = { ...selection };
+        current.updatedAt = now;
+      }
+      console.log(`[save] staunt ok id=${account.id} version=${saveVersion} saved=${tauntSelectionSummary(selection)}`);
+      return ok();
+    } catch (error) {
+      try {
+        await client?.query("ROLLBACK");
+      } catch {
+        // The original error is more useful for diagnostics.
+      }
+      console.error("[postgres] save taunts failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function saveTaunts(account, url) {
+  const requestedSelection = requestedTauntSelection(url, account.taun || {});
+  const saveVersion = nextTauntSelectionSaveVersion(account.id);
+  if (pgPool) return saveTauntsPostgres(account, url, requestedSelection, saveVersion);
+  if (!isLatestTauntSelectionSaveVersion(account.id, saveVersion)) return ok();
+  account.taun = requestedSelection;
   persist(account);
+  console.log(`[save] staunt ok id=${account.id} version=${saveVersion} saved=${tauntSelectionSummary(requestedSelection)}`);
   return ok();
 }
 
