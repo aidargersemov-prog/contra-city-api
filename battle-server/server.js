@@ -1815,6 +1815,16 @@ function acknowledgeOutboundReliable(session, channel, reliableSeq) {
   pending.delete(key);
 
   const sample = Math.max(1, Date.now() - entry.lastSentAt);
+  const hitregTraceId = session.hitregResponseAcks?.get(key);
+  if (hitregTraceId) {
+    session.hitregResponseAcks.delete(key);
+    writeHitregShotTrace(session, hitregTraceId, "response-ack", {
+      channel,
+      seq: reliableSeq,
+      ageMs: Math.max(1, Date.now() - entry.firstSentAt),
+      retries: Math.max(0, entry.sentCount - 1),
+    });
+  }
   const previousRtt = Math.max(1, numberOr(session.outboundRoundTripTime, OUTBOUND_RELIABLE_INITIAL_RTO_MS));
   const previousVariance = Math.max(0, numberOr(session.outboundRoundTripVariance, 0));
   session.outboundRoundTripVariance = Math.round(previousVariance * 0.75 + Math.abs(previousRtt - sample) * 0.25);
@@ -1836,6 +1846,7 @@ function acknowledgeOutboundReliable(session, channel, reliableSeq) {
 function clearOutboundReliableState(session) {
   if (!session) return;
   session.outboundReliable = new Map();
+  session.hitregResponseAcks = new Map();
   session.outboundReliableRecoveryByChannel = new Map();
   session.outboundReliableOverflowAt = 0;
   session.outboundRoundTripTime = OUTBOUND_RELIABLE_INITIAL_RTO_MS;
@@ -2011,7 +2022,17 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
   }
   const reliableCommands = responses.flatMap((response) => makeReliableCommandsForPayload(session, response, channel));
   if (hitregTraceId) {
-    writeHitregShotTrace(session, hitregTraceId, "response-queued", {
+    if (!session.hitregResponseAcks) session.hitregResponseAcks = new Map();
+    for (const command of reliableCommands) {
+      const info = outboundReliableCommandInfo(command);
+      if (!info) continue;
+      const key = outboundReliableKey(info.channel, info.reliableSeq);
+      if (session.hitregResponseAcks.size >= 10000) {
+        session.hitregResponseAcks.delete(session.hitregResponseAcks.keys().next().value);
+      }
+      session.hitregResponseAcks.set(key, hitregTraceId);
+    }
+    writeHitregShotTrace(session, hitregTraceId, "response-built", {
       events: responses.length,
       commands: reliableCommands.length,
       bytes: commandBytes(reliableCommands),
@@ -14927,6 +14948,7 @@ console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
 console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} packet=${VOICE_OPUS_FRAME_MS}ms max=${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
+console.log(`[config] hitregTrace=${HITREG_TRACE_PLAYER_IDS.size ? "on" : "off"} players=${Array.from(HITREG_TRACE_PLAYER_IDS).join(",") || "none"} maxShots=${HITREG_TRACE_MAX_SHOTS} duration=${HITREG_TRACE_DURATION_MINUTES}min`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 if (process.env.CLAN_WARS_ENABLED === "1") {
