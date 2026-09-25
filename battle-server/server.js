@@ -26,7 +26,9 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-26-hitreg-trace-v333";
+const BUILD_ID = "battle-server-2026-09-26-zombie-training-v335";
+// Keep deterministic damage rolls unchanged when only the build label changes.
+const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -141,7 +143,6 @@ const ZOMBIE_ROUND_RESTART_MS = 10500;
 // The active client keeps its result screen for this interval before Event91.
 // It is intentionally shared with zombie rounds so all modes have one round cadence.
 const STANDARD_ROUND_RESTART_MS = Math.max(1000, Number(process.env.STANDARD_ROUND_RESTART_MS || ZOMBIE_ROUND_RESTART_MS));
-const ZOMBIE_REGULAR_INFECTION_HITS = Math.max(2, Math.min(3, Number(process.env.ZOMBIE_REGULAR_INFECTION_HITS || 4) || 4));
 const ZOMBIE_REGULAR_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_REGULAR_MAX_HEALTH || 1500) || 1500);
 const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 5000) || 5000);
 const ZOMBIE_REGEN_TICK_MS = Math.max(250, Number(process.env.ZOMBIE_REGEN_TICK_MS || 4000) || 4000);
@@ -296,6 +297,8 @@ const DAMAGE_CLIENT_VIEW_DELAY_MS = 400;
 const DAMAGE_CLIENT_MOVE_INTERVAL_MS = 100;
 const DAMAGE_POSITION_HISTORY_MAX_MS = 1000;
 const DAMAGE_POSITION_HISTORY_MAX_SAMPLES = 128;
+// CombatPlayer.DelayedResurrectShieldRemove disables the Event100 respawn shield after 3.5 s.
+const SPAWN_SHIELD_MS = 3500;
 const IMPACT_DOT_TICK_MS = Math.max(250, Number(process.env.IMPACT_DOT_TICK_MS || 1000));
 const IMPACT_DOT_DEFAULT_TICKS = Math.max(1, Number(process.env.IMPACT_DOT_DEFAULT_TICKS || 5));
 const IMPACT_REFERENCE_DAMAGE_REDUCTION = Math.max(0, Math.min(95, Number(process.env.IMPACT_REFERENCE_DAMAGE_REDUCTION || 10)));
@@ -1327,6 +1330,7 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     zombieLastInfectorActorId: 0,
     spawned: false,
     dead: false,
+    spawnShieldUntil: 0,
     moveSeen: false,
     moveCount: 0,
     waitingSelfSpawnMove: false,
@@ -3196,11 +3200,11 @@ const WEAPON_STAT_OVERRIDES = {
   },
   sr_wildcat1: {
     w_id: 74, id: 74, wt: 10, ws: 7, sn: "sr_wildcat1", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 3, ammo_tot: 16, lt: 1000, krit: 12, dev: 2,
-    smindam: 50, smaxdam: 68, mmindam: 58, mmaxdam: 78, lmindam: 66, lmaxdam: 84
+    smindam: 100, smaxdam: 101, mmindam: 120, mmaxdam: 150, lmindam: 140, lmaxdam: 160
   },
   sr_wildcat2: {
     w_id: 75, id: 75, wt: 10, ws: 7, sn: "sr_wildcat2", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 3, ammo_tot: 16, lt: 1000, krit: 11, dev: 2,
-    smindam: 46, smaxdam: 62, mmindam: 54, mmaxdam: 72, lmindam: 62, lmaxdam: 82
+    smindam: 100, smaxdam: 101, mmindam: 120, mmaxdam: 150, lmindam: 140, lmaxdam: 160
   }
 };
 
@@ -3216,6 +3220,11 @@ const ABILITY_BONUS_LEVELS = {
   9: { weaponMaxDamageFlat: [1, 2, 3, 4, 5] },
   10: { weaponAccuracyFlat: [1, 2, 3, 4, 5] },
   11: { weaponHeadDamagePercent: [5, 10, 15, 20, 25] },
+  12: { zombieClawDamagePercent: [5, 10, 15, 20, 25] },
+  13: { zombieHealthFlat: [50, 70, 80, 95, 110] },
+  14: { zombieDamageReductionPercent: [2, 4, 6, 8, 10] },
+  15: { damageVsZombiePercent: [2, 4, 6, 8, 10] },
+  16: { damageFromZombieReductionPercent: [5, 10, 15, 20, 25] },
 };
 
 const SET_BONUS_DEFINITIONS = [
@@ -4261,6 +4270,11 @@ function gameplayModifiersForProfile(profile = null) {
     weaponAmmoPercent: 0,
     weaponMinDamageFlat: 0,
     weaponMaxDamageFlat: 0,
+    zombieClawDamagePercent: 0,
+    zombieHealthFlat: 0,
+    zombieDamageReductionPercent: 0,
+    damageVsZombiePercent: 0,
+    damageFromZombieReductionPercent: 0,
     grenadeRadiusPercent: 0,
     rocketRadiusPercent: 0,
     damageBonuses: [],
@@ -4288,6 +4302,11 @@ function gameplayModifiersForProfile(profile = null) {
     modifiers.weaponAmmoPercent += numberOr(bonus.weaponAmmoPercent?.[index], 0);
     modifiers.weaponMinDamageFlat += numberOr(bonus.weaponMinDamageFlat?.[index], 0);
       modifiers.weaponMaxDamageFlat += numberOr(bonus.weaponMaxDamageFlat?.[index], 0);
+    modifiers.zombieClawDamagePercent += numberOr(bonus.zombieClawDamagePercent?.[index], 0);
+    modifiers.zombieHealthFlat += numberOr(bonus.zombieHealthFlat?.[index], 0);
+    modifiers.zombieDamageReductionPercent += numberOr(bonus.zombieDamageReductionPercent?.[index], 0);
+    modifiers.damageVsZombiePercent += numberOr(bonus.damageVsZombiePercent?.[index], 0);
+    modifiers.damageFromZombieReductionPercent += numberOr(bonus.damageFromZombieReductionPercent?.[index], 0);
     }
   }
 
@@ -5325,7 +5344,10 @@ function zombieMaxHealthForType(zombieType) {
 function sessionMaxHealth(session, stats = null) {
   const resolvedStats = stats || sessionRuntimeStats(session);
   if (isZombiePlayerSession(session)) {
-    return zombieMaxHealthForType(session.zombieType) || resolvedStats.maxHealth;
+    const zombieBaseHealth = zombieMaxHealthForType(session.zombieType);
+    return zombieBaseHealth > 0
+      ? zombieBaseHealth + numberOr(resolvedStats.modifiers?.zombieHealthFlat, 0)
+      : resolvedStats.maxHealth;
   }
   return resolvedStats.maxHealth;
 }
@@ -6675,6 +6697,7 @@ function buildSpawnEvent(session, requestedTeam, reason) {
   session.damageContributors = new Map();
   session.kamikazeTriggered = false;
   session.spawned = true;
+  session.spawnShieldUntil = Date.now() + SPAWN_SHIELD_MS;
   if (!session.contractParticipatedAt && session.matchStartedAt) session.contractParticipatedAt = Date.now();
   session.dead = false;
   session.moveSeen = false;
@@ -6706,6 +6729,10 @@ function buildSpawnEvent(session, requestedTeam, reason) {
     { key: 254, value: rawInt(session.actorId) },
     { key: 245, value: spawn },
   ]);
+}
+
+function isSpawnShieldActive(session, now = Date.now()) {
+  return Boolean(session?.spawned && !session.dead && now < numberOr(session.spawnShieldUntil, 0));
 }
 
 function makeSpawnEventFromSession(session) {
@@ -7435,7 +7462,7 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
   scheduleZombieMain(room, channel);
   scheduleZombieRoundLimit(room, channel);
   const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-round-start");
-  console.log(`[zombie] start room=${room.name} map=${room.map} reason=${reason} ready=${players.length}/${ZOMBIE_MIN_PLAYERS} actorSnapshots=${actorSnapshots} boss=random-after-spawn infectionMs=${ZOMBIE_BOSS_INFECTION_MS} regularHits=${ZOMBIE_REGULAR_INFECTION_HITS} sent=${sent} repairTargets=${repairTargets}`);
+  console.log(`[zombie] start room=${room.name} map=${room.map} reason=${reason} ready=${players.length}/${ZOMBIE_MIN_PLAYERS} actorSnapshots=${actorSnapshots} boss=random-after-spawn infectionMs=${ZOMBIE_BOSS_INFECTION_MS} infection=lethal-claw sent=${sent} repairTargets=${repairTargets}`);
   return sent;
 }
 
@@ -8691,6 +8718,21 @@ function outgoingEnhancerDamagePercent(shooter, targetSession, hitZone) {
   return percent;
 }
 
+function zombieTrainingDamagePercents(shooter, targetSession, weaponType, shooterModifiers = null, targetModifiers = null) {
+  if (!isZombieModeValue(roomMode(shooter))) return { outgoing: 0, reduction: 0 };
+  const attackerIsZombie = isZombiePlayerSession(shooter);
+  const victimIsZombie = isZombiePlayerSession(targetSession);
+  const outgoingModifiers = shooterModifiers || sessionRuntimeStats(shooter).modifiers;
+  const incomingModifiers = targetModifiers || sessionRuntimeStats(targetSession).modifiers;
+  const outgoing = attackerIsZombie && Number(weaponType) === 1
+    ? numberOr(outgoingModifiers.zombieClawDamagePercent, 0)
+    : (!attackerIsZombie && victimIsZombie ? numberOr(outgoingModifiers.damageVsZombiePercent, 0) : 0);
+  const reduction = victimIsZombie
+    ? numberOr(incomingModifiers.zombieDamageReductionPercent, 0)
+    : (attackerIsZombie ? numberOr(incomingModifiers.damageFromZombieReductionPercent, 0) : 0);
+  return { outgoing, reduction };
+}
+
 function damageRangeName(distance) {
   if (!Number.isFinite(distance)) return "medium";
   if (distance <= DAMAGE_SHORT_RANGE) return "short";
@@ -8975,6 +9017,7 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
   const chainedDeaths = [];
   for (const targetSession of Array.from(deadSession.room.players.values())) {
     if (!targetSession || targetSession === deadSession || !targetSession.spawned || targetSession.dead) continue;
+    if (isSpawnShieldActive(targetSession)) continue;
     // The enhancer description explicitly says "surrounding enemies", even in
     // rooms where ordinary friendly fire is enabled.
     if (sessionsAreAllies(deadSession, targetSession)) continue;
@@ -8996,11 +9039,14 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
       0,
       DAMAGE_MAX_PROTECTION_PERCENT
     );
+    const training = zombieTrainingDamagePercents(deadSession, targetSession, 0, null, targetCurrent.stats.modifiers);
     const totalDamage = Math.max(0, Math.round(
       ENHANCER_KAMIKAZE_DAMAGE
       * coefficient
+      * (1 + training.outgoing / 100)
       * (1 - protection / 100)
       * (1 - damageReduction / 100)
+      * (1 - training.reduction / 100)
     ));
     if (totalDamage <= 0) continue;
 
@@ -9115,17 +9161,6 @@ function isZombieInfectionHit(shooter, targetSession, weaponType) {
   return Number(shooter?.team) === ZOMBIE_TEAM && Number(targetSession?.team) === HUMAN_TEAM;
 }
 
-function noteZombieInfectionHit(shooter, targetSession) {
-  const isBoss = Number(shooter?.zombieType) === ZOMBIE_TYPE.BOSS;
-  const required = isBoss ? 1 : ZOMBIE_REGULAR_INFECTION_HITS;
-  const hits = isBoss ? 1 : Math.min(required, numberOr(targetSession?.zombieInfectionHits, 0) + 1);
-  if (targetSession) {
-    targetSession.zombieInfectionHits = hits;
-    targetSession.zombieLastInfectorActorId = numberOr(shooter?.actorId, 0);
-  }
-  return { complete: hits >= required, hits, required, isBoss };
-}
-
 function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   let expAwarded = 0;
   let exp2clanAwarded = 0;
@@ -9175,8 +9210,8 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
   const updateRepairs = queueZombiePlayerUpdateRepair(targetSession, targetSession.lastChannel || shooter.lastChannel || 0, "zombie-infect");
 
   postBattleEvent(targetSession, "death", {
-    health: targetSession.health,
-    energy: targetSession.energy,
+    health: numberOr(context.remainingHealth, 0),
+    energy: numberOr(context.remainingEnergy, 0),
     killerPlayerId: shooter.playerId,
     victimPlayerId: targetSession.playerId,
     killerPlayerName: shooter.playerName,
@@ -9188,8 +9223,8 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
     weaponType: context.weaponType,
     weaponSystemName: stringOr(context.weaponSystemName, "OHCA_Zombie"),
     hitZone: context.hitZone,
-    healthDamage: 0,
-    energyDamage: 0,
+    healthDamage: numberOr(context.healthDamage, 0),
+    energyDamage: numberOr(context.energyDamage, 0),
     expAwarded,
     exp2clan: exp2clanAwarded,
     fragType: fragInfo?.name || "zombie-infect",
@@ -9338,7 +9373,7 @@ function impactDotRequestedDamage(effect) {
   const minDamage = Math.max(0, numberOr(effect.min, 0));
   const maxDamage = Math.max(minDamage, numberOr(effect.max, minDamage));
   const roll = deterministicUnit(
-    BUILD_ID,
+    DAMAGE_RANDOM_SEED,
     "impact-dot",
     effect.token,
     effect.tick,
@@ -9356,11 +9391,14 @@ function applyImpactDotDamage(effect, targetSession) {
   const referenceMultiplier = Math.max(0.05, 1 - IMPACT_REFERENCE_DAMAGE_REDUCTION / 100);
   const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
   const enhancerDamagePercent = outgoingEnhancerDamagePercent(effect.shooter, targetSession, 0);
+  const training = zombieTrainingDamagePercents(effect.shooter, targetSession, effect.weaponType, null, targetCurrent.stats.modifiers);
   const totalDamage = Math.max(0, Math.round(
     (requestedDamage / referenceMultiplier) *
     (1 + enhancerDamagePercent / 100) *
+    (1 + training.outgoing / 100) *
     (1 - damageReduction / 100) *
-    (1 - enhancerReduction / 100)
+    (1 - enhancerReduction / 100) *
+    (1 - training.reduction / 100)
   ));
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
   const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
@@ -9504,6 +9542,10 @@ function applyImpactDotTick(effect, targetSession) {
     clearImpactDotState(targetSession, effect.type);
     return;
   }
+  if (isSpawnShieldActive(targetSession)) {
+    clearImpactDotState(targetSession, effect.type);
+    return;
+  }
 
   const damage = applyImpactDotDamage(effect, targetSession);
   const impactEvent = makePlayerImpactEvent(
@@ -9628,6 +9670,10 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.summary = `${targetActorId}:respawn-sync`;
     return result;
   }
+  if (isSpawnShieldActive(targetSession)) {
+    result.summary = `${targetActorId}:spawn-shield`;
+    return result;
+  }
   if (friendlyFireBlocked(shooter, targetSession, weaponType)) {
     result.summary = `${targetActorId}:friendly`;
     return result;
@@ -9660,26 +9706,6 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   result.targetSession = targetSession;
   result.hit = true;
   const damageDistance = explosive ? (originDistance ?? actorDistance) : (actorDistance ?? originDistance);
-  if (isZombieInfectionHit(shooter, targetSession, weaponType)) {
-    const infectionProgress = noteZombieInfectionHit(shooter, targetSession);
-    if (!infectionProgress.complete) {
-      result.hit = true;
-      result.summary = `${targetActorId}:infect-hit=${infectionProgress.hits}/${infectionProgress.required}:killer=${shooter.actorId}:ztype=${shooter.zombieType}:dist=${formatCaptureDistance(damageDistance)}`;
-      return result;
-    }
-    const infection = applyZombieInfectionHit(shooter, targetSession, {
-      damageState,
-      weaponId: numberOr(damageState?.weaponId, weaponType),
-      weaponType,
-      weaponSystemName: stringOr(damageState?.systemName, "OHCA_Zombie"),
-      hitZone,
-    });
-    result.hit = true;
-    result.killed = true;
-    result.killEvent = infection.event;
-    result.summary = `${targetActorId}:infect=1:hits=${infectionProgress.hits}/${infectionProgress.required}:killer=${shooter.actorId}:ztype=${shooter.zombieType}:type=${targetSession.zombieType}:hp=${targetSession.health}:en=${targetSession.energy}:dist=${formatCaptureDistance(damageDistance)}:exp=${infection.expAwarded}:frag=${infection.fragInfo?.name || "zombie-infect"}`;
-    return result;
-  }
   if (isColdArmsWeaponType(weaponType) && Number.isFinite(damageDistance) && damageDistance > DAMAGE_MELEE_MAX_DISTANCE) {
     noteAntiCheatWeaponViolation(shooter, "damage", "melee-range", {
       weaponType,
@@ -9692,10 +9718,10 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const range = damageRangeName(damageDistance);
   const [minDamage, maxDamage] = damagePairForRange(damageState, range);
   const seedParts = shotRandomSeedParts(data, shooter, targetActorId, targetIndex, weaponType, range);
-  const roll = deterministicUnit(BUILD_ID, "damage", ...seedParts);
+  const roll = deterministicUnit(DAMAGE_RANDOM_SEED, "damage", ...seedParts);
   const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
   const critChance = clampNumber(numberOr(damageState?.crit, 0), 0, DAMAGE_MAX_CRIT_CHANCE);
-  const crit = deterministicUnit(BUILD_ID, "crit", ...seedParts) * 100 < critChance;
+  const crit = deterministicUnit(DAMAGE_RANDOM_SEED, "crit", ...seedParts) * 100 < critChance;
   const shooterStats = sessionRuntimeStats(shooter);
   const headDamageBonus = hitZone === HIT_ZONE_CABIN
     ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
@@ -9722,16 +9748,19 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   );
   const enhancerReduction = directEnhancerReductionForTarget(targetSession, shooter, weaponType);
   const enhancerDamagePercent = outgoingEnhancerDamagePercent(shooter, targetSession, hitZone);
+  const training = zombieTrainingDamagePercents(shooter, targetSession, weaponType, shooterStats.modifiers, targetCurrent.stats.modifiers);
   const totalDamage = Math.max(0, Math.round(
     baseDamage *
     explosionCoefficient *
     hitZoneMultiplier(hitZone) *
     (1 + headDamageBonus / 100) *
     (1 + enhancerDamagePercent / 100) *
+    (1 + training.outgoing / 100) *
     (crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
     (1 - protection / 100) *
     (1 - damageReduction / 100) *
-    (1 - enhancerReduction / 100)
+    (1 - enhancerReduction / 100) *
+    (1 - training.reduction / 100)
   ));
 
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
@@ -9745,10 +9774,26 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   result.energyDamage = energyDamage;
   result.healthDamage = healthDamage;
   result.crit = crit && totalDamage > 0;
-  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:weaponProt=${weaponId}:${weaponProtection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:training=${training.outgoing}/${training.reduction}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:weaponProt=${weaponId}:${weaponProtection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
   result.summary += positionDetail;
 
   if (targetCurrent.health > 0 && targetSession.health <= 0) {
+    if (isZombieInfectionHit(shooter, targetSession, weaponType)) {
+      const infection = applyZombieInfectionHit(shooter, targetSession, {
+        weaponId: numberOr(damageState?.weaponId, weaponType),
+        weaponType,
+        weaponSystemName: stringOr(damageState?.systemName, "OHCA_Zombie"),
+        hitZone,
+        healthDamage,
+        energyDamage,
+        remainingHealth: 0,
+        remainingEnergy: targetSession.energy,
+      });
+      result.killed = true;
+      result.killEvent = infection.event;
+      result.summary += `:infect=1:exp=${infection.expAwarded}:frag=${infection.fragInfo?.name || "zombie-infect"}`;
+      return result;
+    }
     recordContractKill(shooter, targetSession, weaponType, damageState?.weaponId, hitZone);
     targetSession.dead = true;
     targetSession.waitingSelfSpawnMove = false;
@@ -9893,7 +9938,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
         summaries.push(damage.summary);
         // PlayerShot triggers red-screen feedback even for hp=en=0. A rejected
         // player must not be echoed as a hit. Preserve environment/item targets
-        // and accepted zero-damage hits (notably the zombie infection counter).
+        // and accepted zero-damage hits.
         if ((damage.descriptor & 7) === SHOT_TARGET_PLAYER && !damage.hit) return null;
         return hashtableBodyWithReplacements(target, new Map([
           [92, rawDamageShort(damage.healthDamage)],
@@ -14949,6 +14994,7 @@ console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
 console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} packet=${VOICE_OPUS_FRAME_MS}ms max=${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
 console.log(`[config] hitregTrace=${HITREG_TRACE_PLAYER_IDS.size ? "on" : "off"} players=${Array.from(HITREG_TRACE_PLAYER_IDS).join(",") || "none"} maxShots=${HITREG_TRACE_MAX_SHOTS} duration=${HITREG_TRACE_DURATION_MINUTES}min`);
+console.log(`[config] spawnShield=${SPAWN_SHIELD_MS}ms source=event100`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
 if (process.env.CLAN_WARS_ENABLED === "1") {
