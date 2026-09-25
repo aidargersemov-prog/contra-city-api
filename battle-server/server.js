@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-24-zombie-actor-snapshot-v331";
+const BUILD_ID = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -237,6 +237,14 @@ const ENET_MAX_FRAGMENT_TOTAL_BYTES = Math.max(4096, Number(process.env.ENET_MAX
 const PENDING_FRAGMENT_COUNT_MAX = boundedEnvInt("PENDING_FRAGMENT_COUNT_MAX", 16, 1, ENET_MAX_FRAGMENT_COUNT);
 const PENDING_FRAGMENT_TOTAL_BYTES_MAX = boundedEnvInt("PENDING_FRAGMENT_TOTAL_BYTES_MAX", 16384, 1024, ENET_MAX_FRAGMENT_TOTAL_BYTES);
 const SHOT_LOCAL_RESPONSE_TRACE = process.env.SHOT_LOCAL_RESPONSE_TRACE === "1";
+// Opt-in, bounded diagnostics. No Photon payload or damage decision depends on this.
+const HITREG_TRACE_PLAYER_IDS = new Set(String(process.env.HITREG_TRACE_PLAYER_IDS || "")
+  .split(",").map((value) => Number(value.trim())).filter((value) => Number.isSafeInteger(value) && value > 0));
+const HITREG_TRACE_MAX_SHOTS = boundedEnvInt("HITREG_TRACE_MAX_SHOTS", 2000, 1, 10000);
+const HITREG_TRACE_DURATION_MINUTES = boundedEnvInt("HITREG_TRACE_DURATION_MINUTES", 30, 1, 120);
+const HITREG_TRACE_EXPIRES_AT = Date.now() + HITREG_TRACE_DURATION_MINUTES * 60000;
+const HITREG_TRACE_RUN = Date.now().toString(36);
+let hitregTracedShots = 0;
 const ACTOR_JOIN_MAX_PACKET_BYTES = Math.max(0, Number(process.env.ACTOR_JOIN_MAX_PACKET_BYTES || 1160));
 const JOIN_SELF_EVENT_DELAY_MS = Math.max(0, Number(process.env.JOIN_SELF_EVENT_DELAY_MS || 0));
 const JOIN_SELF_PROFILE_WAIT_MS = Math.max(JOIN_SELF_EVENT_DELAY_MS, Number(process.env.JOIN_SELF_PROFILE_WAIT_MS || 2500));
@@ -1938,6 +1946,29 @@ function describeShotRequest(parsed) {
   return `type=${weaponType ?? "?"} mode=${launchMode ?? "?"} ts=${ts} landing=${landing ?? "none"} trajectory=${trajectory}`;
 }
 
+function beginHitregShotTrace(session) {
+  if (!session || !HITREG_TRACE_PLAYER_IDS.has(Number(session.playerId))) return null;
+  if (Date.now() >= HITREG_TRACE_EXPIRES_AT || hitregTracedShots >= HITREG_TRACE_MAX_SHOTS) return null;
+  hitregTracedShots += 1;
+  session.hitregShotSequence = (session.hitregShotSequence || 0) + 1;
+  return `${HITREG_TRACE_RUN}:${session.actorId || 0}:${session.hitregShotSequence}`;
+}
+
+function writeHitregShotTrace(session, traceId, stage, detail = {}) {
+  if (!traceId) return;
+  console.log(`[hitreg] ${JSON.stringify({
+    at: new Date().toISOString(),
+    build: BUILD_ID,
+    id: traceId,
+    stage,
+    room: session.room?.name || "none",
+    player: Number(session.playerId) || 0,
+    actor: Number(session.actorId) || 0,
+    rttMs: Number(session.outboundRoundTripTime) || 0,
+    ...detail,
+  })}`);
+}
+
 async function buildReliableCommandsForParsedPayload(port, socket, rinfo, session, parsed, payload, channel) {
   if (payload[0] === 0xf3 && payload[1] === 0x00) {
     const initModes = INIT_REPLY === "both" ? ["callback", "legacy"] : [INIT_REPLY];
@@ -1964,11 +1995,30 @@ async function buildReliableCommandsForParsedPayload(port, socket, rinfo, sessio
     if (!promotePendingSession(session, Date.now(), credentials)) return [];
   }
 
-  const responses = await handleOperation(port, socket, rinfo, session, parsed, channel);
+  const hitregTraceId = photonEventCode(parsed) === 97 ? beginHitregShotTrace(session) : null;
+  if (hitregTraceId) {
+    session.hitregTraceShotId = hitregTraceId;
+    writeHitregShotTrace(session, hitregTraceId, "received", { request: describeShotRequest(parsed), channel });
+  }
+  let responses;
+  try {
+    responses = await handleOperation(port, socket, rinfo, session, parsed, channel);
+  } finally {
+    if (hitregTraceId) session.hitregTraceShotId = null;
+  }
   if (parsed?.opCode === 255 && responses.length > 0 && !session.applicationJoinedAt) {
     session.applicationJoinedAt = Date.now();
   }
   const reliableCommands = responses.flatMap((response) => makeReliableCommandsForPayload(session, response, channel));
+  if (hitregTraceId) {
+    writeHitregShotTrace(session, hitregTraceId, "response-queued", {
+      events: responses.length,
+      commands: reliableCommands.length,
+      bytes: commandBytes(reliableCommands),
+      seq: reliableCommandSeqSummary(reliableCommands),
+      channel,
+    });
+  }
   if (SHOT_LOCAL_RESPONSE_TRACE && photonEventCode(parsed) === 97) {
     console.log(`[sync] shot-response actor=${session.actorId} ${describeShotRequest(parsed)} responses=${responses.length} commands=${reliableCommands.length} bytes=${commandBytes(reliableCommands)} seq=${reliableCommandSeqSummary(reliableCommands)} channel=${channel}`);
   }
@@ -3001,8 +3051,9 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
 // movement speed, maximum trajectory distance, fuse/lifetime and blast radius.
 // Outer key 90 remains a compatible fallback for clients without the optional
 // weapon-additional keys 77 (flight distance) and 74 (lifetime milliseconds).
+// Гранатин
 const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 7)));
-const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 500)));
+const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 450)));
 const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 2500)));
 const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 2);
 const ARCING_LAUNCHER_EXPLOSION_RADIUS = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_EXPLOSION_RADIUS, 10)));
@@ -3123,11 +3174,11 @@ const WEAPON_STAT_OVERRIDES = {
     smindam: 54, smaxdam: 72, mmindam: 62, mmaxdam: 82, lmindam: 70, lmaxdam: 88
   },
   sr_wildcat1: {
-    w_id: 74, id: 74, wt: 10, ws: 7, sn: "sr_wildcat1", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 1, ammo_tot: 16, lt: 1000, krit: 12, dev: 2,
+    w_id: 74, id: 74, wt: 10, ws: 7, sn: "sr_wildcat1", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 3, ammo_tot: 16, lt: 1000, krit: 12, dev: 2,
     smindam: 50, smaxdam: 68, mmindam: 58, mmaxdam: 78, lmindam: 66, lmaxdam: 84
   },
   sr_wildcat2: {
-    w_id: 75, id: 75, wt: 10, ws: 7, sn: "sr_wildcat2", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 1, ammo_tot: 16, lt: 1000, krit: 11, dev: 2,
+    w_id: 75, id: 75, wt: 10, ws: 7, sn: "sr_wildcat2", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 3, ammo_tot: 16, lt: 1000, krit: 11, dev: 2,
     smindam: 46, smaxdam: 62, mmindam: 54, mmaxdam: 72, lmindam: 62, lmaxdam: 82
   }
 };
@@ -8110,7 +8161,7 @@ function applyReloadTick(session, state, channel, reloadSeq) {
       state.ammoReserve -= amount;
       const event = makeReloadUpdateEvent(session, state);
       sendReliableToSession(session, event, channel);
-      broadcastReliableToRoom(session, event, channel, "reload", { requireLiveReady: true });
+      broadcastLiveToRoom(session, event, channel);
       if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
     }
     completeWeaponReloadState(state, now);
@@ -8127,7 +8178,7 @@ function applyReloadTick(session, state, channel, reloadSeq) {
     state.ammoReserve -= amount;
     const event = makeReloadUpdateEvent(session, state);
     sendReliableToSession(session, event, channel);
-    broadcastReliableToRoom(session, event, channel, "reload", { requireLiveReady: true });
+    broadcastLiveToRoom(session, event, channel);
     if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] reload tick actor=${session.actorId} slot=${state.slot} type=${state.type} loaded=${state.loadedAmmo} reserve=${state.ammoReserve} amount=${amount}`);
   }
 
@@ -9881,25 +9932,33 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
 
 function buildShotEvent(session, parsed) {
   const data = parsed?.params?.get(245);
-  if (!data?.raw) return null;
+  const hitregTraceId = session?.hitregTraceShotId;
+  if (!data?.raw) {
+    writeHitregShotTrace(session, hitregTraceId, "decision", { status: "blocked", reason: "missing-shot-data" });
+    return null;
+  }
 
   const weaponType = htGet(data, 91)?.value;
   const launchMode = shotLaunchMode(data);
   if (isRoundPausedSession(session)) {
+    writeHitregShotTrace(session, hitregTraceId, "decision", { status: "blocked", reason: "round-paused", weaponType, launchMode });
     console.log(`[round] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=round-paused`);
     return null;
   }
   if (!session?.spawned || session.dead) {
+    writeHitregShotTrace(session, hitregTraceId, "decision", { status: "blocked", reason: "not-live", weaponType, launchMode });
     if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] shot blocked actor=${session?.actorId ?? "?"} type=${weaponType} mode=${launchMode} reason=not-live`);
     return null;
   }
   if (isZombiePlayerSession(session) && Number(weaponType) !== 1) {
+    writeHitregShotTrace(session, hitregTraceId, "decision", { status: "blocked", reason: "zombie-hand-only", weaponType, launchMode });
     console.log(`[zombie] shot blocked actor=${session.actorId} type=${weaponType} mode=${launchMode} reason=zombie-hand-only`);
     return null;
   }
   const state = weaponStateByType(session, weaponType);
   const gate = allowWeaponShot(session, state, weaponType, launchMode, data);
   if (!gate.ok) {
+    writeHitregShotTrace(session, hitregTraceId, "decision", { status: "blocked", reason: gate.reason, waitMs: gate.waitMs || 0, weaponType, launchMode });
     noteAntiCheatWeaponViolation(session, "shot", gate.reason, {
       weaponType,
       slot: state?.slot,
@@ -9927,6 +9986,18 @@ function buildShotEvent(session, parsed) {
   response.localAmmoSync = state ? makeReloadUpdateEvent(session, state) : null;
   recordAcceptedShotStats(session, response, state, weaponType, launchMode);
   runtimeMetrics.shots += 1;
+  writeHitregShotTrace(session, hitregTraceId, "decision", {
+    status: "accepted",
+    reason: gate.reason,
+    weaponType,
+    launchMode,
+    weapon: state?.systemName || "unknown",
+    loadedAmmo: state?.loadedAmmo ?? null,
+    targets: describeShotTargets(data).trim(),
+    hits: response.stats.hits,
+    kills: response.stats.kills,
+    result: response.summary.trim(),
+  });
   if (VERBOSE_GAMEPLAY_LOGS) console.log(`[event] shot actor=${session.actorId} type=${weaponType} mode=${launchMode}${ammo}${describeShotTargets(data)}${describeShotDamageContext(session, data, state)}${describeProjectileLaunchPayloadKeys(data, weaponType, launchMode)}${response.summary}`);
   return response;
 }
@@ -14486,7 +14557,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (eventCode === 96) {
     const response = buildReloadEvent(session, parsed, channel);
-    if (response) broadcastReliableToRoom(session, response, channel, "reload", { requireLiveReady: true });
+    if (response) broadcastLiveToRoom(session, response, channel);
     return response ? [response] : [];
   }
 
@@ -14513,9 +14584,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
           if (VERBOSE_GAMEPLAY_LOGS) console.log(`[sync] shot-weapon-confirm actor=${session.actorId} peers=${confirmPeers} slot=${state.slot} type=${state.type} name=${state.systemName}`);
         }
       }
-      broadcastReliableToRoom(session, response.shotEvent, channel, "shot", { requireMoveSeen: true });
+      const shotPeers = broadcastLiveToRoom(session, response.shotEvent, channel);
+      if (VERBOSE_GAMEPLAY_LOGS && shotPeers.spectator > 0) {
+        console.log(`[sync] shot actor=${session.actorId} peers=${shotPeers.total} spectator=${shotPeers.spectator} spectatorChannel=${shotPeers.spectatorChannel}`);
+      }
       for (const impactEvent of response.impactEvents || []) {
-        broadcastReliableToRoom(session, impactEvent, channel, "impact", { requireMoveSeen: true });
+        broadcastLiveToRoom(session, impactEvent, channel);
       }
       for (const killEvent of response.killEvents || []) {
         broadcastReliableToRoom(session, killEvent, channel, "kill");
@@ -14843,7 +14917,7 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon" : "channel1-unreliable-animation+weapon") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=velocity:${ARCING_LAUNCHER_VELOCITY},maxDistance:${ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE},lifetime:${ARCING_LAUNCHER_LIFETIME_MS}ms,explosionRadius:${ARCING_LAUNCHER_EXPLOSION_RADIUS},legacyLife:${ARCING_LAUNCHER_LEGACY_LIFE}`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon+shot+reload+impact" : "channel1-unreliable-animation+weapon+shot+reload+impact") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=velocity:${ARCING_LAUNCHER_VELOCITY},maxDistance:${ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE},lifetime:${ARCING_LAUNCHER_LIFETIME_MS}ms,explosionRadius:${ARCING_LAUNCHER_EXPLOSION_RADIUS},legacyLife:${ARCING_LAUNCHER_LEGACY_LIFE}`);
 console.log(`[config] respawnShotFence=first-move+direct-offset/${DAMAGE_DIRECT_HIT_MAX_TARGET_OFFSET} hitHistory=${DAMAGE_CLIENT_VIEW_DELAY_MS}+${DAMAGE_CLIENT_MOVE_INTERVAL_MS}+rtt/max${DAMAGE_POSITION_HISTORY_MAX_MS}ms rejectedPlayerTargets=omit segmentOriginFence=off`);
 console.log(`[config] enhancers active=${Array.from(PASSIVE_BATTLE_ENHANCER_IDS).join(",")} clientVisible=${Array.from(CLIENT_VISIBLE_ENHANCER_IDS).join(",")} expAssist=${BATTLE_EXP_PER_ASSIST} expFlag=${BATTLE_EXP_PER_FLAG} expControl=${BATTLE_EXP_PER_CONTROL_POINT} kamikaze=${ENHANCER_KAMIKAZE_DAMAGE}@${ENHANCER_KAMIKAZE_FULL_RADIUS}/${ENHANCER_KAMIKAZE_ZERO_RADIUS}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms remingtonFirstReloadTick=${REMINGTON_FIRST_RELOAD_TICK_MS}ms`);
