@@ -3082,7 +3082,7 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
 // Outer key 90 remains a compatible fallback for clients without the optional
 // weapon-additional keys 77 (flight distance) and 74 (lifetime milliseconds).
 // Гранатин
-const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 5.5)));
+const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 5.8)));
 const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 150)));
 const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 2500)));
 const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 2);
