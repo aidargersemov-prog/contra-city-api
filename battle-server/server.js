@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-26-zombie-training-v335";
+const BUILD_ID = "battle-server-2026-09-26-sniper-range-v336";
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
@@ -3078,8 +3078,8 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
 // weapon-additional keys 77 (flight distance) and 74 (lifetime milliseconds).
 // Гранатин
 const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 7)));
-const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 200)));
-const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 2500)));
+const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 50)));
+const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 3500)));
 const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 2);
 const ARCING_LAUNCHER_EXPLOSION_RADIUS = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_EXPLOSION_RADIUS, 10)));
 
@@ -3192,19 +3192,19 @@ const WEAPON_STAT_OVERRIDES = {
   },
   sr_vintorez: {
     w_id: 107, id: 107, wt: 10, ws: 7, sn: "sr_vintorez", vel: 100, rad: 10, ang: 0, rap: 700, rt: 3167, ammo: 20, ammo_tot: 100, lt: 1000, krit: 10, dev: 3,
-    smindam: 42, smaxdam: 58, mmindam: 48, mmaxdam: 66, lmindam: 54, lmaxdam: 74
+    smindam: 70, smaxdam: 95, mmindam: 80, mmaxdam: 90, lmindam: 60, lmaxdam: 84
   },
   sr_sniperrifle03: {
     w_id: 103, id: 103, wt: 10, ws: 7, sn: "sr_sniperrifle03", vel: 100, rad: 10, ang: 0, rap: 950, rt: 3667, ammo: 5, ammo_tot: 35, lt: 1000, krit: 14, dev: 2,
-    smindam: 54, smaxdam: 72, mmindam: 62, mmaxdam: 82, lmindam: 70, lmaxdam: 88
+    smindam: 120, smaxdam: 140, mmindam: 140, mmaxdam: 170, lmindam: 100, lmaxdam: 110
   },
   sr_wildcat1: {
     w_id: 74, id: 74, wt: 10, ws: 7, sn: "sr_wildcat1", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 3, ammo_tot: 16, lt: 1000, krit: 12, dev: 2,
-    smindam: 100, smaxdam: 101, mmindam: 120, mmaxdam: 150, lmindam: 140, lmaxdam: 160
+    smindam: 70, smaxdam: 80, mmindam: 80, mmaxdam: 95, lmindam: 40, lmaxdam: 75
   },
   sr_wildcat2: {
     w_id: 75, id: 75, wt: 10, ws: 7, sn: "sr_wildcat2", vel: 100, rad: 10, ang: 0, rap: 980, rt: 2333, ammo: 3, ammo_tot: 16, lt: 1000, krit: 11, dev: 2,
-    smindam: 100, smaxdam: 101, mmindam: 120, mmaxdam: 150, lmindam: 140, lmaxdam: 160
+    smindam: 70, smaxdam: 80, mmindam: 80, mmaxdam: 95, lmindam: 40, lmaxdam: 75
   }
 };
 
@@ -8752,7 +8752,9 @@ function damagePairAverage(pair) {
 }
 
 function balancedDamagePairs(state) {
-  if (!DAMAGE_SORT_RANGES_BY_POWER) {
+  // Sniper damage increases with distance. Sorting every weapon by descending
+  // power inverted the client-provided short/medium/long sniper values.
+  if (!DAMAGE_SORT_RANGES_BY_POWER || Number(state?.type) === 10) {
     return {
       short: normalizedDamagePair(state?.shortDamage),
       medium: normalizedDamagePair(state?.mediumDamage),
