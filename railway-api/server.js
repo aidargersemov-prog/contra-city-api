@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-26-full-weapon-shop-v123";
+const API_BUILD_ID = "railway-api-2026-09-26-weapon-model-titles-v125";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -713,6 +713,52 @@ const ARCING_LAUNCHER_VELOCITY = 10;
 const ARCING_LAUNCHER_LIFE = 7000;
 const ARCING_LAUNCHER_DISTANCE = 10;
 
+// User-confirmed titles belong to model names, not historical numeric IDs.
+// Keep IDs stable so existing purchases, loadouts and workshop upgrades survive.
+const weaponIdentityBySname = new Map([
+  ["SG_DB", "Егерь"],
+  ["SG_Winchester1887", "ВьньЧестер"],
+  ["SG_Novapump", "Сибиряк"],
+  ["OHCA_Torch_F", "Светочь"],
+  ["OHCA_Icicle_W", "Ледовик"],
+  ["GL_EX41", "Страж"],
+  ["GL_SnowLauncher", "Павлик М"],
+  ["RL_RPG26", "Аврора"],
+  ["RL_RPG7", "Мини Катюша"],
+  ["MG_AK103D_O", "Побарабанщик"],
+  ["MG_AUG2_O", "Вектор"],
+  ["MG_AK103", "Кладенец"],
+  ["MG_AK47B08", "Звездочет"],
+  ["MG_M4_O", "Бюрократ"],
+  ["MG_M4D_O", "Наводка"],
+  ["MG_AK103_O", "Полкан"],
+  ["MG_AK47B07", "Смертобой"],
+  ["MG_AK47B06", "Засад"],
+  ["MG_M4", "Рык"],
+  ["MG_UMP45D_O", "Провокатор"],
+  ["MG_M16", "ММ-16"],
+  ["MG_UMP45", "Убойник"],
+  ["MG_AssaultRifle03", "Барс"],
+  ["MG_UMP45D2_O", "Ликвидатор"],
+  ["MG_AUG3_O", "Буран"],
+  ["MG_AK47", "Гост Комрад"],
+  ["HG_Walther_R", "Начальник"],
+  ["HG_TT", "Комиссар"],
+  ["HG_WaltherP99", "СверхДембель"],
+  ["HG_Makarov", "Гост Партизан"],
+  ["HG_Glock_S", "Политрук"],
+  ["HG_SIGSauerP226_B", "Дружинник"],
+  ["SR_SteyrB01", "Сторож"],
+  ["SR_SVD", "Гост Компостер"],
+  ["SR_HK417_D", "Дальнобойщик"],
+  ["SR_M110_B", "Клык"],
+  ["GG_M134B02", "Максимыч"],
+  ["GG_N2", "Берия"],
+  ["GG_M134", "Гост Стаханов"],
+  ["GG_M249", "Дон"],
+  ["SNG_Snowgun", "Вьюга"],
+].map(([sname, name]) => [sname.toLowerCase(), Object.freeze({ sname, name })]));
+
 function weaponBalance(slot, wt, id) {
   const bySlot = {
     1: { ammo: 1, ammo_tot: 1, rap: 340, rt: 0, lt: 250, dev: 2, rad: 8, krit: 8, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 },
@@ -743,6 +789,7 @@ function weaponBalance(slot, wt, id) {
 
 function weapon(id, wt, slot, sname, price, extra = {}) {
   const balance = weaponBalance(slot, wt, id);
+  const identity = weaponIdentityBySname.get(String(sname).toLowerCase());
   return {
     itype: 1,
     id,
@@ -756,7 +803,8 @@ function weapon(id, wt, slot, sname, price, extra = {}) {
     nlvl: 1,
     iS: 0,
     sc: cost(1000 + id, price),
-    ...extra
+    ...extra,
+    ...(identity ? { sname: identity.sname, sn: identity.sname, name: identity.name } : {})
   };
 }
 
@@ -1018,39 +1066,39 @@ const additionalShopWeaponCatalog = [
   { "id": 64, "slot": 6, "sname": "BL_StickyB02", "ammo": 4, "ammo_tot": 20 },
   { "id": 25, "slot": 4, "sname": "FL_N1", "ammo": 100, "ammo_tot": 300 },
   { "id": 47, "slot": 4, "sname": "GG_M134B01" },
-  { "id": 1002, "slot": 4, "sname": "GG_M134B02", "name": "M134 B02" },
+  { "id": 1002, "slot": 4, "sname": "GG_M134B02" },
   { "id": 20, "slot": 4, "sname": "GG_M249" },
-  { "id": 1003, "slot": 4, "sname": "GG_N2", "name": "GG N2" },
+  { "id": 1003, "slot": 4, "sname": "GG_N2" },
   { "id": 100, "slot": 6, "sname": "GL_EX41", "ammo": 6, "ammo_tot": 30 },
   { "id": 48, "slot": 6, "sname": "GL_SnowLauncher", "ammo": 1, "ammo_tot": 12 },
-  { "id": 1004, "slot": 2, "sname": "HG_Glock_S", "name": "Glock S" },
+  { "id": 1004, "slot": 2, "sname": "HG_Glock_S" },
   { "id": 28, "slot": 2, "sname": "HG_SIGSauerP226_B" },
   { "id": 24, "slot": 2, "sname": "HG_TT" },
   { "id": 18, "slot": 2, "sname": "HG_Walther_R" },
-  { "id": 1005, "slot": 2, "sname": "HG_WaltherP99", "name": "Walther P99" },
+  { "id": 1005, "slot": 2, "sname": "HG_WaltherP99" },
   { "id": 29, "slot": 3, "sname": "MG_AK103" },
   { "id": 30, "slot": 3, "sname": "MG_AK103_O" },
   { "id": 31, "slot": 3, "sname": "MG_AK103D_O" },
   { "id": 32, "slot": 3, "sname": "MG_AK47B06" },
   { "id": 33, "slot": 3, "sname": "MG_AK47B07" },
   { "id": 34, "slot": 3, "sname": "MG_AK47B08" },
-  { "id": 1006, "slot": 3, "sname": "MG_AssaultRifle03", "name": "Assault Rifle 03" },
+  { "id": 1006, "slot": 3, "sname": "MG_AssaultRifle03" },
   { "id": 78, "slot": 3, "sname": "MG_AUG2_O" },
-  { "id": 1007, "slot": 3, "sname": "MG_AUG3_O", "name": "AUG3" },
+  { "id": 1007, "slot": 3, "sname": "MG_AUG3_O" },
   { "id": 19, "slot": 3, "sname": "MG_M16" },
   { "id": 46, "slot": 3, "sname": "MG_M4" },
-  { "id": 1008, "slot": 3, "sname": "MG_M4_O", "name": "M4 O" },
-  { "id": 1009, "slot": 3, "sname": "MG_M4D_O", "name": "M4D" },
+  { "id": 1008, "slot": 3, "sname": "MG_M4_O" },
+  { "id": 1009, "slot": 3, "sname": "MG_M4D_O" },
   { "id": 58, "slot": 3, "sname": "MG_UMP45" },
   { "id": 60, "slot": 3, "sname": "MG_UMP45D_O" },
   { "id": 61, "slot": 3, "sname": "MG_UMP45D2_O" },
-  { "id": 1001, "slot": 1, "sname": "OHCA_Icicle_W", "name": "Ледяная сосулька", "ammo": 0, "ammo_tot": 0 },
+  { "id": 1001, "slot": 1, "sname": "OHCA_Icicle_W", "ammo": 0, "ammo_tot": 0 },
   { "id": 40, "slot": 1, "sname": "OHCA_Torch_F", "ammo": 0, "ammo_tot": 0 },
   { "id": 66, "slot": 6, "sname": "RL_RPG7", "ammo": 1, "ammo_tot": 9 },
-  { "id": 1010, "slot": 5, "sname": "SG_DB", "name": "Двустволка", "ammo": 2, "ammo_tot": 24 },
+  { "id": 1010, "slot": 5, "sname": "SG_DB", "ammo": 2, "ammo_tot": 24 },
   { "id": 38, "slot": 5, "sname": "SG_Novapump", "ammo": 7, "ammo_tot": 42 },
-  { "id": 1011, "slot": 4, "sname": "SNG_Snowgun", "name": "Снежная пушка", "ammo": 100, "ammo_tot": 300 },
-  { "id": 1012, "slot": 7, "sname": "SR_HK417_D", "name": "HK417 D", "ammo": 10, "ammo_tot": 60 },
+  { "id": 1011, "slot": 4, "sname": "SNG_Snowgun", "ammo": 100, "ammo_tot": 300 },
+  { "id": 1012, "slot": 7, "sname": "SR_HK417_D", "ammo": 10, "ammo_tot": 60 },
   { "id": 57, "slot": 7, "sname": "SR_M110_B", "ammo": 10, "ammo_tot": 60 },
   { "id": 102, "slot": 7, "sname": "SR_SteyrB01", "ammo": 1, "ammo_tot": 8 },
   { "id": 41, "slot": 1, "sname": "THCA_Katana_B", "ammo": 0, "ammo_tot": 0 }
