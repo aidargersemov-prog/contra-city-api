@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-26-sniper-range-v336";
+const BUILD_ID = "battle-server-2026-09-26-timed-deathmatch-v338";
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
@@ -239,8 +239,11 @@ const PENDING_FRAGMENT_COUNT_MAX = boundedEnvInt("PENDING_FRAGMENT_COUNT_MAX", 1
 const PENDING_FRAGMENT_TOTAL_BYTES_MAX = boundedEnvInt("PENDING_FRAGMENT_TOTAL_BYTES_MAX", 16384, 1024, ENET_MAX_FRAGMENT_TOTAL_BYTES);
 const SHOT_LOCAL_RESPONSE_TRACE = process.env.SHOT_LOCAL_RESPONSE_TRACE === "1";
 // Opt-in, bounded diagnostics. No Photon payload or damage decision depends on this.
-const HITREG_TRACE_PLAYER_IDS = new Set(String(process.env.HITREG_TRACE_PLAYER_IDS || "")
+const HITREG_TRACE_PLAYER_IDS_RAW = String(process.env.HITREG_TRACE_PLAYER_IDS || "").trim();
+const HITREG_TRACE_ALL_PLAYERS = HITREG_TRACE_PLAYER_IDS_RAW.toLowerCase() === "all" || HITREG_TRACE_PLAYER_IDS_RAW === "*";
+const HITREG_TRACE_PLAYER_IDS = new Set(HITREG_TRACE_PLAYER_IDS_RAW
   .split(",").map((value) => Number(value.trim())).filter((value) => Number.isSafeInteger(value) && value > 0));
+const HITREG_TRACE_ENABLED = HITREG_TRACE_ALL_PLAYERS || HITREG_TRACE_PLAYER_IDS.size > 0;
 const HITREG_TRACE_MAX_SHOTS = boundedEnvInt("HITREG_TRACE_MAX_SHOTS", 2000, 1, 10000);
 const HITREG_TRACE_DURATION_MINUTES = boundedEnvInt("HITREG_TRACE_DURATION_MINUTES", 30, 1, 120);
 const HITREG_TRACE_EXPIRES_AT = Date.now() + HITREG_TRACE_DURATION_MINUTES * 60000;
@@ -298,7 +301,7 @@ const DAMAGE_CLIENT_MOVE_INTERVAL_MS = 100;
 const DAMAGE_POSITION_HISTORY_MAX_MS = 1000;
 const DAMAGE_POSITION_HISTORY_MAX_SAMPLES = 128;
 // CombatPlayer.DelayedResurrectShieldRemove disables the Event100 respawn shield after 3.5 s.
-const SPAWN_SHIELD_MS = 3500;
+const SPAWN_SHIELD_MS = 2200;
 const IMPACT_DOT_TICK_MS = Math.max(250, Number(process.env.IMPACT_DOT_TICK_MS || 1000));
 const IMPACT_DOT_DEFAULT_TICKS = Math.max(1, Number(process.env.IMPACT_DOT_DEFAULT_TICKS || 5));
 const IMPACT_REFERENCE_DAMAGE_REDUCTION = Math.max(0, Math.min(95, Number(process.env.IMPACT_REFERENCE_DAMAGE_REDUCTION || 10)));
@@ -1962,7 +1965,9 @@ function describeShotRequest(parsed) {
 }
 
 function beginHitregShotTrace(session) {
-  if (!session || !HITREG_TRACE_PLAYER_IDS.has(Number(session.playerId))) return null;
+  const playerId = Number(session?.playerId);
+  if (!Number.isSafeInteger(playerId) || playerId <= 0) return null;
+  if (!HITREG_TRACE_ALL_PLAYERS && !HITREG_TRACE_PLAYER_IDS.has(playerId)) return null;
   if (Date.now() >= HITREG_TRACE_EXPIRES_AT || hitregTracedShots >= HITREG_TRACE_MAX_SHOTS) return null;
   hitregTracedShots += 1;
   session.hitregShotSequence = (session.hitregShotSequence || 0) + 1;
@@ -3078,8 +3083,8 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
 // weapon-additional keys 77 (flight distance) and 74 (lifetime milliseconds).
 // Гранатин
 const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 7)));
-const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 50)));
-const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 3500)));
+const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 100)));
+const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 2500)));
 const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 2);
 const ARCING_LAUNCHER_EXPLOSION_RADIUS = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_EXPLOSION_RADIUS, 10)));
 
@@ -7115,17 +7120,17 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
 function maybeFinishStandardRound(room, reason = "state", channel = 0, currentSession = null, currentResponses = null) {
   if (room?.clanWar) return 0; // Wars are timed: no ordinary frag cap.
   if (!isStandardRoundRoom(room) || room.standardRoundState !== "active") return 0;
+  const mode = Number(room.mode);
+  // The client offers a victory-points limit only for CTF and Control Points.
+  // Deathmatch and Team Deathmatch use their selected time limit instead.
+  if (mode !== MAP_MODE_CAPTURE_THE_FLAG && mode !== MAP_MODE_CONTROL_POINTS) return 0;
   const fragLimit = Math.max(1, numberOr(room.fragLimit, 50));
-  if (Number(room.mode) === MAP_MODE_TEAM_DEATHMATCH || Number(room.mode) === MAP_MODE_CAPTURE_THE_FLAG || Number(room.mode) === MAP_MODE_CONTROL_POINTS) {
-    const source = currentSession || zombieRoomPlayers(room)[0];
-    if (!source) return 0;
-    const red = teamScorePoints(source, 1);
-    const blue = teamScorePoints(source, 2);
-    if (red >= fragLimit || blue >= fragLimit) return finishStandardRound(room, red === blue ? 0 : (red > blue ? 1 : 2), reason, channel, currentSession, currentResponses);
-    return 0;
-  }
-  const winner = zombieRoomPlayers(room).find((playerSession) => numberOr(playerSession.points, playerSession.kills) >= fragLimit);
-  return winner ? finishStandardRound(room, winner.actorId, reason, channel, currentSession, currentResponses) : 0;
+  const source = currentSession || zombieRoomPlayers(room)[0];
+  if (!source) return 0;
+  const red = teamScorePoints(source, 1);
+  const blue = teamScorePoints(source, 2);
+  if (red >= fragLimit || blue >= fragLimit) return finishStandardRound(room, red === blue ? 0 : (red > blue ? 1 : 2), reason, channel, currentSession, currentResponses);
+  return 0;
 }
 
 function resetZombieRoundScore(playerSession) {
@@ -14995,7 +15000,7 @@ console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE
 console.log(`[config] clanTreasuryLive=${API_TOKEN ? "canonical-db" : "off-token-missing"} delivery=per-session clientSignal=reliable-response clanEventKeys=int32 clanArmSignal=reliable-response poll=${CLAN_TREASURY_POLL_MS}ms limit=${CLAN_TREASURY_POLL_LIMIT}`);
 console.log(`[config] moderation kickVote=${KICK_VOTE_DURATION_MS}ms/strict-majority/kick-capable cooldown=${KICK_VOTE_COOLDOWN_MS}ms banJoin=canonical-403-deny`);
 console.log(`[config] voice protocol=${VOICE_PROTOCOL_VERSION} signature=${VOICE_PROTOCOL_SIGNATURE} event=${VOICE_FRAME_EVENT}/${VOICE_CAPABILITY_EVENT} channel=${VOICE_CHANNEL} packet=${VOICE_OPUS_FRAME_MS}ms max=${VOICE_RATE_MAX_FRAMES}/s route=ffa+zombie:room,team:own-team`);
-console.log(`[config] hitregTrace=${HITREG_TRACE_PLAYER_IDS.size ? "on" : "off"} players=${Array.from(HITREG_TRACE_PLAYER_IDS).join(",") || "none"} maxShots=${HITREG_TRACE_MAX_SHOTS} duration=${HITREG_TRACE_DURATION_MINUTES}min`);
+console.log(`[config] hitregTrace=${HITREG_TRACE_ENABLED ? "on" : "off"} players=${HITREG_TRACE_ALL_PLAYERS ? "all" : Array.from(HITREG_TRACE_PLAYER_IDS).join(",") || "none"} maxShots=${HITREG_TRACE_MAX_SHOTS} duration=${HITREG_TRACE_DURATION_MINUTES}min`);
 console.log(`[config] spawnShield=${SPAWN_SHIELD_MS}ms source=event100`);
 console.log(`[security] serviceToken=${API_TOKEN ? "configured" : "missing"} udpDatagramMax=${MAX_UDP_DATAGRAM_BYTES} commandsMax=${MAX_ENET_COMMANDS_PER_PACKET} sessions=${MAX_SESSIONS_TOTAL}/ip${MAX_SESSIONS_PER_IP} pending=${MAX_PENDING_SESSIONS_TOTAL}/ip${MAX_PENDING_SESSIONS_PER_IP}/ttl${PENDING_SESSION_TTL_MS}ms preauthTtl=${PREAUTH_SESSION_TTL_MS}ms udpRate=${UDP_RATE_PACKETS_PER_IP}pkts/${UDP_RATE_BYTES_PER_IP}bytes/${UDP_RATE_WINDOW_MS}ms buckets=${UDP_RATE_BUCKET_CAP}/sweep${UDP_RATE_SWEEP_LIMIT} tcpPerIp=${TCP_MAX_CONNECTIONS_PER_IP} tcpIdle=${TCP_IDLE_TIMEOUT_MS}ms`);
 
