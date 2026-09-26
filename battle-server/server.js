@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-26-remington-original-reload-v339";
+const BUILD_ID = "battle-server-2026-09-26-ammo-training-v340";
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
@@ -2940,6 +2940,79 @@ const WEAPON_NAME_OVERRIDES = {
   sr_steyrb01: "SR_SteyrB01",
 };
 
+// Confirmed base loadouts: magazine / spare rounds, before training or workshop.
+// ammo_tot is the Photon/client total, including the magazine.
+const baseWeaponAmmoBySname = new Map([
+  ["hg_makarov",8,16],
+  ["hg_tt",10,10],
+  ["hg_walther_r",8,16],
+  ["hg_waltherp99",10,10],
+  ["hg_sigsauerp226_b",13,13],
+  ["hg_glock_s",17,17],
+  ["hg_glockb01_s",20,20],
+  ["hg_desert",7,14],
+  ["hg_desertb01",7,7],
+  ["hg_taurus",6,6],
+  ["hg_usp",16,16],
+  ["mg_ak47",18,54],
+  ["mg_m16",20,40],
+  ["mg_ak103",18,36],
+  ["mg_m4",15,30],
+  ["mg_ak103_o",22,44],
+  ["mg_m4_o",40,80],
+  ["mg_m4d_o",40,80],
+  ["mg_ak103d_o",40,80],
+  ["mg_ump45",35,60],
+  ["mg_ump45d_o",30,60],
+  ["mg_ump45d2_o",30,60],
+  ["mg_ak47b06",40,80],
+  ["mg_ak47b08",40,80],
+  ["mg_ak47b07",40,80],
+  ["mg_aug3_o",25,50],
+  ["mg_aug2_o",28,56],
+  ["mg_aug4_o",30,60],
+  ["mg_aug1_o",40,80],
+  ["mg_aug5_o",35,70],
+  ["mg_assaultrifle03",42,84],
+  ["mg_assaultrifle02",28,56],
+  ["mg_ump45vkks_o",35,70],
+  ["gg_m134",100,220],
+  ["gg_n2",150,300],
+  ["gg_m249",75,150],
+  ["sng_snowgun",50,100],
+  ["fl_n1",50,100],
+  ["gg_m134b02",130,260],
+  ["gg_m134b03",200,400],
+  ["gg_fnmag",100,200],
+  ["sg_winchester1887",3,5],
+  ["sg_db",2,4],
+  ["sg_novapump",8,6],
+  ["sg_spas",5,7],
+  ["sg_remington",3,6],
+  ["rl_rpg26",1,2],
+  ["rl_rpg7",1,3],
+  ["rl_m202a1",4,2],
+  ["gl_snowlauncher",4,4],
+  ["gl_milkor",4,4],
+  ["gl_milkor_a",4,4],
+  ["gl_ex41",4,4],
+  ["gl_grenadelauncher03",5,5],
+  ["bl_stickyb02",4,2],
+  ["bl_sticky",4,2],
+  ["rl_rpg7b02",1,3],
+  ["sr_svd",3,4],
+  ["sr_steyr",1,3],
+  ["sr_steyrb01",1,3],
+  ["sr_hk417_d",7,6],
+  ["sr_m110_b",10,10],
+  ["sr_arctic",6,4],
+  ["sr_arcticb01",6,4],
+  ["sr_wildcat1",5,5],
+  ["sr_wildcat2",6,4],
+  ["sr_vintorez",7,4],
+  ["sr_sniperrifle03",3,3],
+].map(([sname, ammo, reserve]) => [sname, Object.freeze({ ammo, ammo_tot: ammo + reserve })]));
+
 const DEFAULT_LOADOUT_WEAPONS = [
   { w_id: 1, id: 1, wt: 1, ws: 1, sn: "ohca_basebalbat", vel: 100, rad: 8, ang: 2.05, rap: 340, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 8, dev: 2, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 },
   { w_id: 2, id: 2, wt: 3, ws: 2, sn: "hg_makarov", vel: 100, rad: 10, ang: 0, rap: 240, rt: 2967, ammo: 12, ammo_tot: 60, lt: 520, krit: 7, dev: 8, smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 },
@@ -3219,7 +3292,7 @@ const ABILITY_BONUS_LEVELS = {
   4: { damageReductionPercent: [2, 4, 6, 8, 10] },
   5: { weaponRapidityPercent: [2, 4, 6, 8, 10] },
   6: { weaponCritPercent: [5, 10, 15, 20, 25] },
-  7: { weaponAmmoPercent: [10, 30, 40, 50, 60] },
+  7: { weaponAmmoPercent: [20, 30, 40, 50, 60] },
   8: { weaponMinDamageFlat: [1, 2, 3, 4, 5] },
   9: { weaponMaxDamageFlat: [1, 2, 3, 4, 5] },
   10: { weaponAccuracyFlat: [1, 2, 3, 4, 5] },
@@ -4385,6 +4458,15 @@ function gameplayModifiersForProfile(profile = null) {
   return modifiers;
 }
 
+// Cumulative 20/30/40/50/60% reserve bonuses, without intermediate rounding.
+// Integer ratios keep the client and server identical at rounding boundaries.
+const TRAINING_AMMO_MULTIPLIERS = Object.freeze([10000, 12000, 15600, 21840, 32760, 52416]);
+
+function trainingAmmoReserve(reserve, level) {
+  const index = Math.max(0, Math.min(5, Math.trunc(numberOr(level, 0))));
+  return Math.floor((Math.max(0, reserve) * TRAINING_AMMO_MULTIPLIERS[index] + 5000) / 10000);
+}
+
 function applyWeaponGameplayBonuses(item, profile = null) {
   const modifiers = gameplayModifiersForProfile(profile);
   const result = { ...item };
@@ -4425,12 +4507,22 @@ function applyWeaponGameplayBonuses(item, profile = null) {
     result.lmaxdam = numberOr(result.lmaxdam, 0) + maxDamageFlat;
   }
 
-  const ammoPercent = numberOr(modifiers.weaponAmmoPercent, 0);
-  if (ammoPercent > 0 && !isColdArmsWeaponType(weaponType)) {
-    result.ammo_tot = Math.max(
-      numberOr(result.ammo_tot, 0),
-      Math.round(numberOr(result.ammo_tot, result.ammo ?? 0) * (1 + ammoPercent / 100))
-    );
+  if (!isColdArmsWeaponType(weaponType)) {
+    const trainingLevel = APPLY_TRAINING_ABILITY_BONUSES ? abilityLevel(profile, 7) : 0;
+    const trainingPercent = numberOr(ABILITY_BONUS_LEVELS[7].weaponAmmoPercent[trainingLevel - 1], 0);
+    const otherAmmoPercent = numberOr(modifiers.weaponAmmoPercent, 0) - trainingPercent;
+    if (trainingLevel > 0) {
+      const magazine = Math.max(0, numberOr(result.ammo, 0));
+      const reserve = Math.max(0, numberOr(result.ammo_tot, magazine) - magazine);
+      result.ammo_tot = magazine + trainingAmmoReserve(reserve, trainingLevel);
+    }
+    // Other equipment bonuses retain their total-ammunition scaling.
+    if (otherAmmoPercent > 0) {
+      result.ammo_tot = Math.max(
+        numberOr(result.ammo_tot, 0),
+        Math.round(numberOr(result.ammo_tot, result.ammo ?? 0) * (1 + otherAmmoPercent / 100))
+      );
+    }
   }
 
   const critPercent = numberOr(modifiers.weaponCritPercent, 0);
@@ -4459,9 +4551,11 @@ function applyWeaponGameplayBonuses(item, profile = null) {
 function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null) {
   const base = { ...fallback, ...(item || {}), ws: slot };
   const override = WEAPON_STAT_OVERRIDES[weaponCanonicalKey(base)];
-  const mergedBase = override
+  const overriddenBase = override
     ? { ...base, ...override, ws: slot, w_id: numberOr(override.w_id, base.w_id ?? base.id), id: numberOr(override.id, base.id ?? base.w_id) }
     : base;
+  const ammunition = baseWeaponAmmoBySname.get(weaponCanonicalKey(base));
+  const mergedBase = { ...overriddenBase, ...(ammunition || {}) };
   // The API persists the complete upgraded weapon payload. While eD is active,
   // those exact fields win over canonical base stats once and are not regenerated.
   const merged = isActiveWorkshopWeaponUpgrade(base)
