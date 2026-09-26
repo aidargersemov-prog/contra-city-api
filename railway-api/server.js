@@ -1013,7 +1013,9 @@ function provisionalShopWeaponStats(item) {
   };
 }
 
-const additionalShopWeaponCatalog = require("./data/additional-shop-weapons.json");
+const additionalShopWeaponCatalog = JSON.parse(
+  fs.readFileSync(path.join(API_DIR, "data", "additional-shop-weapons.json"), "utf8")
+);
 const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
 const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
   .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
