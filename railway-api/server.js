@@ -977,14 +977,46 @@ const canonicalShopWeaponStats = {
 
 function withCanonicalShopWeaponStats(item) {
   const key = String(item?.sname || item?.sn || "").toLowerCase();
-  const stats = canonicalShopWeaponStats[key] || {};
+  const stats = canonicalShopWeaponStats[key] || provisionalShopWeaponStats(item);
   const reloadTime = originalReloadTimeMs[key];
   return reloadTime === undefined ? { ...item, ...stats } : { ...item, ...stats, rt: reloadTime };
 }
 
-// The live weapon shop is the vetted resources.assets subset only.
+// Placeholder balance for original client weapons without recovered numeric data.
+// The variation is generated once from the system name, so API and battle state
+// receive the same values on every request and after every restart.
+function provisionalShopWeaponStats(item) {
+  const key = String(item.sname).toLowerCase();
+  const type = weaponTypeForSname(key);
+  const base = weaponBalance(item.slot, type, item.id);
+  const variation = (salt, span) => {
+    let hash = 2166136261;
+    for (const character of `${key}:${salt}`) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+    return (hash >>> 0) % span;
+  };
+  const damage = variation("damage", 9) - 4;
+  const spread = variation("spread", 5);
+  const melee = type === 1 || type === 2;
+  return {
+    ...base,
+    rap: Math.max(90, base.rap + variation("rapidity", 101) - 50),
+    rt: melee ? 0 : Math.max(600, base.rt + variation("reload", 701) - 350),
+    ammo: item.ammo ?? (melee ? 0 : base.ammo),
+    ammo_tot: item.ammo_tot ?? (melee ? 0 : base.ammo_tot),
+    smindam: Math.max(1, base.smindam + damage),
+    smaxdam: Math.max(2, base.smaxdam + damage + spread),
+    mmindam: Math.max(1, base.mmindam + damage),
+    mmaxdam: Math.max(2, base.mmaxdam + damage + spread),
+    lmindam: Math.max(1, base.lmindam + damage),
+    lmaxdam: Math.max(2, base.lmaxdam + damage + spread),
+    ...(item.id >= 1000 ? { desc: "Оружие из арсенала Контра Сити", desca: "" } : {}),
+  };
+}
+
+const additionalShopWeaponCatalog = require("./data/additional-shop-weapons.json");
 const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
-const canonicalShopWeaponCatalog = rebuiltShopWeaponCatalog.map(withCanonicalShopWeaponStats);
+const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
+  .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500 }));
 
 function weaponTypeForSname(sname) {
   const prefix = String(sname || "").toLowerCase().split("_")[0];
