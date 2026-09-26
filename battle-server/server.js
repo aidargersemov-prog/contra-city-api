@@ -1,4 +1,4 @@
-﻿const dgram = require("dgram");
+const dgram = require("dgram");
 const net = require("net");
 const crypto = require("crypto");
 const { TextDecoder } = require("util");
@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-26-ammo-training-v340";
+const BUILD_ID = "battle-server-2026-09-26-magazine-timing-v343";
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
@@ -678,7 +678,7 @@ const RAPIDITY_FLOORS_BY_TYPE = new Map([
   [1, 340],
   [2, 420],
   [3, 240],
-  [4, 150],
+  [4, 70],
   [5, 115],
   [6, 125],
   [7, 620],
@@ -2971,7 +2971,7 @@ const baseWeaponAmmoBySname = new Map([
   ["mg_aug3_o",25,50],
   ["mg_aug2_o",28,56],
   ["mg_aug4_o",30,60],
-  ["mg_aug1_o",40,80],
+  ["mg_aug1_o",35,70],
   ["mg_aug5_o",35,70],
   ["mg_assaultrifle03",42,84],
   ["mg_assaultrifle02",28,56],
@@ -3016,7 +3016,7 @@ const baseWeaponAmmoBySname = new Map([
 const DEFAULT_LOADOUT_WEAPONS = [
   { w_id: 1, id: 1, wt: 1, ws: 1, sn: "ohca_basebalbat", vel: 100, rad: 8, ang: 2.05, rap: 340, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 8, dev: 2, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 },
   { w_id: 2, id: 2, wt: 3, ws: 2, sn: "hg_makarov", vel: 100, rad: 10, ang: 0, rap: 240, rt: 2967, ammo: 12, ammo_tot: 60, lt: 520, krit: 7, dev: 8, smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 },
-  { w_id: 3, id: 3, wt: 4, ws: 3, sn: "mg_ak47", vel: 100, rad: 12, ang: 0, rap: 150, rt: 2967, ammo: 30, ammo_tot: 90, lt: 650, krit: 5, dev: 12, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 },
+  { w_id: 3, id: 3, wt: 4, ws: 3, sn: "mg_ak47", vel: 100, rad: 12, ang: 0, rap: 126, rt: 2967, ammo: 30, ammo_tot: 90, lt: 650, krit: 5, dev: 12, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 },
   { w_id: 4, id: 4, wt: 6, ws: 4, sn: "gg_m134", vel: 100, rad: 14, ang: 0, rap: 125, rt: 800, ammo: 90, ammo_tot: 180, lt: 1100, krit: 4, dev: 18, smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 },
   { w_id: 5, id: 5, wt: 7, ws: 5, sn: "sg_winchester1887", vel: 100, rad: 18, ang: 0, rap: 620, rt: 4500, ammo: 6, ammo_tot: 36, lt: 900, krit: 6, dev: 24, smindam: 42, smaxdam: 62, mmindam: 22, mmaxdam: 35, lmindam: 8, lmaxdam: 14 },
   { w_id: 6, id: 6, wt: 8, ws: 6, sn: "rl_rpg26", vel: 65, rad: 28, ang: 0, rap: 900, rt: 2300, ammo: 1, ammo_tot: 8, lt: 1150, krit: 3, dev: 6, smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 },
@@ -3161,6 +3161,217 @@ const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 
 const ARCING_LAUNCHER_EXPLOSION_RADIUS = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_EXPLOSION_RADIUS, 10)));
 
 const WEAPON_STAT_OVERRIDES = {
+  // Magazine timing table: first shot to last shot, before training.
+  mg_ak47: {
+    w_id: 3, id: 3, wt: 4, ws: 3, sn: "mg_ak47", vel: 100, rad: 12, ang: 0, rap: 126, rt: 2967, ammo: 18, ammo_tot: 72, lt: 650, krit: 5, dev: 12,
+    smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17
+  },
+  // Same explicit temporary base stats as the API; user-approved pending tuning.
+  bl_sticky: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 63, id: 63, wt: 15, ws: 6, sn: "bl_sticky", vel: 6, rad: 10, ang: 0, rap: 900, rt: 3000, ammo: 4, ammo_tot: 6, lt: 7000, krit: 4, dev: 6,
+    flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
+    smindam: 60, smaxdam: 88, mmindam: 48, mmaxdam: 72, lmindam: 32, lmaxdam: 50
+  },
+  bl_stickyb02: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 64, id: 64, wt: 15, ws: 6, sn: "bl_stickyb02", vel: 6, rad: 10, ang: 0, rap: 850, rt: 3000, ammo: 4, ammo_tot: 6, lt: 7000, krit: 5, dev: 6,
+    flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
+    smindam: 64, smaxdam: 92, mmindam: 50, mmaxdam: 76, lmindam: 34, lmaxdam: 54
+  },
+  fl_n1: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 25, id: 25, wt: 5, ws: 4, sn: "fl_n1", vel: 100, rad: 14, ang: 0, rap: 140, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 4, dev: 6,
+    smindam: 16, smaxdam: 24, mmindam: 12, mmaxdam: 20, lmindam: 8, lmaxdam: 14
+  },
+  gg_m134b01: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 47, id: 47, wt: 6, ws: 4, sn: "gg_m134b01", vel: 100, rad: 14, ang: 0, rap: 125, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 5, dev: 6,
+    smindam: 15, smaxdam: 24, mmindam: 12, mmaxdam: 21, lmindam: 9, lmaxdam: 17
+  },
+  gg_m134b02: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1002, id: 1002, wt: 6, ws: 4, sn: "gg_m134b02", vel: 100, rad: 14, ang: 0, rap: 115, rt: 3200, ammo: 130, ammo_tot: 390, lt: 1100, krit: 6, dev: 6,
+    smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 20
+  },
+  gg_m249: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 20, id: 20, wt: 6, ws: 4, sn: "gg_m249", vel: 100, rad: 14, ang: 0, rap: 135, rt: 3000, ammo: 75, ammo_tot: 225, lt: 1100, krit: 6, dev: 6,
+    smindam: 17, smaxdam: 27, mmindam: 14, mmaxdam: 23, lmindam: 10, lmaxdam: 18
+  },
+  gg_n2: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1003, id: 1003, wt: 6, ws: 4, sn: "gg_n2", vel: 100, rad: 14, ang: 0, rap: 110, rt: 3500, ammo: 150, ammo_tot: 450, lt: 1100, krit: 6, dev: 6,
+    smindam: 19, smaxdam: 30, mmindam: 16, mmaxdam: 26, lmindam: 12, lmaxdam: 21
+  },
+  gl_ex41: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 100, id: 100, wt: 9, ws: 6, sn: "gl_ex41", vel: 6, rad: 10, ang: 0, rap: 900, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6,
+    flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
+    smindam: 58, smaxdam: 86, mmindam: 46, mmaxdam: 70, lmindam: 30, lmaxdam: 50
+  },
+  gl_snowlauncher: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 48, id: 48, wt: 9, ws: 6, sn: "gl_snowlauncher", vel: 6, rad: 10, ang: 0, rap: 950, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6,
+    flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
+    smindam: 54, smaxdam: 80, mmindam: 42, mmaxdam: 64, lmindam: 28, lmaxdam: 46
+  },
+  hg_glock_s: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1004, id: 1004, wt: 3, ws: 2, sn: "hg_glock_s", vel: 100, rad: 10, ang: 0, rap: 210, rt: 2400, ammo: 17, ammo_tot: 34, lt: 520, krit: 7, dev: 6,
+    smindam: 18, smaxdam: 27, mmindam: 14, mmaxdam: 22, lmindam: 9, lmaxdam: 16
+  },
+  hg_sigsauerp226_b: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 28, id: 28, wt: 3, ws: 2, sn: "hg_sigsauerp226_b", vel: 100, rad: 10, ang: 0, rap: 230, rt: 2500, ammo: 13, ammo_tot: 26, lt: 520, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 31, mmindam: 16, mmaxdam: 25, lmindam: 11, lmaxdam: 19
+  },
+  hg_tt: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 24, id: 24, wt: 3, ws: 2, sn: "hg_tt", vel: 100, rad: 10, ang: 0, rap: 280, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6,
+    smindam: 23, smaxdam: 34, mmindam: 18, mmaxdam: 27, lmindam: 12, lmaxdam: 20
+  },
+  hg_walther_r: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 18, id: 18, wt: 3, ws: 2, sn: "hg_walther_r", vel: 100, rad: 10, ang: 0, rap: 260, rt: 2500, ammo: 8, ammo_tot: 24, lt: 520, krit: 9, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 17, mmaxdam: 26, lmindam: 11, lmaxdam: 20
+  },
+  hg_waltherp99: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1005, id: 1005, wt: 3, ws: 2, sn: "hg_waltherp99", vel: 100, rad: 10, ang: 0, rap: 240, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 31, mmindam: 16, mmaxdam: 25, lmindam: 10, lmaxdam: 18
+  },
+  mg_ak103: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 29, id: 29, wt: 4, ws: 3, sn: "mg_ak103", vel: 100, rad: 12, ang: 0, rap: 126, rt: 3000, ammo: 18, ammo_tot: 54, lt: 650, krit: 7, dev: 6,
+    smindam: 20, smaxdam: 30, mmindam: 16, mmaxdam: 26, lmindam: 12, lmaxdam: 21
+  },
+  mg_ak103_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 30, id: 30, wt: 4, ws: 3, sn: "mg_ak103_o", vel: 100, rad: 12, ang: 0, rap: 121, rt: 3000, ammo: 22, ammo_tot: 66, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 31, mmindam: 17, mmaxdam: 27, lmindam: 13, lmaxdam: 22
+  },
+  mg_ak103d_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  mg_ak47b06: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  mg_ak47b07: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
+    smindam: 22, smaxdam: 34, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_ak47b08: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
+  },
+  mg_assaultrifle03: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1006, id: 1006, wt: 4, ws: 3, sn: "mg_assaultrifle03", vel: 100, rad: 12, ang: 0, rap: 97, rt: 3000, ammo: 42, ammo_tot: 126, lt: 650, krit: 8, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_aug2_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 78, id: 78, wt: 4, ws: 3, sn: "mg_aug2_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3000, ammo: 28, ammo_tot: 84, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
+  },
+  mg_aug3_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1007, id: 1007, wt: 4, ws: 3, sn: "mg_aug3_o", vel: 100, rad: 12, ang: 0, rap: 96, rt: 3000, ammo: 25, ammo_tot: 75, lt: 650, krit: 9, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_m16: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 19, id: 19, wt: 4, ws: 3, sn: "mg_m16", vel: 100, rad: 12, ang: 0, rap: 124, rt: 3000, ammo: 20, ammo_tot: 60, lt: 650, krit: 7, dev: 6,
+    smindam: 19, smaxdam: 29, mmindam: 16, mmaxdam: 25, lmindam: 11, lmaxdam: 20
+  },
+  mg_m4: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 46, id: 46, wt: 4, ws: 3, sn: "mg_m4", vel: 100, rad: 12, ang: 0, rap: 140, rt: 3000, ammo: 15, ammo_tot: 45, lt: 650, krit: 7, dev: 6,
+    smindam: 19, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 20
+  },
+  mg_m4_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  mg_m4d_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_ump45: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 58, id: 58, wt: 4, ws: 3, sn: "mg_ump45", vel: 100, rad: 12, ang: 0, rap: 94, rt: 2800, ammo: 35, ammo_tot: 95, lt: 650, krit: 7, dev: 6,
+    smindam: 19, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 10, lmaxdam: 18
+  },
+  mg_ump45d_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 60, id: 60, wt: 4, ws: 3, sn: "mg_ump45d_o", vel: 100, rad: 12, ang: 0, rap: 108, rt: 2800, ammo: 30, ammo_tot: 90, lt: 650, krit: 8, dev: 6,
+    smindam: 20, smaxdam: 31, mmindam: 16, mmaxdam: 26, lmindam: 11, lmaxdam: 20
+  },
+  mg_ump45d2_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 61, id: 61, wt: 4, ws: 3, sn: "mg_ump45d2_o", vel: 100, rad: 12, ang: 0, rap: 108, rt: 2800, ammo: 30, ammo_tot: 90, lt: 650, krit: 9, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 27, lmindam: 12, lmaxdam: 21
+  },
+  ohca_icicle_w: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1001, id: 1001, wt: 1, ws: 1, sn: "ohca_icicle_w", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
+    smindam: 25, smaxdam: 40, mmindam: 16, mmaxdam: 26, lmindam: 10, lmaxdam: 18
+  },
+  ohca_torch_f: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 40, id: 40, wt: 1, ws: 1, sn: "ohca_torch_f", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
+    smindam: 25, smaxdam: 40, mmindam: 16, mmaxdam: 26, lmindam: 10, lmaxdam: 18
+  },
+  rl_rpg7: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 66, id: 66, wt: 8, ws: 6, sn: "rl_rpg7", vel: 65, rad: 28, ang: 0, rap: 900, rt: 3000, ammo: 1, ammo_tot: 4, lt: 1150, krit: 5, dev: 6,
+    smindam: 82, smaxdam: 120, mmindam: 66, mmaxdam: 100, lmindam: 46, lmaxdam: 76
+  },
+  sg_db: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1010, id: 1010, wt: 7, ws: 5, sn: "sg_db", vel: 100, rad: 18, ang: 0, rap: 900, rt: 3000, ammo: 2, ammo_tot: 6, lt: 900, krit: 8, dev: 22,
+    smindam: 58, smaxdam: 86, mmindam: 30, mmaxdam: 46, lmindam: 8, lmaxdam: 16
+  },
+  sg_novapump: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 38, id: 38, wt: 7, ws: 5, sn: "sg_novapump", vel: 100, rad: 18, ang: 0, rap: 650, rt: 6000, ammo: 8, ammo_tot: 14, lt: 900, krit: 8, dev: 22,
+    smindam: 46, smaxdam: 70, mmindam: 26, mmaxdam: 42, lmindam: 8, lmaxdam: 16
+  },
+  sng_snowgun: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1011, id: 1011, wt: 11, ws: 4, sn: "sng_snowgun", vel: 100, rad: 14, ang: 0, rap: 150, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 5, dev: 6,
+    smindam: 17, smaxdam: 27, mmindam: 13, mmaxdam: 22, lmindam: 9, lmaxdam: 17
+  },
+  sr_hk417_d: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1012, id: 1012, wt: 10, ws: 7, sn: "sr_hk417_d", vel: 100, rad: 10, ang: 0, rap: 750, rt: 3000, ammo: 7, ammo_tot: 13, lt: 1000, krit: 10, dev: 3,
+    smindam: 62, smaxdam: 82, mmindam: 72, mmaxdam: 96, lmindam: 88, lmaxdam: 116
+  },
+  sr_m110_b: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 57, id: 57, wt: 10, ws: 7, sn: "sr_m110_b", vel: 100, rad: 10, ang: 0, rap: 700, rt: 3000, ammo: 10, ammo_tot: 20, lt: 1000, krit: 11, dev: 3,
+    smindam: 64, smaxdam: 86, mmindam: 76, mmaxdam: 100, lmindam: 92, lmaxdam: 122
+  },
+  sr_steyrb01: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 102, id: 102, wt: 10, ws: 7, sn: "sr_steyrb01", vel: 100, rad: 10, ang: 0, rap: 1000, rt: 2500, ammo: 1, ammo_tot: 4, lt: 1000, krit: 12, dev: 3,
+    smindam: 78, smaxdam: 102, mmindam: 90, mmaxdam: 118, lmindam: 108, lmaxdam: 140
+  },
+  thca_katana_b: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 41, id: 41, wt: 2, ws: 1, sn: "thca_katana_b", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 10, dev: 2,
+    smindam: 32, smaxdam: 48, mmindam: 20, mmaxdam: 32, lmindam: 12, lmaxdam: 22
+  },
+
   ohca_basebalbat: {
     rt: 0,
     ammo: 0,
@@ -3198,23 +3409,23 @@ const WEAPON_STAT_OVERRIDES = {
     smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16
   },
   mg_assaultrifle02: {
-    w_id: 101, id: 101, wt: 4, ws: 3, sn: "mg_assaultrifle02", vel: 100, rad: 12, ang: 0, rap: 145, rt: 3000, ammo: 35, ammo_tot: 175, lt: 650, krit: 6, dev: 9,
+    w_id: 101, id: 101, wt: 4, ws: 3, sn: "mg_assaultrifle02", vel: 100, rad: 12, ang: 0, rap: 121, rt: 3000, ammo: 35, ammo_tot: 175, lt: 650, krit: 6, dev: 9,
     smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19
   },
   mg_ump45vkks_o: {
-    w_id: 73, id: 73, wt: 4, ws: 3, sn: "mg_ump45vkks_o", vel: 100, rad: 12, ang: 0, rap: 145, rt: 3000, ammo: 35, ammo_tot: 210, lt: 650, krit: 8, dev: 6,
+    w_id: 73, id: 73, wt: 4, ws: 3, sn: "mg_ump45vkks_o", vel: 100, rad: 12, ang: 0, rap: 103, rt: 3000, ammo: 35, ammo_tot: 210, lt: 650, krit: 8, dev: 6,
     smindam: 23, smaxdam: 36, mmindam: 20, mmaxdam: 31, lmindam: 16, lmaxdam: 26
   },
   mg_aug1_o: {
-    w_id: 76, id: 76, wt: 4, ws: 3, sn: "mg_aug1_o", vel: 100, rad: 12, ang: 0, rap: 145, rt: 3000, ammo: 30, ammo_tot: 180, lt: 650, krit: 6, dev: 9,
+    w_id: 76, id: 76, wt: 4, ws: 3, sn: "mg_aug1_o", vel: 100, rad: 12, ang: 0, rap: 103, rt: 3000, ammo: 35, ammo_tot: 105, lt: 650, krit: 6, dev: 9,
     smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19
   },
   mg_aug5_o: {
-    w_id: 80, id: 80, wt: 4, ws: 3, sn: "mg_aug5_o", vel: 100, rad: 12, ang: 0, rap: 135, rt: 3000, ammo: 30, ammo_tot: 132, lt: 650, krit: 8, dev: 8,
+    w_id: 80, id: 80, wt: 4, ws: 3, sn: "mg_aug5_o", vel: 100, rad: 12, ang: 0, rap: 103, rt: 3000, ammo: 30, ammo_tot: 132, lt: 650, krit: 8, dev: 8,
     smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_aug4_o: {
-    w_id: 79, id: 79, wt: 4, ws: 3, sn: "mg_aug4_o", vel: 100, rad: 12, ang: 0, rap: 130, rt: 3000, ammo: 30, ammo_tot: 168, lt: 650, krit: 8, dev: 6,
+    w_id: 79, id: 79, wt: 4, ws: 3, sn: "mg_aug4_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3000, ammo: 30, ammo_tot: 168, lt: 650, krit: 8, dev: 6,
     smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   sr_svd: {
@@ -3528,11 +3739,15 @@ function clientSafeWeaponDeviation(deviation, weaponType) {
 
 function weaponRapidityForProfile(item = {}, fallback = {}, profile = null) {
   const rapidity = weaponRapidity(item, fallback);
-  return Math.max(70, shotIntervalMsForProfileRapidity(rapidity, profile) - 10);
+  const weaponType = numberOr(item.wt ?? fallback.wt, 0);
+  return Math.max(70, shotIntervalMsForProfileRapidity(rapidity, profile, weaponType) - 10);
 }
 
-function shotIntervalMsFromRapidity(rapidity) {
+function shotIntervalMsFromRapidity(rapidity, weaponType = 0) {
   const shotTimeMs = numberOr(rapidity, 100) + 10;
+  // Updated CombatWeapon permits the trained automatic intervals in the
+  // magazine timing table. Other weapon types retain the original fallback.
+  if (weaponType === 4) return Math.max(80, shotTimeMs);
   return shotTimeMs < 100 ? 110 : shotTimeMs;
 }
 
@@ -3541,15 +3756,23 @@ function rapidityBonusPercent(profile = null) {
   return clampNumber(stats.modifiers.weaponRapidityPercent ?? 0, 0, 80);
 }
 
-function shotIntervalMsForProfileRapidity(rapidity, profile = null) {
-  const base = shotIntervalMsFromRapidity(rapidity);
+function shotIntervalMsForProfileRapidity(rapidity, profile = null, weaponType = 0) {
+  const base = shotIntervalMsFromRapidity(rapidity, weaponType);
   const rapidityPercent = rapidityBonusPercent(profile);
+  if (weaponType === 4) {
+    const trainingLevel = APPLY_TRAINING_ABILITY_BONUSES ? abilityLevel(profile, 5) : 0;
+    const trainingPercent = numberOr(ABILITY_BONUS_LEVELS[5].weaponRapidityPercent[trainingLevel - 1], 0);
+    const equipmentPercent = Math.max(0, rapidityPercent - trainingPercent);
+    // The requested automatic table increases rate by 2/4/6/8/10%, so
+    // interval is divided by that rate. Existing equipment reduction stays.
+    return Math.max(80, Math.round(base * (100 - equipmentPercent) / (100 + trainingPercent)));
+  }
   return Math.max(80, Math.round(base * (100 - rapidityPercent) / 100));
 }
 
-function rapidityDeltaForWeapon(profile = null, rapidity = 0) {
-  const base = shotIntervalMsFromRapidity(rapidity);
-  return shotIntervalMsForProfileRapidity(rapidity, profile) - base;
+function rapidityDeltaForWeapon(profile = null, rapidity = 0, weaponType = 0) {
+  const base = shotIntervalMsFromRapidity(rapidity, weaponType);
+  return shotIntervalMsForProfileRapidity(rapidity, profile, weaponType) - base;
 }
 
 function reloadDurationMsFromRaw(reloadTimeMs) {
@@ -4664,7 +4887,7 @@ function makeWeaponRuntimeState(profile = null) {
       type: numberOr(merged.wt, fallback.wt),
       workshopExpiresAt: isActiveWorkshopWeaponUpgrade(merged) ? numberOr(merged.eD, 0) : 0,
       rapidity,
-      shotIntervalMs: shotIntervalMsFromRapidity(rapidity),
+      shotIntervalMs: shotIntervalMsFromRapidity(rapidity, numberOr(merged.wt, fallback.wt)),
       nextShotAt: 0,
       weaponMode: WEAPON_MODE.READY,
       modeStartedAt: 0,
@@ -8074,7 +8297,7 @@ function isReloadWeaponMode(mode) {
 }
 
 function shotReadyAt(state) {
-  return numberOr(state?.shotStartedAt, 0) + numberOr(state?.shotIntervalMs, shotIntervalMsFromRapidity(state?.rapidity));
+  return numberOr(state?.shotStartedAt, 0) + numberOr(state?.shotIntervalMs, shotIntervalMsFromRapidity(state?.rapidity, state?.type));
 }
 
 function isShotReadyWithinSlack(state, now = Date.now()) {
@@ -8179,7 +8402,7 @@ function startWeaponLaunching(state, now = Date.now()) {
 function startWeaponShooting(state, now = Date.now()) {
   if (!state) return WEAPON_MODE.READY;
   state.shotStartedAt = now;
-  state.nextShotAt = now + numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  state.nextShotAt = now + numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity, state.type));
   return setWeaponMode(state, WEAPON_MODE.SHOOTING, now);
 }
 
@@ -8191,7 +8414,7 @@ function stopWeaponAction(state, now = Date.now()) {
 
 function startMeleeShotChain(state, now = Date.now()) {
   startWeaponShooting(state, now);
-  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity, state.type));
   state.meleeDelayedShotUntil = now + Math.max(MELEE_DELAYED_SHOT_MS, intervalMs) + MELEE_DELAYED_SHOT_GRACE_MS;
   state.meleeDelayedShotUsed = false;
 }
@@ -8346,7 +8569,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
   if (!state) return { ok: true, reason: "unknown-state" };
 
   const weaponMode = refreshWeaponMode(state, now);
-  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity));
+  const intervalMs = numberOr(state.shotIntervalMs, shotIntervalMsFromRapidity(state.rapidity, state.type));
   const consumesAmmo = shotConsumesAmmo(state.type, launchMode);
 
   if (isProjectileImpactShot(state, launchMode)) {
