@@ -1013,9 +1013,48 @@ function provisionalShopWeaponStats(item) {
   };
 }
 
-const additionalShopWeaponCatalog = JSON.parse(
-  fs.readFileSync(path.join(API_DIR, "data", "additional-shop-weapons.json"), "utf8")
-);
+const additionalShopWeaponCatalog = [
+  { "id": 63, "slot": 6, "sname": "BL_Sticky", "ammo": 4, "ammo_tot": 20 },
+  { "id": 64, "slot": 6, "sname": "BL_StickyB02", "ammo": 4, "ammo_tot": 20 },
+  { "id": 25, "slot": 4, "sname": "FL_N1", "ammo": 100, "ammo_tot": 300 },
+  { "id": 47, "slot": 4, "sname": "GG_M134B01" },
+  { "id": 1002, "slot": 4, "sname": "GG_M134B02", "name": "M134 B02" },
+  { "id": 20, "slot": 4, "sname": "GG_M249" },
+  { "id": 1003, "slot": 4, "sname": "GG_N2", "name": "GG N2" },
+  { "id": 100, "slot": 6, "sname": "GL_EX41", "ammo": 6, "ammo_tot": 30 },
+  { "id": 48, "slot": 6, "sname": "GL_SnowLauncher", "ammo": 1, "ammo_tot": 12 },
+  { "id": 1004, "slot": 2, "sname": "HG_Glock_S", "name": "Glock S" },
+  { "id": 28, "slot": 2, "sname": "HG_SIGSauerP226_B" },
+  { "id": 24, "slot": 2, "sname": "HG_TT" },
+  { "id": 18, "slot": 2, "sname": "HG_Walther_R" },
+  { "id": 1005, "slot": 2, "sname": "HG_WaltherP99", "name": "Walther P99" },
+  { "id": 29, "slot": 3, "sname": "MG_AK103" },
+  { "id": 30, "slot": 3, "sname": "MG_AK103_O" },
+  { "id": 31, "slot": 3, "sname": "MG_AK103D_O" },
+  { "id": 32, "slot": 3, "sname": "MG_AK47B06" },
+  { "id": 33, "slot": 3, "sname": "MG_AK47B07" },
+  { "id": 34, "slot": 3, "sname": "MG_AK47B08" },
+  { "id": 1006, "slot": 3, "sname": "MG_AssaultRifle03", "name": "Assault Rifle 03" },
+  { "id": 78, "slot": 3, "sname": "MG_AUG2_O" },
+  { "id": 1007, "slot": 3, "sname": "MG_AUG3_O", "name": "AUG3" },
+  { "id": 19, "slot": 3, "sname": "MG_M16" },
+  { "id": 46, "slot": 3, "sname": "MG_M4" },
+  { "id": 1008, "slot": 3, "sname": "MG_M4_O", "name": "M4 O" },
+  { "id": 1009, "slot": 3, "sname": "MG_M4D_O", "name": "M4D" },
+  { "id": 58, "slot": 3, "sname": "MG_UMP45" },
+  { "id": 60, "slot": 3, "sname": "MG_UMP45D_O" },
+  { "id": 61, "slot": 3, "sname": "MG_UMP45D2_O" },
+  { "id": 1001, "slot": 1, "sname": "OHCA_Icicle_W", "name": "Ледяная сосулька", "ammo": 0, "ammo_tot": 0 },
+  { "id": 40, "slot": 1, "sname": "OHCA_Torch_F", "ammo": 0, "ammo_tot": 0 },
+  { "id": 66, "slot": 6, "sname": "RL_RPG7", "ammo": 1, "ammo_tot": 9 },
+  { "id": 1010, "slot": 5, "sname": "SG_DB", "name": "Двустволка", "ammo": 2, "ammo_tot": 24 },
+  { "id": 38, "slot": 5, "sname": "SG_Novapump", "ammo": 7, "ammo_tot": 42 },
+  { "id": 1011, "slot": 4, "sname": "SNG_Snowgun", "name": "Снежная пушка", "ammo": 100, "ammo_tot": 300 },
+  { "id": 1012, "slot": 7, "sname": "SR_HK417_D", "name": "HK417 D", "ammo": 10, "ammo_tot": 60 },
+  { "id": 57, "slot": 7, "sname": "SR_M110_B", "ammo": 10, "ammo_tot": 60 },
+  { "id": 102, "slot": 7, "sname": "SR_SteyrB01", "ammo": 1, "ammo_tot": 8 },
+  { "id": 41, "slot": 1, "sname": "THCA_Katana_B", "ammo": 0, "ammo_tot": 0 }
+];
 const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
 const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
   .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
