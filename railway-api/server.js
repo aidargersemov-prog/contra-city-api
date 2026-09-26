@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-26-statistics-map-mode-reset-v122";
+const API_BUILD_ID = "railway-api-2026-09-26-full-weapon-shop-v123";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -1016,7 +1016,7 @@ function provisionalShopWeaponStats(item) {
 const additionalShopWeaponCatalog = require("./data/additional-shop-weapons.json");
 const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
 const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
-  .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500 }));
+  .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
 
 function weaponTypeForSname(sname) {
   const prefix = String(sname || "").toLowerCase().split("_")[0];
