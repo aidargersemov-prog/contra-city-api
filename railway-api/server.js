@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-27-pistol-timing-v136";
+const API_BUILD_ID = "railway-api-2026-09-27-battle-server-choice-v137";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -73,6 +73,7 @@ const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRE
   ? DEFAULT_BATTLE_HOST
   : CONFIGURED_BATTLE_HOST;
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
+const WARSAW_BATTLE_HOST = String(process.env.WARSAW_BATTLE_HOST || "").trim();
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
 const PROMO_ADMIN_TOKEN = process.env.PROMO_ADMIN_TOKEN || "";
@@ -8283,7 +8284,10 @@ function mapsPayload() {
     .join(",") || "5055";
   const battleServers = BATTLE_HOST
     ? [
-        { h: BATTLE_HOST, p: battlePorts, n: BATTLE_NAME, pL: "100", lM: "0", lMa: "100", m: "0" },
+        { h: BATTLE_HOST, p: battlePorts, n: "Франкфурт", pL: "100", lM: "0", lMa: "100", m: "0" },
+        ...(WARSAW_BATTLE_HOST && WARSAW_BATTLE_HOST !== BATTLE_HOST
+          ? [{ h: WARSAW_BATTLE_HOST, p: battlePorts, n: "Варшава", pL: "100", lM: "0", lMa: "100", m: "0" }]
+          : []),
         { h: BATTLE_HOST, p: socialMasterPort, n: `${BATTLE_NAME} Master`, pL: "100", lM: "0", lMa: "100", m: "1" }
       ]
     : [];
