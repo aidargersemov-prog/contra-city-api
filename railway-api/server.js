@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-27-battle-server-level-access-v138";
+const API_BUILD_ID = "railway-api-2026-09-27-global-ranking-lists-v141";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -8609,23 +8609,28 @@ function leagueIndexForExp(exp, limits) {
 
 async function leaguePayload(account) {
   const accounts = await allAccountsForStats();
-  const sorted = sortRatingAccounts(accounts, 2);
+  const sorted = sortRatingAccounts(accounts, 1);
   const currentIndex = sorted.findIndex((ratedAccount) => Number(ratedAccount.id) === Number(account.id));
   const currentAccount = currentIndex >= 0 ? sorted[currentIndex] : account;
-  const me = ratingUser(currentAccount, currentIndex >= 0 ? currentIndex + 1 : 1);
+  const me = ratingUser(currentAccount, currentIndex >= 0 ? currentIndex + 1 : -1);
   const limits = leagueLimits();
-  const leagues = Object.fromEntries(Array.from({ length: 15 }, (_, idx) => [`l${idx + 1}`, []]));
-
-  for (const ratedAccount of sorted) {
-    const row = ratingUser(ratedAccount);
-    const leagueIndex = leagueIndexForExp(row.exp, limits);
-    if (leagues[`l${leagueIndex}`].length < 101 || Number(row.id) === Number(account.id)) {
-      leagues[`l${leagueIndex}`].push(row);
-    }
-  }
-
+  const pageSize = 100;
+  const pageCount = Math.max(15, Math.ceil(sorted.length / pageSize));
+  // Sort everybody first, then partition by global position. Experience
+  // thresholds remain medal data only and never choose a player's list.
+  me.league = leagueIndexForExp(me.exp, limits);
+  me.rank_page = currentIndex >= 0 ? Math.floor(currentIndex / pageSize) + 1 : 1;
+  const leagues = Object.fromEntries(Array.from({ length: pageCount }, (_, idx) => {
+    const start = idx * pageSize;
+    if (idx >= 15) limits[String(idx + 1)] = [0, 0];
+    return [`l${idx + 1}`, sorted.slice(start, start + pageSize)
+      .map((ratedAccount, rowIndex) => ratingUser(ratedAccount, start + rowIndex + 1))];
+  }));
+  console.log(`[league-rating] mode=global-ranking users=${sorted.length} lists=${Math.ceil(sorted.length / pageSize)} top=${sorted[0]?.id || 0} user=${account.id} rank=${me.pos} list=${me.rank_page}`);
   return {
     result: true,
+    rank_pages: true,
+    page_count: pageCount,
     u: me,
     ls: limits,
     ...leagues
