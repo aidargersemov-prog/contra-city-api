@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-26-magazine-timing-v130";
+const API_BUILD_ID = "railway-api-2026-09-27-pistol-timing-v136";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -710,6 +710,7 @@ const weaponTitleById = {
 };
 
 const ARCING_LAUNCHER_VELOCITY = 10;
+const VORCHUN_GRENADE_VELOCITY = ARCING_LAUNCHER_VELOCITY;
 const ARCING_LAUNCHER_LIFE = 7000;
 const ARCING_LAUNCHER_DISTANCE = 10;
 
@@ -897,6 +898,95 @@ function weaponBalance(slot, wt, id) {
   };
 }
 
+// Confirmed shop ratings. Keys are model names because historical purchase IDs
+// and localization IDs differ for several weapons. Omitted ratings keep their
+// existing values; ratings do not change the weapon's combat statistics.
+const confirmedWeaponStarsBySname = new Map(Object.entries({
+  ohca_basebalbat: { stDi: 1, stDa: 1 },
+  ohca_candy: { stDi: 2, stDa: 2 },
+  ohca_candy2: { stDi: 1, stDa: 3 },
+  ohca_crowbar: { stDi: 1, stDa: 3 },
+  thca_scythe_b: { stDi: 5, stDa: 3 },
+  ohca_torch_f: { stDi: 1, stDa: 2 },
+  ohca_icicle_w: { stDi: 1, stDa: 2 },
+  fl_n1: { stDi: 2, stDa: 1 },
+
+  hg_makarov: { stDi: 1, stDa: 2 },
+  hg_tt: { stDi: 2, stDa: 3 },
+  hg_walther_r: { stDi: 3, stDa: 3 },
+  hg_waltherp99: { stDi: 3, stDa: 4 },
+  hg_sigsauerp226_b: { stDi: 3, stDa: 4 },
+  hg_glock_s: { stRa: 4, stDi: 2 },
+  hg_glockb01_s: { stRa: 4, stDi: 3 },
+  hg_desert: { stDi: 5, stDa: 4 },
+  hg_desertb01: { stDi: 5, stDa: 5 },
+  hg_taurus: { stDi: 5, stDa: 5 },
+  hg_usp: { stRa: 5, stDa: 3 },
+
+  mg_ak47: { stRa: 1, stDa: 2 },
+  mg_m16: { stRa: 1, stDa: 2 },
+  mg_ak103: { stRa: 3, stDa: 3 },
+  mg_ak103_o: { stRa: 2, stDa: 3 },
+  mg_ak103d_o: { stRa: 3, stDa: 3 },
+  mg_ak47b06: { stRa: 3, stDa: 4 },
+  mg_ak47b07: { stRa: 3, stDa: 3 },
+  mg_ak47b08: { stRa: 3, stDa: 5 },
+  mg_m4: { stRa: 2, stDa: 2 },
+  mg_m4_o: { stRa: 3, stDa: 3 },
+  mg_m4d_o: { stRa: 3, stDa: 3 },
+  mg_ump45: { stRa: 5, stDa: 2 },
+  mg_ump45d_o: { stRa: 5, stDa: 3 },
+  mg_ump45d2_o: { stRa: 4, stDa: 3 },
+  mg_aug1_o: { stRa: 3, stDa: 5 },
+  mg_aug2_o: { stRa: 4, stDa: 3 },
+  mg_aug3_o: { stRa: 3, stDa: 3 },
+  mg_aug4_o: { stRa: 3, stDa: 5 },
+  mg_aug5_o: { stRa: 5, stDa: 5 },
+  mg_assaultrifle03: { stRa: 5, stDa: 4 },
+  mg_assaultrifle02: { stRa: 3, stDa: 5 },
+  mg_ump45vkks_o: { stRa: 5, stDa: 5 },
+
+  gg_m134: { stRa: 1, stDa: 2 },
+  gg_m134b02: { stRa: 3, stDa: 3 },
+  gg_m134b03: { stRa: 3, stDa: 3 },
+  gg_m249: { stRa: 3, stDa: 2 },
+  gg_n2: { stRa: 2, stDa: 1 },
+  gg_fnmag: { stRa: 5, stDa: 2 },
+
+  sg_winchester1887: { stDi: 1, stDa: 2 },
+  sg_db: { stDi: 2, stDa: 3 },
+  sg_novapump: { stDi: 2, stDa: 4 },
+  sg_spas: { stRa: 2, stDa: 5 },
+  sg_remington: { stDi: 4, stDa: 5 },
+
+  rl_rpg26: { stRa: 1, stDa: 2 },
+  rl_rpg7: { stRa: 1, stDa: 3 },
+  rl_rpg7b02: { stRa: 2, stDa: 4 },
+  rl_m202a1: { stRa: 5, stDa: 2 },
+  gl_milkor: { stDi: 3, stDa: 4 },
+  gl_milkor_a: { stDi: 3, stDa: 4 },
+  gl_grenadelauncher03: { stRa: 3, stDa: 5 },
+  gl_ex41: { stRa: 4, stDa: 4 },
+  gl_snowlauncher: { stDi: 3, stDa: 3 },
+  bl_sticky: { stDi: 3, stDa: 5 },
+  bl_stickyb02: { stDi: 3, stDa: 4 },
+
+  sr_svd: { stDi: 1, stDa: 2 },
+  sr_steyr: { stRa: 3, stDa: 3 },
+  sr_steyrb01: { stDi: 1, stDa: 2 },
+  sr_hk417_d: { stRa: 4, stDa: 2 },
+  sr_vintorez: { stRa: 3, stDa: 3 },
+  sr_sniperrifle03: { stRa: 2, stDa: 5 },
+  sr_arctic: { stRa: 3, stDa: 4 },
+  sr_arcticb01: { stRa: 4, stDa: 4 },
+  sr_wildcat1: { stRa: 3, stDa: 5 },
+  sr_wildcat2: { stRa: 4, stDa: 4 },
+}));
+
+function confirmedWeaponStars(sname) {
+  return confirmedWeaponStarsBySname.get(String(sname || "").toLowerCase()) || {};
+}
+
 function weapon(id, wt, slot, sname, price, extra = {}) {
   const balance = weaponBalance(slot, wt, id);
   const identity = weaponIdentityBySname.get(String(sname).toLowerCase());
@@ -919,7 +1009,8 @@ function weapon(id, wt, slot, sname, price, extra = {}) {
     ...(identity ? { sname: identity.sname, sn: identity.sname, name: identity.name } : {}),
     ...(ammunition || {}),
     desc: `w_${textId}_desc`,
-    desca: `w_${textId}_desca`
+    desca: `w_${textId}_desca`,
+    ...confirmedWeaponStars(sname)
   };
 }
 
@@ -972,10 +1063,10 @@ function enhancer(id, prices = 120) {
 
 const defaultWeapons = [
   weapon(1, 1, 1, "ohca_basebalbat", 0, { ammo: 0, ammo_tot: 0, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 }),
-  weapon(2, 3, 2, "hg_makarov", 0, { smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 }),
+  weapon(2, 3, 2, "hg_makarov", 0, { rap: 355,  smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 }),
   weapon(3, 4, 3, "mg_ak47", 0, { rap: 126, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 }),
   weapon(4, 6, 4, "gg_m134", 0, { smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 }),
-  weapon(5, 7, 5, "sg_winchester1887", 0),
+  weapon(5, 7, 5, "sg_winchester1887", 0, { rap: 1565 }),
   weapon(6, 8, 6, "rl_rpg26", 0, { smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 }),
   weapon(7, 10, 7, "sr_svd", 0, { krit: 8, smindam: 34, smaxdam: 48, mmindam: 38, mmaxdam: 54, lmindam: 42, lmaxdam: 60 })
 ];
@@ -1071,7 +1162,7 @@ const canonicalShopWeaponStats = {
   },
   fl_n1: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 25, id: 25, wt: 5, ws: 4, sn: "fl_n1", vel: 100, rad: 14, ang: 0, rap: 140, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 4, dev: 6, stRa: 5, stDi: 2, stDa: 3,
+    w_id: 25, id: 25, wt: 5, ws: 4, sn: "fl_n1", vel: 100, rad: 14, ang: 0.34906585, rap: 140, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 4, dev: 6, stRa: 5, stDi: 2, stDa: 3,
     smindam: 16, smaxdam: 24, mmindam: 12, mmaxdam: 20, lmindam: 8, lmaxdam: 14
   },
   gg_m134b01: {
@@ -1096,37 +1187,37 @@ const canonicalShopWeaponStats = {
   },
   gl_ex41: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 100, id: 100, wt: 9, ws: 6, sn: "gl_ex41", vel: 6, rad: 10, ang: 0, rap: 900, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6, stRa: 3, stDi: 4, stDa: 4,
+    w_id: 100, id: 100, wt: 9, ws: 6, sn: "gl_ex41", vel: VORCHUN_GRENADE_VELOCITY, rad: 10, ang: 0, rap: 900, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6, stRa: 3, stDi: 4, stDa: 4,
     smindam: 58, smaxdam: 86, mmindam: 46, mmaxdam: 70, lmindam: 30, lmaxdam: 50
   },
   gl_snowlauncher: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 48, id: 48, wt: 9, ws: 6, sn: "gl_snowlauncher", vel: 6, rad: 10, ang: 0, rap: 950, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6, stRa: 2, stDi: 4, stDa: 4,
+    w_id: 48, id: 48, wt: 9, ws: 6, sn: "gl_snowlauncher", vel: VORCHUN_GRENADE_VELOCITY, rad: 10, ang: 0, rap: 950, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6, stRa: 2, stDi: 4, stDa: 4,
     smindam: 54, smaxdam: 80, mmindam: 42, mmaxdam: 64, lmindam: 28, lmaxdam: 46
   },
   hg_glock_s: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1004, id: 1004, wt: 3, ws: 2, sn: "hg_glock_s", vel: 100, rad: 10, ang: 0, rap: 210, rt: 2400, ammo: 17, ammo_tot: 34, lt: 520, krit: 7, dev: 6, stRa: 4, stDi: 3, stDa: 3,
+    w_id: 1004, id: 1004, wt: 3, ws: 2, sn: "hg_glock_s", vel: 100, rad: 10, ang: 0, rap: 219, rt: 2400, ammo: 17, ammo_tot: 34, lt: 520, krit: 7, dev: 6, stRa: 4, stDi: 3, stDa: 3,
     smindam: 18, smaxdam: 27, mmindam: 14, mmaxdam: 22, lmindam: 9, lmaxdam: 16
   },
   hg_sigsauerp226_b: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 28, id: 28, wt: 3, ws: 2, sn: "hg_sigsauerp226_b", vel: 100, rad: 10, ang: 0, rap: 230, rt: 2500, ammo: 13, ammo_tot: 26, lt: 520, krit: 8, dev: 6, stRa: 4, stDi: 3, stDa: 4,
+    w_id: 28, id: 28, wt: 3, ws: 2, sn: "hg_sigsauerp226_b", vel: 100, rad: 10, ang: 0, rap: 405, rt: 2500, ammo: 13, ammo_tot: 26, lt: 520, krit: 8, dev: 6, stRa: 4, stDi: 3, stDa: 4,
     smindam: 21, smaxdam: 31, mmindam: 16, mmaxdam: 25, lmindam: 11, lmaxdam: 19
   },
   hg_tt: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 24, id: 24, wt: 3, ws: 2, sn: "hg_tt", vel: 100, rad: 10, ang: 0, rap: 280, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6, stRa: 3, stDi: 3, stDa: 4,
+    w_id: 24, id: 24, wt: 3, ws: 2, sn: "hg_tt", vel: 100, rad: 10, ang: 0, rap: 322, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6, stRa: 3, stDi: 3, stDa: 4,
     smindam: 23, smaxdam: 34, mmindam: 18, mmaxdam: 27, lmindam: 12, lmaxdam: 20
   },
   hg_walther_r: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 18, id: 18, wt: 3, ws: 2, sn: "hg_walther_r", vel: 100, rad: 10, ang: 0, rap: 260, rt: 2500, ammo: 8, ammo_tot: 24, lt: 520, krit: 9, dev: 6, stRa: 3, stDi: 3, stDa: 4,
+    w_id: 18, id: 18, wt: 3, ws: 2, sn: "hg_walther_r", vel: 100, rad: 10, ang: 0, rap: 355, rt: 2500, ammo: 8, ammo_tot: 24, lt: 520, krit: 9, dev: 6, stRa: 3, stDi: 3, stDa: 4,
     smindam: 22, smaxdam: 33, mmindam: 17, mmaxdam: 26, lmindam: 11, lmaxdam: 20
   },
   hg_waltherp99: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1005, id: 1005, wt: 3, ws: 2, sn: "hg_waltherp99", vel: 100, rad: 10, ang: 0, rap: 240, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6, stRa: 4, stDi: 3, stDa: 3,
+    w_id: 1005, id: 1005, wt: 3, ws: 2, sn: "hg_waltherp99", vel: 100, rad: 10, ang: 0, rap: 420, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6, stRa: 4, stDi: 3, stDa: 3,
     smindam: 21, smaxdam: 31, mmindam: 16, mmaxdam: 25, lmindam: 10, lmaxdam: 18
   },
   mg_ak103: {
@@ -1236,7 +1327,7 @@ const canonicalShopWeaponStats = {
   },
   sng_snowgun: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1011, id: 1011, wt: 11, ws: 4, sn: "sng_snowgun", vel: 100, rad: 14, ang: 0, rap: 150, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 5, dev: 6, stRa: 4, stDi: 3, stDa: 3,
+    w_id: 1011, id: 1011, wt: 11, ws: 4, sn: "sng_snowgun", vel: 100, rad: 14, ang: 0.34906585, rap: 150, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 5, dev: 6, stRa: 4, stDi: 3, stDa: 3,
     smindam: 17, smaxdam: 27, mmindam: 13, mmaxdam: 22, lmindam: 9, lmaxdam: 17
   },
   sr_hk417_d: {
@@ -1265,11 +1356,11 @@ const canonicalShopWeaponStats = {
   ohca_crowbar: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 5, ammo: 0, ammo_tot: 0, smindam: 15, smaxdam: 22, mmindam: 10, mmaxdam: 19, lmindam: 5, lmaxdam: 8 },
   thca_scythe_b: { rap: 1111, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 12, ammo: 0, ammo_tot: 0, smindam: 34, smaxdam: 48, mmindam: 24, mmaxdam: 36, lmindam: 14, lmaxdam: 24 },
   
-  hg_taurus: { rap: 460, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
-  hg_usp: { rap: 240, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
-  hg_desertb01: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
-  hg_desert: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
-  hg_glockb01_s: { rap: 150, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
+  hg_taurus: { rap: 564, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
+  hg_usp: { rap: 285, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
+  hg_desertb01: { rap: 600, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
+  hg_desert: { rap: 542, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, lmindam: 11, lmaxdam: 21 },
+  hg_glockb01_s: { rap: 194, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
 
   mg_assaultrifle02: { rap: 121, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_ump45vkks_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
@@ -1283,7 +1374,7 @@ const canonicalShopWeaponStats = {
   sg_remington: {
     desc: "Хороший или плохой советчик - решать вам.",
     desca: "- Наносит периодический урон типа \"кровотечение\"",
-    rap: 660,
+    rap: 828,
     rt: 3864,
     lt: 900,
     vel: 100,
@@ -1302,7 +1393,7 @@ const canonicalShopWeaponStats = {
     wsp: 15,
     shake: 1
   },
-  sg_spas: { rap: 860, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
+  sg_spas: { rap: 1640, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
 
   rl_m202a1: {
     desc: "Карающая длань Четырех Вождей Красного Фронта.",
@@ -1332,13 +1423,13 @@ const canonicalShopWeaponStats = {
   rl_rpg7b02: { rap: 900, rt: 2967, lt: 1150, vel: 65, rad: 28, ang: 0, dev: 6, krit: 4, ammo: 1, ammo_tot: 9, smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78 },
   gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 36, smaxdam: 56, mmindam: 55, mmaxdam: 68, lmindam: 56, lmaxdam: 75 },
 
-  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
-  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
-  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
-  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
-  sr_arcticb01: { rap: 1120, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 4, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
+  sr_vintorez: { rap: 1173, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
+  sr_sniperrifle03: { rap: 3190, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
+  sr_wildcat1: { rap: 1404, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
+  sr_wildcat2: { rap: 1404, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
+  sr_arcticb01: { rap: 2815, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 4, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
   sr_steyr: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 7, ammo: 1, ammo_tot: 4, smindam: 45, smaxdam: 55, mmindam: 60, mmaxdam: 70, lmindam: 77, lmaxdam: 98 },
-  sr_arctic: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 6, ammo_tot: 9, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
+  sr_arctic: { rap: 2515, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 6, ammo_tot: 9, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
 };
 
 function withCanonicalShopWeaponStats(item) {
@@ -1346,7 +1437,9 @@ function withCanonicalShopWeaponStats(item) {
   const stats = canonicalShopWeaponStats[key];
   if (!stats) throw new Error(`Missing explicit weapon stats: ${key}`);
   const reloadTime = originalReloadTimeMs[key];
-  return reloadTime === undefined ? { ...item, ...stats } : { ...item, ...stats, rt: reloadTime };
+  return reloadTime === undefined
+    ? { ...item, ...stats, ...confirmedWeaponStars(key) }
+    : { ...item, ...stats, rt: reloadTime, ...confirmedWeaponStars(key) };
 }
 
 const additionalShopWeaponCatalog = [
@@ -1394,6 +1487,8 @@ const additionalShopWeaponCatalog = [
 // New entries are explicitly tunable; their active workshop stats follow this
 // base table instead of retaining the former generated values in saved JSON.
 const temporaryBalanceWeaponKeys = new Set(additionalShopWeaponCatalog.map((item) => item.sname.toLowerCase()));
+// Update firing intervals for these existing purchases without rebasing other stats.
+const correctedWeaponRapidityKeys = new Set(["sr_vintorez","hg_usp","sg_remington","hg_desert","hg_desertb01","sg_spas","sg_winchester1887","hg_taurus","hg_glockb01_s","hg_makarov","hg_tt","hg_walther_r","hg_waltherp99","hg_sigsauerp226_b","hg_glock_s","sr_sniperrifle03","sr_arctic","sr_arcticb01","sr_wildcat1","sr_wildcat2"]);
 const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
 const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
   .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
@@ -1767,8 +1862,12 @@ function wearTextFor(slot, sname) {
     if (typeof value === "string") localized[field] = value;
   }
   const result = { ...(wearTextOverrides[key] || {}), ...localized };
-  if (key === "Boots:slip99") {
-    result.desca = appendWearBonusText(result.desca, BLUE_SOLDIER_SLIP99_SHOTGUN_JUMP_BONUS);
+  if (slot === "Boots") {
+    const otherBonuses = String(result.desca || "").split(/\r?\n/)
+      .filter((line) => !/скорост[ьи]|прыж|немного меньше, чем у ботинок/iu.test(line))
+      .filter((line) => line.trim());
+    result.desca = [...otherBonuses, "+8% к скорости",
+      "Большой бонус к прыжку после выстрела из дробовика"].join("\n");
   }
   return result;
 }
@@ -3206,8 +3305,8 @@ function normalizeInventoryItem(item) {
       const upgraded = temporaryBalanceWeaponKeys.has(weaponSnameKey(canonical))
         ? { ...clone(item), ...upgradedWeaponItem(canonical), u_id: item.u_id, eD: item.eD, sc: item.sc ?? canonical.sc }
         : clone(item);
-      if (Number(canonical.wt) === 4) {
-        // Apply the magazine timing correction to existing automatic upgrades
+      if (Number(canonical.wt) === 4 || correctedWeaponRapidityKeys.has(weaponSnameKey(canonical))) {
+        // Apply current firing intervals to the affected existing upgrades
         // without replacing their other purchased characteristics.
         upgraded.rap = upgradedWeaponItem(canonical).rap;
       }
@@ -3218,6 +3317,12 @@ function normalizeInventoryItem(item) {
         upgraded.ammo = ammunition.ammo;
         upgraded.ammo_tot = ammunition.ammo_tot;
       }
+      // Saved purchases can contain the previous ratings. Refresh only the
+      // confirmed fields; the workshop still adds one star, capped at five.
+      const correctedStars = Object.fromEntries(
+        Object.entries(confirmedWeaponStars(canonical.sname))
+          .map(([key, stars]) => [key, Math.min(5, stars + 1)])
+      );
       return {
         ...clone(canonical),
         ...upgraded,
@@ -3229,7 +3334,8 @@ function normalizeInventoryItem(item) {
         ws: canonical.ws,
         name: canonical.name,
         desc: canonical.desc,
-        desca: canonical.desca
+        desca: canonical.desca,
+        ...correctedStars
       };
     }
     return canonical
@@ -3806,7 +3912,6 @@ async function profileAccountForView(account, url) {
       const fresh = await loadPostgresAccount(targetId);
       if (fresh) {
         store.accounts[String(fresh.id)] = fresh;
-        account.money = nextPlayerMoney;
         target = fresh;
       }
     } catch (error) {
