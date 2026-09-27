@@ -24,7 +24,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-27-battle-server-choice-v137";
+const API_BUILD_ID = "railway-api-2026-09-27-battle-server-level-access-v138";
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -8284,9 +8284,9 @@ function mapsPayload() {
     .join(",") || "5055";
   const battleServers = BATTLE_HOST
     ? [
-        { h: BATTLE_HOST, p: battlePorts, n: "Франкфурт", pL: "100", lM: "0", lMa: "100", m: "0" },
+        { h: BATTLE_HOST, p: battlePorts, n: "Франкфурт", pL: "100", lM: "0", lMa: "5000", m: "0" },
         ...(WARSAW_BATTLE_HOST && WARSAW_BATTLE_HOST !== BATTLE_HOST
-          ? [{ h: WARSAW_BATTLE_HOST, p: battlePorts, n: "Варшава", pL: "100", lM: "0", lMa: "100", m: "0" }]
+          ? [{ h: WARSAW_BATTLE_HOST, p: battlePorts, n: "Варшава", pL: "100", lM: "0", lMa: "5000", m: "0" }]
           : []),
         { h: BATTLE_HOST, p: socialMasterPort, n: `${BATTLE_NAME} Master`, pL: "100", lM: "0", lMa: "100", m: "1" }
       ]
