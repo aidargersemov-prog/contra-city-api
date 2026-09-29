@@ -3446,12 +3446,13 @@ function normalizeInventoryItem(item) {
         upgraded.ammo = ammunition.ammo;
         upgraded.ammo_tot = ammunition.ammo_tot;
       }
-      // Saved purchases can contain the previous third category. Reset all
-      // three ratings; the workshop raises only the two displayed categories.
+      // Rebase only damage fields of saved upgrades onto the new damage table.
       const damageUpgrade = upgradedWeaponItem(canonical);
       for (const key of ["smindam", "smaxdam", "mmindam", "mmaxdam", "lmindam", "lmaxdam"]) {
         upgraded[key] = damageUpgrade[key];
       }
+      // Saved purchases can contain the previous third category. Reset all
+      // three ratings; the workshop raises only the two displayed categories.
       const correctedStars = Object.fromEntries(
         Object.entries(effectiveWeaponStars(canonical.sname))
           .map(([key, stars]) => [key, stars > 0 ? Math.min(5, stars + 1) : 0])
