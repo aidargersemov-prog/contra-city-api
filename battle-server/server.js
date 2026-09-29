@@ -26,7 +26,9 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-27-spray-range-v351";
+const BUILD_ID = "battle-server-2026-09-29-table-damage-v356";
+const WORKSHOP_ENABLED = false;
+const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
@@ -262,6 +264,7 @@ const DESTROY_GEOMETRY = process.env.DESTROY_GEOMETRY === "1";
 const NORMALIZE_WEAPON_RAPIDITY = process.env.NORMALIZE_WEAPON_RAPIDITY === "1";
 const SHOT_THROTTLE_SLACK_MS = Math.max(0, Number(process.env.SHOT_THROTTLE_SLACK_MS || 20));
 const COMPLEX_RELOAD_AMMO_CLIP_MS = Math.max(1, Number(process.env.COMPLEX_RELOAD_AMMO_CLIP_MS || 1000));
+const FAST_SHOTGUN_RELOAD_AMMO_CLIP_MS = 600;
 const ENABLE_MAP_PICKUPS = process.env.ENABLE_MAP_PICKUPS !== "0";
 const MAP_PICKUPS_IN_GAMESTATE = process.env.MAP_PICKUPS_IN_GAMESTATE === "1";
 const ITEM_RESPAWN_MS = Math.max(0, Number(process.env.ITEM_RESPAWN_MS || 8000));
@@ -302,8 +305,7 @@ const DAMAGE_POSITION_HISTORY_MAX_SAMPLES = 128;
 // CombatPlayer.DelayedResurrectShieldRemove disables the Event100 respawn shield after 3.5 s.
 const SPAWN_SHIELD_MS = 2200;
 const IMPACT_DOT_TICK_MS = Math.max(250, Number(process.env.IMPACT_DOT_TICK_MS || 1000));
-const IMPACT_DOT_DEFAULT_TICKS = Math.max(1, Number(process.env.IMPACT_DOT_DEFAULT_TICKS || 5));
-const IMPACT_REFERENCE_DAMAGE_REDUCTION = Math.max(0, Math.min(95, Number(process.env.IMPACT_REFERENCE_DAMAGE_REDUCTION || 10)));
+const IMPACT_DOT_DEFAULT_TICKS = Math.max(1, Number(process.env.IMPACT_DOT_DEFAULT_TICKS || 2));
 const BIKER_SET_HEALTH_FLOOR = Number(process.env.BIKER_SET_HEALTH_FLOOR || 170);
 const BIKER_SET_SPEED_FLOOR = Number(process.env.BIKER_SET_SPEED_FLOOR || 0);
 const BIKER_SET_WEAPON_SPEED_BONUS = Number(process.env.BIKER_SET_WEAPON_SPEED_BONUS || 0);
@@ -2996,7 +2998,7 @@ const baseWeaponAmmoBySname = new Map([
   ["gl_milkor",4,4],
   ["gl_milkor_a",4,4],
   ["gl_ex41",4,4],
-  ["gl_grenadelauncher03",5,5],
+  ["gl_grenadelauncher03",4,4],
   ["bl_stickyb02",4,2],
   ["bl_sticky",4,2],
   ["rl_rpg7b02",1,3],
@@ -3013,12 +3015,107 @@ const baseWeaponAmmoBySname = new Map([
   ["sr_sniperrifle03",3,3],
 ].map(([sname, ammo, reserve]) => [sname, Object.freeze({ ammo, ammo_tot: ammo + reserve })]));
 
+// User damage table, 2026-09-29. Near body values are authoritative; ranged
+// columns are recalculated with the subsequently confirmed 0.65/1.35 rules.
+// Keep this block identical in battle-server and railway-api (separate deploys).
+const WEAPON_DAMAGE_BALANCE = Object.freeze({
+  ohca_basebalbat: { name: "Бита", near: 15, kind: "melee" },
+  ohca_crowbar: { name: "Лом", near: 15, kind: "melee" },
+  ohca_torch_f: { name: "Светоч", near: 15, kind: "melee", effect: 1 },
+  thca_katana_b: { name: "Самурай", near: 35, kind: "melee", effect: 2 },
+  thca_scythe_b: { name: "Косарь", near: 35, kind: "melee", effect: 2 },
+  ohca_candy2: { name: "Новогодняя Карамель", near: 20, kind: "melee", effect: 1 },
+  ohca_candy: { name: "Огненная Карамель", near: 20, kind: "melee", effect: 5 },
+  ohca_icicle_w: { name: "Ледовик", near: 15, kind: "melee", effect: 5 },
+  hg_makarov: { name: "Партизан / ГОСТ Партизан", near: 10, kind: "ranged" },
+  hg_tt: { name: "Комиссар", near: 10, kind: "ranged" },
+  hg_walther_r: { name: "Начальник", near: 12, kind: "ranged" },
+  hg_waltherp99: { name: "СверхДембель", near: 13, kind: "ranged" },
+  hg_sigsauerp226_b: { name: "Дружинник", near: 12, kind: "ranged", effect: 2 },
+  hg_glock_s: { name: "Политрук", near: 9, kind: "ranged" },
+  hg_glockb01_s: { name: "Спекулянт", near: 10, kind: "ranged", effect: 2 },
+  hg_desert: { name: "Сокол", near: 35, kind: "ranged" },
+  hg_desertb01: { name: "Пустынный Орел", near: 38, kind: "ranged" },
+  hg_usp: { name: "Скиф", near: 13, kind: "ranged", effect: 3 },
+  hg_taurus: { name: "Палач", near: 42, kind: "ranged" },
+  mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 8, kind: "ranged" },
+  mg_m16: { name: "ММ 16", near: 9, kind: "ranged" },
+  mg_ak103: { name: "Кладенец", near: 10, kind: "ranged" },
+  mg_m4: { name: "Рык", near: 12, kind: "ranged" },
+  mg_ak103_o: { name: "Полкан", near: 13, kind: "ranged" },
+  mg_m4_o: { name: "Бюрократ", near: 12, kind: "ranged" },
+  mg_m4d_o: { name: "Наводка", near: 13, kind: "ranged" },
+  mg_ak103d_o: { name: "Побарабанщик", near: 13, kind: "ranged" },
+  mg_ump45: { name: "Убойник", near: 13, kind: "ranged" },
+  mg_ump45d_o: { name: "Провокатор", near: 14, kind: "ranged" },
+  mg_ump45d2_o: { name: "Ликвидатор", near: 14, kind: "ranged" },
+  mg_ak47b06: { name: "Засад", near: 15, kind: "ranged" },
+  mg_ak47b08: { name: "Звездочет", near: 15, kind: "ranged" },
+  mg_ak47b07: { name: "Смертобой", near: 15, kind: "ranged" },
+  mg_aug3_o: { name: "Буран", near: 15, kind: "ranged" },
+  mg_aug2_o: { name: "Вектор", near: 15, kind: "ranged" },
+  mg_aug4_o: { name: "Кобра", near: 16, kind: "ranged", effect: 2 },
+  mg_aug1_o: { name: "Большевик", near: 17, kind: "ranged", effect: 3 },
+  mg_aug5_o: { name: "Повстанец", near: 17, kind: "ranged", effect: 1 },
+  mg_assaultrifle03: { name: "Барс", near: 14, kind: "ranged" },
+  mg_assaultrifle02: { name: "Адвокат", near: 15, kind: "ranged" },
+  mg_ump45vkks_o: { name: "Вождь", near: 17, kind: "ranged" },
+  gg_m134: { name: "Стаханов / ГОСТ Стаханов", near: 12, kind: "ranged" },
+  gg_n2: { name: "Берия", near: 13, kind: "ranged" },
+  gg_m249: { name: "Дон", near: 15, kind: "ranged" },
+  gg_m134b02: { name: "Максимыч", near: 16, kind: "ranged" },
+  gg_m134b03: { name: "Рой", near: 17, kind: "ranged" },
+  gg_fnmag: { name: "Бастион", near: 17, kind: "ranged" },
+  fl_n1: { name: "Примус", near: 10, kind: "ranged", effect: 1 },
+  sng_snowgun: { name: "Вьюга", near: 10, kind: "ranged", effect: 5 },
+  // Both existing catalog entries are named Вьюга; preserve their identities.
+  gg_m134b01: { name: "Вьюга", near: 10, kind: "ranged", effect: 5 },
+  sg_winchester1887: { name: "ВыньЧестер / ГОСТ ВыньЧестер", near: 8, kind: "ranged" },
+  sg_db: { name: "Егерь", near: 35, kind: "ranged" },
+  sg_novapump: { name: "Сибиряк", near: 29, kind: "ranged" },
+  sg_remington: { name: "Советник", near: 10, kind: "ranged", effect: 2 },
+  sg_spas: { name: "Кабан", near: 35, kind: "ranged" },
+  // Launcher critical floors are explicit table values, including 20/22 and 22/24.
+  rl_rpg26: { name: "Аврора / ГОСТ Аврора", near: 35, critical: 42, kind: "launcher" },
+  rl_rpg7: { name: "Мини Катюша", near: 42, critical: 50, kind: "launcher" },
+  rl_m202a1: { name: "Мэлс", near: 20, critical: 22, kind: "launcher" },
+  rl_rpg7b02: { name: "Троллебузина", near: 70, critical: 84, kind: "launcher", effect: 2 },
+  gl_milkor: { name: "Гранатин", near: 35, critical: 42, kind: "launcher", slowMs: 4000 },
+  gl_milkor_a: { name: "Гадюка", near: 45, critical: 54, kind: "launcher", effect: 3 },
+  gl_ex41: { name: "Страж", near: 45, critical: 54, kind: "launcher", effect: 1 },
+  gl_grenadelauncher03: { name: "Ворчун", near: 47, critical: 56, kind: "launcher", effect: 1 },
+  gl_snowlauncher: { name: "Павлик М", near: 45, critical: 54, kind: "launcher", effect: 5 },
+  bl_stickyb02: { name: "Репей", near: 20, critical: 22, kind: "launcher" },
+  bl_sticky: { name: "Йож", near: 22, critical: 24, kind: "launcher" },
+  sr_svd: { name: "Компостер / ГОСТ Компостер", near: 23, kind: "sniper" },
+  sr_steyr: { name: "Серп", near: 64, kind: "sniper" },
+  sr_steyrb01: { name: "Сторож", near: 64, kind: "sniper" },
+  sr_hk417_d: { name: "Дальнобойщик", near: 25, kind: "sniper" },
+  sr_arctic: { name: "Писец", near: 87, kind: "sniper" },
+  sr_arcticb01: { name: "Крик", near: 87, kind: "sniper" },
+  sr_m110_b: { name: "Клык", near: 25, kind: "sniper", effect: 2 },
+  sr_wildcat1: { name: "Росомаха", near: 110, kind: "sniper" },
+  sr_wildcat2: { name: "Шершень", near: 108, kind: "sniper", effect: 3 },
+  sr_vintorez: { name: "Вымпел", near: 111, kind: "sniper" },
+  sr_sniperrifle03: { name: "Анаконда", near: 125, kind: "sniper" },
+});
+
+function tableWeaponDamageStats(systemName) {
+  const definition = WEAPON_DAMAGE_BALANCE[String(systemName || "").toLowerCase()];
+  if (!definition) return {};
+  const near = definition.near;
+  const far = definition.kind === "sniper" ? Math.round(near * 135 / 100)
+    : definition.kind === "ranged" ? Math.round(near * 65 / 100) : near;
+  return { smindam: near, smaxdam: near + 4, mmindam: far, mmaxdam: far + 4, lmindam: far, lmaxdam: far + 4 };
+}
+// End user damage table.
+
 const DEFAULT_LOADOUT_WEAPONS = [
   { w_id: 1, id: 1, wt: 1, ws: 1, sn: "ohca_basebalbat", vel: 100, rad: 8, ang: 2.05, rap: 340, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 8, dev: 2, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 },
   { w_id: 2, id: 2, wt: 3, ws: 2, sn: "hg_makarov", vel: 100, rad: 10, ang: 0, rap: 355, rt: 2967, ammo: 12, ammo_tot: 60, lt: 520, krit: 7, dev: 8, smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 },
   { w_id: 3, id: 3, wt: 4, ws: 3, sn: "mg_ak47", vel: 100, rad: 12, ang: 0, rap: 126, rt: 2967, ammo: 30, ammo_tot: 90, lt: 650, krit: 5, dev: 12, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 },
   { w_id: 4, id: 4, wt: 6, ws: 4, sn: "gg_m134", vel: 100, rad: 14, ang: 0, rap: 125, rt: 800, ammo: 90, ammo_tot: 180, lt: 1100, krit: 4, dev: 18, smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 },
-  { w_id: 5, id: 5, wt: 7, ws: 5, sn: "sg_winchester1887", vel: 100, rad: 18, ang: 0, rap: 1565, rt: 4500, ammo: 6, ammo_tot: 36, lt: 900, krit: 6, dev: 24, smindam: 42, smaxdam: 62, mmindam: 22, mmaxdam: 35, lmindam: 8, lmaxdam: 14 },
+  { w_id: 5, id: 5, wt: 7, ws: 5, sn: "sg_winchester1887", vel: 100, rad: 18, ang: 0, rap: 1165, rt: 4500, ammo: 6, ammo_tot: 36, lt: 900, krit: 6, dev: 24, smindam: 42, smaxdam: 62, mmindam: 22, mmaxdam: 35, lmindam: 8, lmaxdam: 14 },
   { w_id: 6, id: 6, wt: 8, ws: 6, sn: "rl_rpg26", vel: 65, rad: 28, ang: 0, rap: 900, rt: 2300, ammo: 1, ammo_tot: 8, lt: 1150, krit: 3, dev: 6, smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 },
   { w_id: 7, id: 7, wt: 10, ws: 7, sn: "sr_svd", vel: 100, rad: 10, ang: 0, rap: 850, rt: 2967, ammo: 10, ammo_tot: 40, lt: 1000, krit: 8, dev: 3, smindam: 34, smaxdam: 48, mmindam: 38, mmaxdam: 54, lmindam: 42, lmaxdam: 60 },
 ];
@@ -3098,25 +3195,11 @@ const IMPACT_TYPE = Object.freeze({
   STUNNING: 7,
 });
 
-const IMPACT_DOT_DEFINITIONS = [
-  // Original weapon descriptions specify periodic fire/frost damage. Numeric
-  // values are temporary until the original server balance is available.
-  { type: IMPACT_TYPE.FIRE, min: 3, max: 5, ids: [25], keys: ["fl_n1"] },
-  { type: IMPACT_TYPE.FROST, min: 3, max: 5, ids: [1011], keys: ["sng_snowgun"] },
-  { type: IMPACT_TYPE.FIRE, min: 3, max: 6, ids: [80], keys: ["mg_aug5_o"] },
-  { type: IMPACT_TYPE.FIRE, min: 2, max: 5, ids: [72], keys: ["ohca_candy"] },
-  { type: IMPACT_TYPE.FIRE, min: 6, max: 10, ids: [104], keys: ["gl_grenadelauncher03"] },
-  { type: IMPACT_TYPE.FROST, min: 2, max: 5, ids: [71], keys: ["ohca_candy2"] },
-  { type: IMPACT_TYPE.BLOOD, min: 6, max: 10, ids: [59], keys: ["rl_rpg7b02"] },
-  { type: IMPACT_TYPE.BLOOD, min: 3, max: 6, ids: [79, 109], keys: ["mg_aug4_o", "sg_remington"] },
-  { type: IMPACT_TYPE.POISON, min: 1, max: 3, ids: [76], keys: ["mg_aug1_o"] },
-  { type: IMPACT_TYPE.POISON, min: 4, max: 7, ids: [45], keys: ["gl_milkor_a"] },
-  { type: IMPACT_TYPE.POISON, min: 3, max: 6, ids: [75], keys: ["sr_wildcat2"] },
-  { type: IMPACT_TYPE.BLOOD, min: 2, max: 4, ids: [42], keys: ["THCA_Scythe_B"] },
-].map((definition) => ({
-  ...definition,
-  ticks: Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS)),
-}));
+const IMPACT_DOT_DEFINITIONS = Object.entries(WEAPON_DAMAGE_BALANCE)
+  .filter(([, definition]) => definition.effect)
+  .map(([key, definition]) => ({
+    keys: [key], type: definition.effect, min: 2, max: 2, ticks: 2,
+  }));
 
 const IMPACT_DOT_BY_WEAPON_ID = new Map();
 const IMPACT_DOT_BY_WEAPON_KEY = new Map();
@@ -3129,7 +3212,7 @@ for (const definition of IMPACT_DOT_DEFINITIONS) {
 // the DoT table: the old API parser classified "замедления" as Frost, which
 // made the battle server create frost damage ticks.
 const IMPACT_SLOW_DEFINITIONS = [
-  { ids: [44], keys: ["gl_milkor"], durationMs: 3000, speedReductionPercent: 20 },
+  { ids: [44], keys: ["gl_milkor"], durationMs: WEAPON_DAMAGE_BALANCE.gl_milkor.slowMs, speedReductionPercent: 20 },
 ];
 const IMPACT_SLOW_BY_WEAPON_ID = new Map();
 const IMPACT_SLOW_BY_WEAPON_KEY = new Map();
@@ -3159,16 +3242,23 @@ const DIRECT_PROTECTION_ENHANCER_BY_WEAPON_TYPE = new Map([
 // weapon-additional keys 77 (flight distance) and 74 (lifetime milliseconds).
 // Гранатин 6-170-3500
 const ARCING_LAUNCHER_VELOCITY = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_VELOCITY, 6)));
-const VORCHUN_GRENADE_VELOCITY = 10;
 const ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, 170)));
 const ARCING_LAUNCHER_LIFETIME_MS = Math.max(100, Math.round(numberOr(process.env.ARCING_LAUNCHER_LIFETIME_MS, 3500)));
 const ARCING_LAUNCHER_LEGACY_LIFE = Math.max(200, ARCING_LAUNCHER_LIFETIME_MS * 2);
 const ARCING_LAUNCHER_EXPLOSION_RADIUS = Math.max(1, Math.round(numberOr(process.env.ARCING_LAUNCHER_EXPLOSION_RADIUS, 10)));
+const GADYUKA_GRENADE_STATS = Object.freeze({
+  vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0,
+  rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LEGACY_LIFE,
+  flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE,
+  projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
+  dev: 6, krit: 3, ammo: 4, ammo_tot: 8,
+  smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50
+});
 
 const WEAPON_STAT_OVERRIDES = {
   // Tester-approved firing-rate reductions; rap excludes the client +10ms.
   sg_winchester1887: {
-    w_id: 5, id: 5, wt: 7, ws: 5, sn: "sg_winchester1887", vel: 100, rad: 18, ang: 0, rap: 1565, rt: 4500, ammo: 3, ammo_tot: 8, lt: 900, krit: 6, dev: 24,
+    w_id: 5, id: 5, wt: 7, ws: 5, sn: "sg_winchester1887", vel: 100, rad: 18, ang: 0, rap: 1165, rt: 4500, ammo: 3, ammo_tot: 8, lt: 900, krit: 6, dev: 24,
     smindam: 42, smaxdam: 62, mmindam: 22, mmaxdam: 35, lmindam: 8, lmaxdam: 14
   },
   hg_makarov: {
@@ -3228,15 +3318,11 @@ const WEAPON_STAT_OVERRIDES = {
   },
   gl_ex41: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 100, id: 100, wt: 9, ws: 6, sn: "gl_ex41", vel: VORCHUN_GRENADE_VELOCITY, rad: 10, ang: 0, rap: 900, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6,
-    flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
-    smindam: 58, smaxdam: 86, mmindam: 46, mmaxdam: 70, lmindam: 30, lmaxdam: 50
+    w_id: 100, id: 100, wt: 9, ws: 6, sn: "gl_ex41", ...GADYUKA_GRENADE_STATS
   },
   gl_snowlauncher: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 48, id: 48, wt: 9, ws: 6, sn: "gl_snowlauncher", vel: VORCHUN_GRENADE_VELOCITY, rad: 10, ang: 0, rap: 950, rt: 3000, ammo: 4, ammo_tot: 8, lt: 7000, krit: 4, dev: 6,
-    flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS,
-    smindam: 54, smaxdam: 80, mmindam: 42, mmaxdam: 64, lmindam: 28, lmaxdam: 46
+    w_id: 48, id: 48, wt: 9, ws: 6, sn: "gl_snowlauncher", ...GADYUKA_GRENADE_STATS
   },
   hg_glock_s: {
     wsp: 0, launch: 0, shake: 0,
@@ -3365,7 +3451,7 @@ const WEAPON_STAT_OVERRIDES = {
   },
   sg_novapump: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 38, id: 38, wt: 7, ws: 5, sn: "sg_novapump", vel: 100, rad: 18, ang: 0, rap: 650, rt: 6000, ammo: 8, ammo_tot: 14, lt: 900, krit: 8, dev: 22,
+    w_id: 38, id: 38, wt: 7, ws: 5, sn: "sg_novapump", vel: 100, rad: 18, ang: 0, rap: 950, rt: 6000, ammo: 8, ammo_tot: 14, lt: 900, krit: 8, dev: 22,
     smindam: 46, smaxdam: 70, mmindam: 26, mmaxdam: 42, lmindam: 8, lmaxdam: 16
   },
   sng_snowgun: {
@@ -3468,7 +3554,7 @@ const WEAPON_STAT_OVERRIDES = {
     smindam: 15, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 10, lmaxdam: 17
   },
   sg_remington: {
-    w_id: 109, id: 109, wt: 7, ws: 5, sn: "sg_remington", vel: 100, rad: 18, ang: 0, rap: 828, rt: 3864, ammo: 3, ammo_tot: 11, lt: 900, krit: 11, dev: 26,
+    w_id: 109, id: 109, wt: 7, ws: 5, sn: "sg_remington", vel: 100, rad: 18, ang: 0, rap: 428, rt: 3864, ammo: 3, ammo_tot: 11, lt: 900, krit: 11, dev: 26,
     smindam: 58, smaxdam: 86, mmindam: 34, mmaxdam: 52, lmindam: 10, lmaxdam: 18,
     wsp: 15,
     shake: 1
@@ -3489,16 +3575,14 @@ const WEAPON_STAT_OVERRIDES = {
     smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78
   },
   gl_grenadelauncher03: {
-    w_id: 104, id: 104, wt: 9, ws: 6, sn: "gl_grenadelauncher03", vel: VORCHUN_GRENADE_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0, rap: 880, rt: 4000, ammo: 3, ammo_tot: 18, lt: ARCING_LAUNCHER_LEGACY_LIFE, flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS, krit: 4, dev: 5,
-    smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62
+    w_id: 104, id: 104, wt: 9, ws: 6, sn: "gl_grenadelauncher03", ...GADYUKA_GRENADE_STATS
   },
   gl_milkor: {
     w_id: 44, id: 44, wt: 9, ws: 6, sn: "gl_milkor", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 30, lt: ARCING_LAUNCHER_LEGACY_LIFE, flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS, krit: 3, dev: 6,
     smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48
   },
   gl_milkor_a: {
-    w_id: 45, id: 45, wt: 9, ws: 6, sn: "gl_milkor_a", vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_EXPLOSION_RADIUS, ang: 0, rap: 900, rt: 6667, ammo: 6, ammo_tot: 36, lt: ARCING_LAUNCHER_LEGACY_LIFE, flightDistance: ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE, projectileLifetimeMs: ARCING_LAUNCHER_LIFETIME_MS, krit: 3, dev: 6,
-    smindam: 56, smaxdam: 84, mmindam: 44, mmaxdam: 68, lmindam: 30, lmaxdam: 50
+    w_id: 45, id: 45, wt: 9, ws: 6, sn: "gl_milkor_a", ...GADYUKA_GRENADE_STATS
   },
   sr_vintorez: {
     w_id: 107, id: 107, wt: 10, ws: 7, sn: "sr_vintorez", vel: 100, rad: 10, ang: 0, rap: 1173, rt: 3167, ammo: 20, ammo_tot: 100, lt: 1000, krit: 10, dev: 3,
@@ -3925,6 +4009,7 @@ function itemId(item) {
 }
 
 function isActiveWorkshopWeaponUpgrade(item = {}) {
+  if (!WORKSHOP_ENABLED) return false;
   if (Number(item?.itype || 0) !== 1 || item?.u_id == null) return false;
   const expiresAt = numberOr(item.eD, 0);
   return expiresAt > Math.floor(Date.now() / 1000);
@@ -3949,7 +4034,7 @@ function workshopUpgradedWeaponStats(item = {}) {
 
 function inventoryWeaponForBattle(item = {}, baseWeaponsById = new Map()) {
   if (item?.u_id == null || isActiveWorkshopWeaponUpgrade(item)) return item;
-  return baseWeaponsById.get(itemId(item)) || item;
+  return baseWeaponsById.get(itemId(item)) || defaultWeaponForSlot(weaponSlot(item));
 }
 
 function selectedWeapons(profile) {
@@ -4119,6 +4204,7 @@ function isInventoryEnhancerActive(item = {}, nowSeconds = Math.floor(Date.now()
 }
 
 function selectedEnhancers(profile) {
+  if (!ENHANCERS_ENABLED) return [];
   if (!profile) return [];
   const nowSeconds = Math.floor(Date.now() / 1000);
   const byType = new Map();
@@ -4803,6 +4889,10 @@ function applyWeaponGameplayBonuses(item, profile = null) {
     result.wsp = Math.round(weaponSpeedPercent(result) + totalSpeedPercentBonus);
   }
 
+  if (WEAPON_DAMAGE_BALANCE[weaponCanonicalKey(result)]) {
+    result.mmindam = result.lmindam;
+    result.mmaxdam = result.lmaxdam;
+  }
   return result;
 }
 
@@ -4813,7 +4903,7 @@ function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null)
     ? { ...base, ...override, ws: slot, w_id: numberOr(override.w_id, base.w_id ?? base.id), id: numberOr(override.id, base.id ?? base.w_id) }
     : base;
   const ammunition = baseWeaponAmmoBySname.get(weaponCanonicalKey(base));
-  const mergedBase = { ...overriddenBase, ...(ammunition || {}) };
+  const mergedBase = { ...overriddenBase, ...(ammunition || {}), ...tableWeaponDamageStats(weaponCanonicalKey(base)) };
   // The API persists the complete upgraded weapon payload. While eD is active,
   // those exact fields win over canonical base stats once and are not regenerated.
   const merged = isActiveWorkshopWeaponUpgrade(base)
@@ -4828,7 +4918,7 @@ function mergedWeaponForSlot(item = {}, fallback = {}, slot = 1, profile = null)
   // Projectile velocity is not a workshop bonus. Keep older upgraded payloads
   // on the same flight profile as the current canonical launcher definitions.
   if (["gl_ex41", "gl_snowlauncher", "gl_grenadelauncher03"].includes(weaponCanonicalKey(merged))) {
-    merged.vel = VORCHUN_GRENADE_VELOCITY;
+    merged.vel = GADYUKA_GRENADE_STATS.vel;
   }
   return normalizeMeleeWeaponStats(applyWeaponGameplayBonuses(merged, profile));
 }
@@ -4957,6 +5047,7 @@ function makeWeaponRuntimeState(profile = null) {
       loadedAmmo: maxLoadedAmmo,
       ammoReserve: Math.max(0, maxAmmoReserve - maxLoadedAmmo),
       systemName: normalizeSystemName(merged.sn ?? merged.sname, fallback.sn),
+      damageBalance: WEAPON_DAMAGE_BALANCE[weaponCanonicalKey(merged)] || null,
       impact,
       impactType: impact?.type ?? IMPACT_TYPE.NONE,
       slow,
@@ -8386,6 +8477,13 @@ function reloadFirstTickDurationMs(state) {
   return reloadSingleDurationMs(state);
 }
 
+function reloadAmmoClipDurationMs(state) {
+  const name = String(state?.systemName || "").toLowerCase();
+  return name === "sg_remington" || name === "sg_winchester1887"
+    ? FAST_SHOTGUN_RELOAD_AMMO_CLIP_MS
+    : COMPLEX_RELOAD_AMMO_CLIP_MS;
+}
+
 function isReloadWeaponMode(mode) {
   return mode === WEAPON_MODE.RELOADING || mode === WEAPON_MODE.RELOADING_READY;
 }
@@ -8647,7 +8745,7 @@ function applyReloadTick(session, state, channel, reloadSeq) {
     return;
   }
 
-  const nextShellMs = Math.min(singleReloadMs, COMPLEX_RELOAD_AMMO_CLIP_MS);
+  const nextShellMs = Math.min(singleReloadMs, reloadAmmoClipDurationMs(state));
   if (state.loadedAmmo < state.maxLoadedAmmo && state.ammoReserve > 0 && nextShellMs <= remainingMs) {
     scheduleReloadTick(session, state, channel, reloadSeq, nextShellMs);
     return;
@@ -9193,6 +9291,9 @@ function damagePairAverage(pair) {
 }
 
 function balancedDamagePairs(state) {
+  if (state?.damageBalance) {
+    return { short: state.shortDamage, medium: state.longDamage, long: state.longDamage };
+  }
   // Sniper damage increases with distance. Sorting every weapon by descending
   // power inverted the client-provided short/medium/long sniper values.
   if (!DAMAGE_SORT_RANGES_BY_POWER || Number(state?.type) === 10) {
@@ -9221,6 +9322,22 @@ function damagePairForRange(state, range) {
   if (range === "short") return pairs.short;
   if (range === "long") return pairs.long;
   return pairs.medium;
+}
+
+// The random +0..4 is added after rounding the hit-category floor. Scaling
+// both body endpoints would incorrectly widen head/critical damage intervals.
+// Existing equipment/training changes to the two endpoints remain effective.
+function shotDamageBounds(state, range, hitZone, crit) {
+  const pair = damagePairForRange(state, range);
+  const definition = state?.damageBalance;
+  if (!definition) return pair;
+  const isHeadOrGroin = hitZone === HIT_ZONE_CABIN || hitZone === HIT_ZONE_ENGINE;
+  const multiplier = definition.kind === "launcher"
+    ? (crit ? definition.critical / definition.near : 1)
+    : (crit ? (isHeadOrGroin ? 1.3 : 1.25) : (isHeadOrGroin ? 1.2 : 1));
+  const minDamage = Math.max(0, Math.round(numberOr(pair?.[0], 0) * multiplier));
+  const maxDamage = Math.max(minDamage, Math.round((numberOr(pair?.[1], pair?.[0]) - 4) * multiplier) + 4);
+  return [minDamage, maxDamage];
 }
 
 function hitZoneMultiplier(hitZone) {
@@ -9731,7 +9848,7 @@ function applyMilkorSlow(shooter, targetSession, definition) {
   if (existing?.timer) clearTimeout(existing.timer);
 
   const speedDelta = existing?.speedDelta || milkorSlowSpeedDelta(targetSession, definition);
-  const durationMs = Math.max(1, numberOr(definition.durationMs, 3000));
+  const durationMs = Math.max(1, numberOr(definition.durationMs, WEAPON_DAMAGE_BALANCE.gl_milkor.slowMs));
   const state = {
     room: targetSession.room,
     spawnSeq: Number(targetSession.spawnSeq || 0),
@@ -9831,12 +9948,11 @@ function impactDotRequestedDamage(effect) {
 function applyImpactDotDamage(effect, targetSession) {
   const targetCurrent = sessionCurrentHealthEnergy(targetSession);
   const requestedDamage = impactDotRequestedDamage(effect);
-  const referenceMultiplier = Math.max(0.05, 1 - IMPACT_REFERENCE_DAMAGE_REDUCTION / 100);
   const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
   const enhancerDamagePercent = outgoingEnhancerDamagePercent(effect.shooter, targetSession, 0);
   const training = zombieTrainingDamagePercents(effect.shooter, targetSession, effect.weaponType, null, targetCurrent.stats.modifiers);
   const totalDamage = Math.max(0, Math.round(
-    (requestedDamage / referenceMultiplier) *
+    requestedDamage *
     (1 + enhancerDamagePercent / 100) *
     (1 + training.outgoing / 100) *
     (1 - damageReduction / 100) *
@@ -10165,20 +10281,25 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     result.summary = `${targetActorId}:melee-range=${formatCaptureDistance(damageDistance)}>${DAMAGE_MELEE_MAX_DISTANCE}`;
     return result;
   }
-  const range = damageRangeName(damageDistance);
-  const [minDamage, maxDamage] = damagePairForRange(damageState, range);
+  const tableBalance = damageState?.damageBalance;
+  const measuredRange = damageRangeName(damageDistance);
+  const range = tableBalance && measuredRange === "medium" ? "long" : measuredRange;
   const seedParts = shotRandomSeedParts(data, shooter, targetActorId, targetIndex, weaponType, range);
   const roll = deterministicUnit(DAMAGE_RANDOM_SEED, "damage", ...seedParts);
-  const baseDamage = minDamage + Math.round((maxDamage - minDamage) * roll);
   const critChance = clampNumber(numberOr(damageState?.crit, 0), 0, DAMAGE_MAX_CRIT_CHANCE);
   const crit = deterministicUnit(DAMAGE_RANDOM_SEED, "crit", ...seedParts) * 100 < critChance;
+  const [minDamage, maxDamage] = shotDamageBounds(damageState, range, hitZone, crit);
+  const baseDamage = tableBalance
+    ? minDamage + Math.min(maxDamage - minDamage, Math.floor((maxDamage - minDamage + 1) * roll))
+    : minDamage + Math.round((maxDamage - minDamage) * roll);
   const shooterStats = sessionRuntimeStats(shooter);
-  const headDamageBonus = hitZone === HIT_ZONE_CABIN
+  const headDamageBonus = (hitZone === HIT_ZONE_CABIN || (tableBalance && hitZone === HIT_ZONE_ENGINE))
+    && tableBalance?.kind !== "launcher"
     ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
     : 0;
   const explosionRadiusMultiplier = explosive ? explosionRadiusMultiplierForShooter(shooter, weaponType) : 1;
   const explosionCoefficient = explosive
-    ? explosionDistanceCoefficient(originDistance ?? actorDistance, explosionRadiusMultiplier)
+    ? ((descriptor & 8) !== 0 ? 1 : explosionDistanceCoefficient(originDistance ?? actorDistance, explosionRadiusMultiplier))
     : 1;
   const protectionKey = weaponProtectionKey(weaponType);
   const globalProtection = targetCurrent.stats.modifiers.protections?.[protectionKey] ?? 0;
@@ -10202,11 +10323,11 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const totalDamage = Math.max(0, Math.round(
     baseDamage *
     explosionCoefficient *
-    hitZoneMultiplier(hitZone) *
+    (tableBalance ? 1 : hitZoneMultiplier(hitZone)) *
     (1 + headDamageBonus / 100) *
     (1 + enhancerDamagePercent / 100) *
     (1 + training.outgoing / 100) *
-    (crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
+    (!tableBalance && crit ? DAMAGE_CRIT_MULTIPLIER : 1) *
     (1 - protection / 100) *
     (1 - damageReduction / 100) *
     (1 - enhancerReduction / 100) *
@@ -10224,7 +10345,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   result.energyDamage = energyDamage;
   result.healthDamage = healthDamage;
   result.crit = crit && totalDamage > 0;
-  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:training=${training.outgoing}/${training.reduction}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:weaponProt=${weaponId}:${weaponProtection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:zone=${hitZone}:balance=${tableBalance ? "table-v1" : "legacy"}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:training=${training.outgoing}/${training.reduction}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:weaponProt=${weaponId}:${weaponProtection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
   result.summary += positionDetail;
 
   if (targetCurrent.health > 0 && targetSession.health <= 0) {
@@ -15439,10 +15560,11 @@ async function handleUdp(port, socket, msg, rinfo) {
   }
 }
 
-console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=on dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} impactReferenceDmgRed=${IMPACT_REFERENCE_DAMAGE_REDUCTION} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon+shot+reload+impact" : "channel1-unreliable-animation+weapon+shot+reload+impact") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=velocity:${ARCING_LAUNCHER_VELOCITY},maxDistance:${ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE},lifetime:${ARCING_LAUNCHER_LIFETIME_MS}ms,explosionRadius:${ARCING_LAUNCHER_EXPLOSION_RADIUS},legacyLife:${ARCING_LAUNCHER_LEGACY_LIFE}`);
+console.log(`[config] build=${BUILD_ID} host=${PUBLIC_HOST} api=${API_BASE_URL} initReply=${INIT_REPLY} teamMode=${FORCE_TEAM_MODE ? "team" : "room"} autoSpawn=${AUTO_SPAWN_AFTER_GAMESTATE ? "on" : "off"} retry=${AUTO_SPAWN_RETRY_LIMIT}x${AUTO_SPAWN_RETRY_MS}ms spawnNoMoveWarn=${SPAWN_NO_MOVE_WARN_MS}ms spawnSelfRetry=${formatDelayList(SPAWN_SELF_RETRY_DELAYS_MS)} reliableRetry=${OUTBOUND_RELIABLE_INITIAL_RTO_MS}ms/x2/count${OUTBOUND_RELIABLE_SENT_COUNT_ALLOWANCE}/timeout${OUTBOUND_RELIABLE_DISCONNECT_MS}ms debugPackets=${DEBUG_PACKETS ? "on" : "off"} sendLog=${LOG_SEND_PACKETS ? "on" : "off"} moveLogEvery=${MOVE_LOG_EVERY} moveBroadcast=${MOVE_BROADCAST_UNRELIABLE ? "unreliable" : "reliable"} spawnIndex=${SPAWN_INDEX || "actor"} spawnYOffset=${SPAWN_Y_OFFSET || 0} joinLoadoutSlots=${JOIN_LOADOUT_SLOT_LIMIT} peerLoadout=mandatory-full:${FULL_LOADOUT_SLOT_LIMIT} legacyWeaponFields=${INCLUDE_WEAPON_LEGACY_FIELDS ? "on" : "off"} joinWears=${INCLUDE_JOIN_WEARS ? "on" : "off"} battleEnhancers=${ENHANCERS_ENABLED && INCLUDE_BATTLE_ENHANCERS ? "on" : "off"} battleTaunts=on joinTauntCompact=on trainingAbilities=${APPLY_TRAINING_ABILITY_BONUSES ? "runtime-on" : "runtime-off"} weaponWorkshop=${WORKSHOP_ENABLED ? "on" : "off"} dossierStats=on deferredPeerWears=on actorEchoFields=${INCLUDE_JOIN_ACTOR_ECHO_FIELDS ? "on" : "off"} gameStateActor=${INCLUDE_ACTOR_IN_GAMESTATE ? "on" : "off"} gameStatePeers=${INCLUDE_PEERS_IN_GAMESTATE ? "on" : "off"} gameStateRepeat=${GAMESTATE_REPEAT_MIN_MS}ms maxUdp=${MAX_UDP_PACKET_BYTES} actorJoinMax=${ACTOR_JOIN_MAX_PACKET_BYTES} gameStateScore=actorRaw liveScoreUpdate=on killfeed=gameState dominationStreak=${DOMINATION_STREAK_KILLS} battleExp=${ENABLE_BATTLE_EXP ? "on" : "off"} expPerKill=${BATTLE_EXP_PER_KILL} peerSpawnAfterSelf=${REPLAY_PEER_SPAWNS_AFTER_SELF ? "on" : "off"} peerSpawnConfirm=${CONFIRM_PEER_SPAWN_AFTER_ISENEMY ? "on" : "off"} peerActorRepair=${formatDelayList(PEER_ACTOR_REPAIR_DELAYS_MS)} joinSelfDelay=${JOIN_SELF_EVENT_DELAY_MS}ms joinSelfProfileWait=${JOIN_SELF_PROFILE_WAIT_MS}ms joinProfileRetry=${JOIN_PROFILE_RETRY_MS}ms joinProfileMax=${JOIN_PROFILE_MAX_WAIT_MS}ms allowFallbackJoin=${ALLOW_FALLBACK_JOIN_PROFILE ? "on" : "off"} joinStartFallback=${JOIN_START_EVENT_FALLBACK_DELAY_MS}ms joinSettingsPush=${formatDelayList(JOIN_SETTINGS_PUSH_DELAYS_MS)} joinLateStart=${formatDelayList(JOIN_LATE_START_DELAYS_MS)} actorJoinAsyncDelay=${ACTOR_JOIN_ASYNC_DELAY_MS}ms profileJoinWait=${PROFILE_JOIN_WAIT_MS}ms cachedJoinRefresh=on interpolationMode=${ROOM_INTERPOLATION_MODE} moveRotationKey7=${ADD_MOVE_ROTATION_KEY ? "on" : "off"} destroyGeometry=${DESTROY_GEOMETRY ? "on" : "off"} rapidityNormalize=${NORMALIZE_WEAPON_RAPIDITY ? "on" : "off"} shotSlack=${SHOT_THROTTLE_SLACK_MS}ms mapPickups=${ENABLE_MAP_PICKUPS ? "on" : "off"} pickupGameState=${MAP_PICKUPS_IN_GAMESTATE ? "on" : "off"} pickupPostSpawn=second-move-response pickupSpawnRepair=${formatDelayList(PICKUP_SPAWN_REPAIR_DELAYS_MS)} pickupRadius=${ITEM_PICKUP_RADIUS} itemRespawn=${ITEM_RESPAWN_MS}ms requirePickupBenefit=${REQUIRE_PICKUP_BENEFIT ? "on" : "off"} armorOverflowDecay=${ARMOR_OVERFLOW_DECAY_AMOUNT}/${ARMOR_OVERFLOW_DECAY_INTERVAL_MS}ms damage=${ENABLE_BATTLE_DAMAGE ? "on" : "off"} damageRange=${DAMAGE_SHORT_RANGE}/${DAMAGE_MEDIUM_RANGE} meleeMax=${DAMAGE_MELEE_MAX_DISTANCE} damageRangeSort=${DAMAGE_SORT_RANGES_BY_POWER ? "power-desc" : "raw"} damageMult=head:${DAMAGE_HEAD_MULTIPLIER},headBonusMax:${DAMAGE_MAX_HEAD_BONUS_PERCENT},engine:${DAMAGE_ENGINE_MULTIPLIER},crit:${DAMAGE_CRIT_MULTIPLIER},critChanceMax:${DAMAGE_MAX_CRIT_CHANCE} impactDot=${IMPACT_DOT_TICK_MS}msx${IMPACT_DOT_DEFAULT_TICKS} explosion=${DAMAGE_EXPLOSION_FULL_RADIUS}/${DAMAGE_EXPLOSION_ZERO_RADIUS} bikerHpFloor=${BIKER_SET_HEALTH_FLOOR} bikerSpeedFloor=${BIKER_SET_SPEED_FLOOR} bikerWeaponSpeedBonus=${BIKER_SET_WEAPON_SPEED_BONUS} shotgunJumpSmall=${SHOTGUN_RECOIL_SMALL_JUMP_BONUS} shotgunJumpBonus=${SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpAbove=${SHOTGUN_RECOIL_ABOVE_AVERAGE_JUMP_BONUS} bigShotgunJumpBonus=${BIG_SHOTGUN_RECOIL_JUMP_BONUS} shotgunJumpHuge=${SHOTGUN_RECOIL_HUGE_JUMP_BONUS} bikerShotgunJumpBonus=${BIKER_SET_SHOTGUN_JUMP_BONUS} maxJump=${MAX_PLAYER_JUMP} maxEnergy=${MAX_PLAYER_ENERGY} lobbyRoomSplit=on reliableDedupe=on reliableFragments=on fragmentTrace=${ENET_FRAGMENT_TRACE ? "on" : "off"} shotResponseTrace=${SHOT_LOCAL_RESPONSE_TRACE ? "on" : "off"} roomSync=on roomIsolation=global-duplicate+empty-prune idlePrune=${ROOM_SESSION_IDLE_MS}ms preSpawnSpectatorLive=${SPECTATOR_LIVE_UNRELIABLE ? (SPECTATOR_MOVE_UNRELIABLE ? "channel1-unreliable-move+animation+weapon+shot+reload+impact" : "channel1-unreliable-animation+weapon+shot+reload+impact") : "blocked"} peerLiveGate=move-seen-only spectatorLiveUnreliable=${SPECTATOR_LIVE_UNRELIABLE ? "on" : "off"} spectatorMoveUnreliable=${SPECTATOR_MOVE_UNRELIABLE ? "on" : "off"} spectatorLiveChannel=${SPECTATOR_LIVE_CHANNEL} gameMasterPort=${GAME_MASTER_PORT} socialMasterPorts=${Array.from(SOCIAL_MASTER_PORTS).join(",")} shotWeaponConfirm=on respawnAmmoReset=on spawnArmorBase0=on projectileLaunchInfer=on projectileSelfDamage=on projectileLaunchKeyLog=on grenadeFlight=velocity:${ARCING_LAUNCHER_VELOCITY},maxDistance:${ARCING_LAUNCHER_MAX_FLIGHT_DISTANCE},lifetime:${ARCING_LAUNCHER_LIFETIME_MS}ms,explosionRadius:${ARCING_LAUNCHER_EXPLOSION_RADIUS},legacyLife:${ARCING_LAUNCHER_LEGACY_LIFE}`);
 console.log(`[config] respawnShotFence=first-move+direct-offset/${DAMAGE_DIRECT_HIT_MAX_TARGET_OFFSET} hitHistory=${DAMAGE_CLIENT_VIEW_DELAY_MS}+${DAMAGE_CLIENT_MOVE_INTERVAL_MS}+rtt/max${DAMAGE_POSITION_HISTORY_MAX_MS}ms rejectedPlayerTargets=omit segmentOriginFence=off`);
 console.log(`[config] enhancers active=${Array.from(PASSIVE_BATTLE_ENHANCER_IDS).join(",")} clientVisible=${Array.from(CLIENT_VISIBLE_ENHANCER_IDS).join(",")} expAssist=${BATTLE_EXP_PER_ASSIST} expFlag=${BATTLE_EXP_PER_FLAG} expControl=${BATTLE_EXP_PER_CONTROL_POINT} kamikaze=${ENHANCER_KAMIKAZE_DAMAGE}@${ENHANCER_KAMIKAZE_FULL_RADIUS}/${ENHANCER_KAMIKAZE_ZERO_RADIUS}`);
 console.log(`[config] weapon complexReloadAmmoClip=${COMPLEX_RELOAD_AMMO_CLIP_MS}ms`);
+console.log(`[config] weapon remingtonWinchesterReloadAmmoClip=${FAST_SHOTGUN_RELOAD_AMMO_CLIP_MS}ms`);
 console.log(`[config] transport inboundOrder=channel-sequence responseCache=${RELIABLE_RESPONSE_CACHE_TTL_MS}ms retryBatch=${OUTBOUND_RELIABLE_RETRY_BATCH_COMMANDS}/sweep recovery=${OUTBOUND_RELIABLE_RECOVERY_MS}ms pendingMax=${OUTBOUND_RELIABLE_PENDING_MAX} natRebind=${ENET_NAT_REBIND_MAX_IDLE_MS}ms outbox=${UDP_OUTBOX_FLUSH_MS}ms/${UDP_OUTBOX_MAX_COMMANDS}cmd/${UDP_OUTBOX_MAX_BYTES}bytes packetMax=${MAX_UDP_PACKET_BYTES} atomicProfileJoin=required`);
 console.log(`[config] api battleQueue=${BATTLE_EVENT_CONCURRENCY}/${BATTLE_EVENT_QUEUE_MAX}/timeout${BATTLE_EVENT_TIMEOUT_MS}ms moveFlush=${BATTLE_MOVE_FLUSH_MS}ms profileQueue=${PROFILE_LOAD_CONCURRENCY}/${PROFILE_LOAD_QUEUE_MAX} profileCache=${PROFILE_CACHE_MAX}/${PROFILE_CACHE_TTL_MS}ms profileChangeSettle=${PROFILE_CHANGE_SETTLE_MS}ms/track${PROFILE_CHANGE_TRACK_MS}ms catalogCache=${CATALOG_CACHE_TTL_MS}ms`);
 console.log(`[config] zombie minPlayers=${ZOMBIE_MIN_PLAYERS} regularHp=${ZOMBIE_REGULAR_MAX_HEALTH} bossHp=${ZOMBIE_BOSS_MAX_HEALTH} regen=${ZOMBIE_REGEN_TICK_MS}ms regular=${ZOMBIE_REGULAR_REGEN_MIN}-${ZOMBIE_REGULAR_REGEN_MAX} boss=${ZOMBIE_BOSS_REGEN_MIN}-${ZOMBIE_BOSS_REGEN_MAX} updateRepair=${formatDelayList(ZOMBIE_UPDATE_REPAIR_DELAYS_MS)}`);
@@ -15588,3 +15710,6 @@ for (const port of PORTS) {
 
 
 
+
+
+console.log(`[config] damageBalance=table-v1 weapons=${Object.keys(WEAPON_DAMAGE_BALANCE).length} spread=+0..4 automaticFar=0.65 sniperFar=1.35 medium=long headGroin=1.2 critBody=1.25 critHeadGroin=1.3 launcherCrit=table impact=2x2 milkorSlow=4000ms`);
