@@ -26,11 +26,14 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-09-29-table-damage-v356";
+const BUILD_ID = "battle-server-2026-10-01-developer-effects-v357";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
+// Cosmetic state has its own outer Photon event. Expedition's inner command
+// 110 is carried under outer Event 157 and does not share this namespace.
+const DEVELOPER_EFFECTS_EVENT = 110;
 // Isolated Expedition protocol. Code 157 is unused by the recovered client;
 // no existing Photon event (84/97/99/100/105) is repurposed.
 const EXPEDITION_EVENT = 157;
@@ -1371,6 +1374,9 @@ function promotePendingSession(pending, now = Date.now(), credentials = {}) {
     staffRole: "none",
     staffRank: 0,
     staffProfileLoadedAt: 0,
+    developerEffects: { spawnEffect: 0, deathEffect: 0 },
+    developerEffectsRefreshChain: null,
+    developerEffectsGeneration: 0,
     staffFlightActive: false,
     staffFlightMode: "combat",
     staffFlightChangedAt: 0,
@@ -2417,6 +2423,16 @@ function rawEvent(eventCode, entries) {
   return Buffer.concat([
     Buffer.from([0xf3, 0x04, eventCode & 0xff]),
     rawParamTable(entries),
+  ]);
+}
+
+function makeDeveloperEffectsEvent(actorId, effects) {
+  return rawEvent(DEVELOPER_EFFECTS_EVENT, [
+    { key: 254, value: rawInt(actorId) },
+    { key: 245, value: rawHashtable([
+      { key: rawByte(1), value: rawByte(effects?.spawnEffect || 0) },
+      { key: rawByte(2), value: rawByte(effects?.deathEffect || 0) },
+    ]) },
   ]);
 }
 
@@ -5508,6 +5524,83 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = API_REQUEST_TIMEO
     clearTimeout(timeout);
     externalSignal?.removeEventListener?.("abort", abortFromExternal);
   }
+}
+
+function validDeveloperEffectId(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 8;
+}
+
+async function fetchDeveloperEffects(playerId) {
+  const disabled = { spawnEffect: 0, deathEffect: 0 };
+  if (!API_BASE_URL || !API_TOKEN || typeof fetch !== "function" || !Number.isSafeInteger(playerId) || playerId <= 0) {
+    return disabled;
+  }
+  try {
+    const response = await fetchWithTimeout(`${API_BASE_URL}/battle/developer-effects?playerId=${encodeURIComponent(playerId)}`, {
+      headers: { accept: "application/json", "x-battle-token": API_TOKEN },
+    }, Math.min(API_REQUEST_TIMEOUT_MS, 2000));
+    if (!response?.ok) throw new Error(`status=${response?.status || 0}`);
+    const data = await response.json();
+    if (data?.ok !== true || !validDeveloperEffectId(data.spawnEffect) || !validDeveloperEffectId(data.deathEffect)) {
+      throw new Error("invalid-response");
+    }
+    return { spawnEffect: data.spawnEffect, deathEffect: data.deathEffect };
+  } catch (error) {
+    // An inactive Developer role, a failed lookup, or invalid API data all
+    // resolve to Off. Client-supplied IDs are never read here.
+    console.log(`[developer-effects] lookup disabled player=${playerId} reason=${error.message}`);
+    return disabled;
+  }
+}
+
+function refreshDeveloperEffects(session) {
+  const room = session?.room;
+  const actorId = Number(session?.actorId || 0);
+  const playerId = Number(session?.playerId || 0);
+  const generation = Number(session?.developerEffectsGeneration || 0);
+  const run = async () => {
+    const effects = await fetchDeveloperEffects(playerId);
+    if (!room || room.players?.get(actorId) !== session || session.room !== room ||
+        session.playerId !== playerId || session.developerEffectsGeneration !== generation) {
+      return { applied: false, changed: false, effects };
+    }
+    const previous = session.developerEffects || { spawnEffect: 0, deathEffect: 0 };
+    const changed = previous.spawnEffect !== effects.spawnEffect || previous.deathEffect !== effects.deathEffect;
+    session.developerEffects = effects;
+    return { applied: true, changed, effects };
+  };
+  // Repeated refresh requests for one actor cannot finish out of order.
+  const pending = Promise.resolve(session.developerEffectsRefreshChain).catch(() => {}).then(run);
+  session.developerEffectsRefreshChain = pending;
+  pending.finally(() => {
+    if (session.developerEffectsRefreshChain === pending) session.developerEffectsRefreshChain = null;
+  }).catch(() => {});
+  return pending;
+}
+
+function developerEffectsJoinEvents(room) {
+  if (!room?.players) return [];
+  return Array.from(room.players.values(), (actorSession) =>
+    makeDeveloperEffectsEvent(actorSession.actorId, actorSession.developerEffects));
+}
+
+function insertDeveloperEffectsIntoJoinResponses(responses, room) {
+  // JoinRoom response must precede custom events; JoinSelf may immediately
+  // trigger GameState and the first spawn, so snapshots precede JoinSelf.
+  responses.splice(1, 0, ...developerEffectsJoinEvents(room));
+  return responses;
+}
+
+async function handleDeveloperEffectsRefreshRequest(session, channel = 0) {
+  if (!session.room?.players || session.room.players.get(session.actorId) !== session) return [];
+  const result = await refreshDeveloperEffects(session);
+  if (!result.applied) return [];
+  const event = makeDeveloperEffectsEvent(session.actorId, result.effects);
+  if (result.changed) {
+    broadcastReliableToRoom(session, event, channel, "developer-effects", { requireGameState: false });
+  }
+  console.log(`[developer-effects] refresh actor=${session.actorId} player=${session.playerId} spawn=${result.effects.spawnEffect} death=${result.effects.deathEffect} changed=${result.changed ? 1 : 0}`);
+  return [event];
 }
 
 async function fetchApiJson(path) {
@@ -11463,6 +11556,11 @@ function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round
 
 function resetSessionRoomProgress(session) {
   if (!session) return;
+  session.developerEffects = { spawnEffect: 0, deathEffect: 0 };
+  session.developerEffectsGeneration = (session.developerEffectsGeneration || 0) + 1;
+  // A pending API lookup carries its original room/actor identity and cannot
+  // apply after this reset; a new room starts a fresh serialized chain.
+  session.developerEffectsRefreshChain = null;
   session.isGuest = false;
   session.spawned = false;
   session.dead = false;
@@ -14938,7 +15036,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     session.roomRaw = makeRoomSettingsRaw(session.room);
     session.actorId = nextRoomActorId(session.room);
     updateActorWireData(session, actorParam, profile, channel);
-    const actorListRaw = makeRoomActorListRaw(session.room, session);
+    let actorListRaw = makeRoomActorListRaw(session.room, session);
     session.knownActorIds = new Set();
     session.actorJoinAnnouncedAt = new Map();
     markKnownRoomActors(session);
@@ -14957,14 +15055,39 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     console.log(`[state] room join accepted room=${session.room.name} map=${session.room.map} mode=${session.room.mode} player=${session.playerId} name=${session.playerName} spectator=${session.isGuest ? "yes" : "no"} profile=${profileSource} wears=${session.actorWearCount || 0} wearList=${session.actorWearSummary || "none"} taunts=${session.actorTauntCount || 0} tauntSlots=${session.actorTauntSummary || "none"} enhancers=${session.actorEnhancerCount || 0} enhancerList=${session.actorEnhancerSummary || "none"} actorKeys=${describeHashtable(actorParam)} actorRaw=${session.actorRaw?.length || 0} peerActorRaw=${session.peerActorRaw?.length || 0} peerSlots=${session.peerActorLoadoutSlots || 0} peerProfile=${session.peerActorProfile || "n/a"} peerHasWears=${session.peerActorHasWears ? "yes" : "no"} peerHasEnhancers=${session.peerActorHasEnhancers ? "yes" : "no"} peerPacket=${session.peerActorRawBytes || 0} joinActorRaw=${session.joinActorRaw?.length || 0} joinSlots=${session.joinActorLoadoutSlots || 0} joinProfile=${session.joinActorProfile || "n/a"} joinHasWears=${session.joinActorHasWears ? "yes" : "no"} joinHasEnhancers=${session.joinActorHasEnhancers ? "yes" : "no"} joinPacket=${session.joinActorRawBytes || 0} joinDeferred=${session.deferredJoinActorIds?.size || 0} roomRaw=${session.roomRaw?.length || 0}`);
     postBattleEvent(session, "join", { playerData: { remote: rinfo.address, name: session.playerName } });
     broadcastMasterUserState(session.playerId);
+    const effectsRoom = session.room;
+    const effectsRefreshes = await Promise.all(Array.from(effectsRoom.players.values(), async (actorSession) => ({
+      actorSession,
+      result: await refreshDeveloperEffects(actorSession),
+    })));
+    if (session.joinAttemptGeneration !== joinAttempt || session.room !== effectsRoom ||
+        effectsRoom.players.get(session.actorId) !== session || session.transportDisconnected) return [];
+    // Another player can join while the cosmetic API lookup is pending.
+    // Rebuild the actor list at the actual JoinRoom response boundary.
+    actorListRaw = makeRoomActorListRaw(effectsRoom, session);
+    markKnownRoomActors(session);
     const responses = buildJoinAccepted(port, socket, rinfo, session, channel, actorListRaw, {
       waitForProfile: false,
       incomingActor: actorParam,
     });
+    insertDeveloperEffectsIntoJoinResponses(responses, effectsRoom);
+    console.log(`[developer-effects] join actor=${session.actorId} player=${session.playerId} room=${effectsRoom.name} spawn=${session.developerEffects.spawnEffect} death=${session.developerEffects.deathEffect} snapshots=${effectsRoom.players.size}`);
     broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
       markActorAnnounced: true,
       skipKnownActor: true,
     });
+    const ownEffectsEvent = makeDeveloperEffectsEvent(session.actorId, session.developerEffects);
+    for (const peer of effectsRoom.players.values()) {
+      if (peer !== session) sendReliableToSession(peer, ownEffectsEvent, channel);
+    }
+    for (const { actorSession, result } of effectsRefreshes) {
+      if (actorSession === session || !result.applied || !result.changed ||
+          effectsRoom.players.get(actorSession.actorId) !== actorSession) continue;
+      const event = makeDeveloperEffectsEvent(actorSession.actorId, result.effects);
+      for (const peer of effectsRoom.players.values()) {
+        if (peer !== session) sendReliableToSession(peer, event, channel);
+      }
+    }
     return responses;
   }
 
@@ -15006,6 +15129,12 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
   if (eventCode === 155) {
     return handleBattleChatRequest(session, parsed, channel);
+  }
+
+  if (eventCode === DEVELOPER_EFFECTS_EVENT) {
+    // This event is only a refresh signal. Ignore every request parameter,
+    // including forged actor numbers and effect IDs.
+    return handleDeveloperEffectsRefreshRequest(session, channel);
   }
 
   if (eventCode === EXPEDITION_EVENT) {
