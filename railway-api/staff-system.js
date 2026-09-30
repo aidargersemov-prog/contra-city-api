@@ -105,6 +105,45 @@ function staffFailure(error, status = 403) {
   return { result: false, ok: false, status, error };
 }
 
+function developerEffectsPayload(row = null) {
+  return {
+    ok: true,
+    result: true,
+    spawnEffect: Number(row?.spawn_effect || 0),
+    deathEffect: Number(row?.death_effect || 0),
+  };
+}
+
+function validDeveloperEffect(value) {
+  return typeof value === "string" && /^(?:[0-8])$/.test(value);
+}
+
+function validDeveloperEffectsParams(params, save) {
+  // These keys are the authenticated Ajax envelope and the existing panel nonce.
+  // No caller-supplied player ID or unrelated setting is accepted.
+  const allowed = new Set(["ccid", "cckey", "ccsession", "page", "act", "action", "_"]);
+  if (save) {
+    allowed.add("spawnEffect");
+    allowed.add("deathEffect");
+  }
+  if (!params || [...params.keys()].some((key) => !allowed.has(key))) return false;
+  if ([...params.keys()].some((key) => params.getAll(key).length !== 1)) return false;
+  return !save || (validDeveloperEffect(params.get("spawnEffect")) && validDeveloperEffect(params.get("deathEffect")));
+}
+
+export async function loadBattleDeveloperEffects(db, playerId) {
+  const id = positivePlayerId(playerId);
+  if (!db?.query || !id) return staffFailure("invalid_player_id", 400);
+  if (await loadActiveStaffRole(db, id) !== "developer") return developerEffectsPayload();
+  const result = await db.query(
+    `SELECT spawn_effect, death_effect
+     FROM player_developer_effects
+     WHERE player_id = $1`,
+    [id]
+  );
+  return developerEffectsPayload(result.rows[0]);
+}
+
 async function requirePanelStaff(db, account) {
   const role = await loadActiveStaffRole(db, account?.id);
   const profile = staffProfilePayload(role, account?.name);
@@ -170,6 +209,37 @@ export async function staffAjaxPayload(db, account, act, searchParams) {
 
   if (normalizedAct === "me") {
     return { result: true, ok: true, staff: profile };
+  }
+
+  if (normalizedAct === "developer_effects_get" || normalizedAct === "developer_effects_save") {
+    if (role !== "developer") return staffFailure("developer_role_required");
+    const playerId = positivePlayerId(account?.id);
+    if (!playerId) return staffFailure("invalid_player_id", 400);
+    if (!validDeveloperEffectsParams(searchParams, normalizedAct === "developer_effects_save")) {
+      return staffFailure("invalid_developer_effects", 400);
+    }
+    if (normalizedAct === "developer_effects_save") {
+      const spawnEffect = Number(searchParams.get("spawnEffect"));
+      const deathEffect = Number(searchParams.get("deathEffect"));
+      const saved = await db.query(
+        `INSERT INTO player_developer_effects (player_id, spawn_effect, death_effect, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (player_id) DO UPDATE SET
+           spawn_effect = EXCLUDED.spawn_effect,
+           death_effect = EXCLUDED.death_effect,
+           updated_at = now()
+         RETURNING spawn_effect, death_effect`,
+        [playerId, spawnEffect, deathEffect]
+      );
+      return developerEffectsPayload(saved.rows[0]);
+    }
+    const result = await db.query(
+      `SELECT spawn_effect, death_effect
+       FROM player_developer_effects
+       WHERE player_id = $1`,
+      [playerId]
+    );
+    return developerEffectsPayload(result.rows[0]);
   }
 
   if (!profile.panelEnabled) return staffFailure("staff_role_required");

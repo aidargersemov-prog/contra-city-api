@@ -13,6 +13,7 @@ import {
   executeBattleStaffAction,
   legacyPermissionPayload,
   loadActiveStaffRole,
+  loadBattleDeveloperEffects,
   staffAjaxPayload,
   staffProfilePayload,
 } from "./staff-system.js";
@@ -24,7 +25,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-29-table-damage-v147";
+const API_BUILD_ID = "railway-api-2026-10-01-developer-effects-v148";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -373,7 +374,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition" || pathname === "/battle/developer-effects") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -15335,6 +15336,33 @@ async function handleHttpRequest(req, res) {
       sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/developer-effects") {
+    if (req.method !== "GET") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    if (!hasValidBattleServiceToken(req)) {
+      sendJson(res, { ok: false, error: "invalid_token" }, 403);
+      return;
+    }
+    const playerIdText = url.searchParams.get("playerId");
+    const playerId = Number(playerIdText);
+    if (url.searchParams.size !== 1 || url.searchParams.getAll("playerId").length !== 1 ||
+        !/^[1-9]\d*$/.test(playerIdText || "") || !Number.isSafeInteger(playerId)) {
+      sendJson(res, { ok: false, error: "invalid_player_id" }, 400);
+      return;
+    }
+    try {
+      const result = await loadBattleDeveloperEffects(pgPool, playerId);
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      console.error(`[staff] developer effects lookup failed player=${playerId}`, error);
+      sendJson(res, { ok: false, error: "developer_effects_unavailable" }, serviceErrorStatus(error));
     }
     return;
   }
