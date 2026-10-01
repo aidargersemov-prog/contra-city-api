@@ -25,7 +25,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-01-developer-effects-v148";
+const API_BUILD_ID = "railway-api-2026-10-01-developer-mythic-set-v150";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
