@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-01-developer-effects-v357";
+const BUILD_ID = "battle-server-2026-10-01-developer-mythic-set-v360";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -2426,12 +2426,20 @@ function rawEvent(eventCode, entries) {
   ]);
 }
 
-function makeDeveloperEffectsEvent(actorId, effects) {
+function makeDeveloperEffectsEvent(actorId, effects, session = null) {
+  const enabled = effects?.mythicSet === true;
+  const kills = enabled ? Math.min(2147483647, Math.max(0, Math.trunc(Number(session?.mythicKills) || 0))) : 0;
   return rawEvent(DEVELOPER_EFFECTS_EVENT, [
     { key: 254, value: rawInt(actorId) },
     { key: 245, value: rawHashtable([
       { key: rawByte(1), value: rawByte(effects?.spawnEffect || 0) },
       { key: rawByte(2), value: rawByte(effects?.deathEffect || 0) },
+      { key: rawByte(3), value: rawByte(effects?.spawnLevel || 1) },
+      { key: rawByte(4), value: rawByte(effects?.deathLevel || 1) },
+      { key: rawByte(5), value: rawByte(enabled ? 1 : 0) },
+      { key: rawByte(6), value: rawByte(mythicStageForKills(kills)) },
+      { key: rawByte(7), value: rawInt(kills) },
+      { key: rawByte(8), value: rawByte(enabled && session?.mythicMvp === true ? 1 : 0) },
     ]) },
   ]);
 }
@@ -5530,8 +5538,61 @@ function validDeveloperEffectId(value) {
   return Number.isInteger(value) && value >= 0 && value <= 8;
 }
 
+function mythicStageForKills(kills) {
+  return kills >= 5 ? 3 : kills >= 3 ? 2 : kills >= 2 ? 1 : 0;
+}
+
+function publishMythicState(session) {
+  if (!session?.room || session.room.players?.get(session.actorId) !== session) return;
+  sendReliableToWholeRoom(session.room, makeDeveloperEffectsEvent(session.actorId, session.developerEffects, session), 0,
+    { requireGameState: false });
+  console.log(`[mythic-set] actor=${session.actorId} enabled=${session.developerEffects?.mythicSet === true ? 1 : 0} stage=${mythicStageForKills(session.mythicKills || 0)} kills=${session.mythicKills || 0} mvp=${session.mythicMvp === true ? 1 : 0}`);
+}
+
+function resetMythicLife(session, publish = true) {
+  if (!session) return;
+  const changed = (session.mythicKills || 0) !== 0 || session.mythicMvp === true;
+  session.mythicKills = 0;
+  session.mythicMvp = false;
+  session.mythicLastAwardedKills = Number(session.kills) || 0;
+  if (publish && changed) publishMythicState(session);
+}
+
+function recordMythicAwardedKill(shooter, target) {
+  // Called only after the existing authoritative score awards a kill. The
+  // awarded score also makes repeated notifications idempotent. Dead shooters
+  // (kamikaze/DOT) cannot carry posthumous progress into their next life.
+  const credited = Number(shooter?.kills) || 0;
+  const previous = Number(shooter?.mythicLastAwardedKills) || 0;
+  if (!shooter) return;
+  shooter.mythicLastAwardedKills = credited;
+  if (credited <= previous || shooter === target || shooter.dead || shooter.developerEffects?.mythicSet !== true ||
+      !shooter.room || shooter.room !== target?.room || shooter.room.players?.get(shooter.actorId) !== shooter) return;
+  shooter.mythicKills = Math.min(2147483647, (Number(shooter.mythicKills) || 0) + 1);
+  shooter.mythicMvp = false;
+  publishMythicState(shooter);
+}
+
+function mythicRoundMvpEvents(room) {
+  // ScoreTeam.ResortList in the original client orders Point descending.
+  // There is no original global MVP or explicit tie rule. For this cosmetic
+  // presentation only, equal points resolve by actor ID ascending.
+  const participants = zombieRoomPlayers(room).filter(player => player.gameStateRequested && Number(player.team) !== -1);
+  const ranked = participants.slice().sort((a, b) => numberOr(b.points, 0) - numberOr(a.points, 0) || a.actorId - b.actorId);
+  const winner = ranked[0];
+  if (winner?.developerEffects?.mythicSet === true) console.log(`[mythic-set] round-mvp room=${room.name} actor=${winner.actorId} points=${numberOr(winner.points, 0)}`);
+  const events = [];
+  for (const player of zombieRoomPlayers(room)) {
+    const mvp = player === winner && player.developerEffects?.mythicSet === true;
+    const changed = player.mythicMvp === true || mvp;
+    player.mythicMvp = mvp;
+    if (changed) events.push(makeDeveloperEffectsEvent(player.actorId, player.developerEffects, player));
+  }
+  return events;
+}
+
 async function fetchDeveloperEffects(playerId) {
-  const disabled = { spawnEffect: 0, deathEffect: 0 };
+  const disabled = { spawnEffect: 0, deathEffect: 0, spawnLevel: 1, deathLevel: 1, mythicSet: false };
   if (!API_BASE_URL || !API_TOKEN || typeof fetch !== "function" || !Number.isSafeInteger(playerId) || playerId <= 0) {
     return disabled;
   }
@@ -5544,7 +5605,13 @@ async function fetchDeveloperEffects(playerId) {
     if (data?.ok !== true || !validDeveloperEffectId(data.spawnEffect) || !validDeveloperEffectId(data.deathEffect)) {
       throw new Error("invalid-response");
     }
-    return { spawnEffect: data.spawnEffect, deathEffect: data.deathEffect };
+    const spawnLevel = data.spawnLevel ?? 1;
+    const deathLevel = data.deathLevel ?? 1;
+    if (![spawnLevel, deathLevel].every((value) => Number.isInteger(value) && value >= 1 && value <= 3)) {
+      throw new Error("invalid-effect-level");
+    }
+    if (data.mythicSet !== undefined && typeof data.mythicSet !== "boolean") throw new Error("invalid-mythic-toggle");
+    return { spawnEffect: data.spawnEffect, deathEffect: data.deathEffect, spawnLevel, deathLevel, mythicSet: data.mythicSet === true };
   } catch (error) {
     // An inactive Developer role, a failed lookup, or invalid API data all
     // resolve to Off. Client-supplied IDs are never read here.
@@ -5565,7 +5632,10 @@ function refreshDeveloperEffects(session) {
       return { applied: false, changed: false, effects };
     }
     const previous = session.developerEffects || { spawnEffect: 0, deathEffect: 0 };
-    const changed = previous.spawnEffect !== effects.spawnEffect || previous.deathEffect !== effects.deathEffect;
+    const changed = previous.spawnEffect !== effects.spawnEffect || previous.deathEffect !== effects.deathEffect ||
+      (previous.spawnLevel || 1) !== effects.spawnLevel || (previous.deathLevel || 1) !== effects.deathLevel ||
+      (previous.mythicSet === true) !== effects.mythicSet;
+    if ((previous.mythicSet === true) !== effects.mythicSet || !effects.mythicSet) resetMythicLife(session, false);
     session.developerEffects = effects;
     return { applied: true, changed, effects };
   };
@@ -5581,7 +5651,7 @@ function refreshDeveloperEffects(session) {
 function developerEffectsJoinEvents(room) {
   if (!room?.players) return [];
   return Array.from(room.players.values(), (actorSession) =>
-    makeDeveloperEffectsEvent(actorSession.actorId, actorSession.developerEffects));
+    makeDeveloperEffectsEvent(actorSession.actorId, actorSession.developerEffects, actorSession));
 }
 
 function insertDeveloperEffectsIntoJoinResponses(responses, room) {
@@ -5595,12 +5665,26 @@ async function handleDeveloperEffectsRefreshRequest(session, channel = 0) {
   if (!session.room?.players || session.room.players.get(session.actorId) !== session) return [];
   const result = await refreshDeveloperEffects(session);
   if (!result.applied) return [];
-  const event = makeDeveloperEffectsEvent(session.actorId, result.effects);
+  const event = makeDeveloperEffectsEvent(session.actorId, result.effects, session);
   if (result.changed) {
     broadcastReliableToRoom(session, event, channel, "developer-effects", { requireGameState: false });
   }
-  console.log(`[developer-effects] refresh actor=${session.actorId} player=${session.playerId} spawn=${result.effects.spawnEffect} death=${result.effects.deathEffect} changed=${result.changed ? 1 : 0}`);
+  console.log(`[developer-effects] refresh actor=${session.actorId} player=${session.playerId} spawn=${result.effects.spawnEffect} death=${result.effects.deathEffect} spawnLevel=${result.effects.spawnLevel} deathLevel=${result.effects.deathLevel} mythic=${result.effects.mythicSet ? 1 : 0} changed=${result.changed ? 1 : 0}`);
   return [event];
+}
+
+async function refreshActiveMythicPermissions() {
+  // Revocation also clears an already-equipped form when the owner never
+  // opens the admin panel again. Reuse the serialized identity-checked read.
+  const pending = [];
+  for (const session of sessions.values()) {
+    if (session.developerEffects?.mythicSet !== true || session.developerEffectsRefreshChain ||
+        session.room?.players?.get(session.actorId) !== session) continue;
+    pending.push(refreshDeveloperEffects(session).then(result => {
+      if (result.applied && result.changed) publishMythicState(session);
+    }).catch(error => console.log(`[developer-effects] permission refresh failed: ${error.message}`)));
+  }
+  await Promise.all(pending);
 }
 
 async function fetchApiJson(path) {
@@ -7673,6 +7757,7 @@ function finishStandardRound(room, winner, reason = "unknown", channel = 0, curr
   const scoreSource = currentSession || standardReadyPlayers(room)[0] || zombieRoomPlayers(room)[0];
   const payloads = [
     scoreSource ? makeScoreUpdateEvent(scoreSource) : null,
+    ...mythicRoundMvpEvents(room),
     makeStandardTimeOverEvent(room),
   ].filter(Boolean);
   let sent = 0;
@@ -7859,6 +7944,7 @@ function finishZombieRound(room, winnerTeam, reason = "unknown", channel = 0, cu
   const payloads = [
     scoreSource ? makeScoreUpdateEvent(scoreSource) : null,
     makeZombieModeEvent(room.zombieMode),
+    ...mythicRoundMvpEvents(room),
     makeZombieTimeOverEvent(room),
   ].filter(Boolean);
   const sent = sendZombiePayloadsToReadyRoom(room, payloads, channel, currentSession, currentResponses);
@@ -8044,6 +8130,7 @@ function keepZombieLateJoinSpectator(session) {
   session.zombieType = ZOMBIE_TYPE.HUMAN;
   session.spawned = false;
   session.dead = true;
+  resetMythicLife(session);
   session.moveSeen = false;
   session.moveCount = 0;
   session.waitingSelfSpawnMove = false;
@@ -8600,9 +8687,9 @@ function setWeaponMode(state, mode, now = Date.now()) {
   return mode;
 }
 
-function resetWeaponActionState(state) {
+function resetWeaponActionState(state, preserveShotCooldown = false) {
   if (!state) return;
-  state.nextShotAt = 0;
+  if (!preserveShotCooldown) state.nextShotAt = 0;
   state.shotStartedAt = 0;
   state.launchStartedAt = 0;
   state.meleeDelayedShotUntil = 0;
@@ -8672,7 +8759,8 @@ function refreshWeaponMode(state, now = Date.now()) {
 function startWeaponChange(state, reason = "interrupted-by-change", now = Date.now()) {
   if (!state) return WEAPON_MODE.READY;
   cancelWeaponReload(state, reason, now);
-  resetWeaponActionState(state);
+  // A sniper's per-shot interval survives a switch away and back.
+  resetWeaponActionState(state, Number(state.type) === 10);
   state.changeUntil = now + numberOr(state.changeDurationMs, WEAPON_CHANGE_DURATION_MS);
   return setWeaponMode(state, WEAPON_MODE.CHANGING, now);
 }
@@ -9577,6 +9665,7 @@ function ensureDominatedBy(session) {
 
 function resetSessionFragState(session) {
   if (!session) return;
+  resetMythicLife(session);
   session.domination = 0;
   session.revenge = 0;
   session.maxDomination = 0;
@@ -9723,12 +9812,14 @@ function applyKamikazeExplosion(deadSession, channel = 0) {
     const assistant = resolveKillAssistant(deadSession, targetSession);
     const assistExpAwarded = awardAssistExp(assistant);
     targetSession.dead = true;
+    resetMythicLife(targetSession);
     targetSession.waitingSelfSpawnMove = false;
     resetZombieInfectionProgress(targetSession);
     targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
     targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
     recordContractKill(deadSession, targetSession, 203, 996, 0);
     deadSession.kills = numberOr(deadSession.kills, 0) + 1;
+    recordMythicAwardedKill(deadSession, targetSession);
     deadSession.points = numberOr(deadSession.points, 0) + 1;
     recordTdmTeamKill(deadSession);
     deadSession.matchKills = numberOr(deadSession.matchKills, 0) + 1;
@@ -9822,12 +9913,14 @@ function applyZombieInfectionHit(shooter, targetSession, context = {}) {
 
   if (targetSession !== shooter) {
     shooter.kills = numberOr(shooter.kills, 0) + 1;
+    recordMythicAwardedKill(shooter, targetSession);
     shooter.points = numberOr(shooter.points, 0) + 1;
     recordTdmTeamKill(shooter);
     shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
     if (context.hitZone === HIT_ZONE_CABIN) shooter.matchHeadKills = numberOr(shooter.matchHeadKills, 0) + 1;
     if (context.hitZone === HIT_ZONE_ENGINE) shooter.matchNutsKills = numberOr(shooter.matchNutsKills, 0) + 1;
     targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
+    resetMythicLife(targetSession);
     targetSession.matchDeaths = numberOr(targetSession.matchDeaths, 0) + 1;
     fragInfo = recordKillFragState(shooter, targetSession);
     expAwarded = awardBattleExp(
@@ -10084,6 +10177,7 @@ function applyImpactDotKill(effect, targetSession, damage) {
   const shooter = effect.shooter;
   recordContractKill(shooter, targetSession, effect.weaponType, effect.weaponId, 0);
   targetSession.dead = true;
+  resetMythicLife(targetSession);
   targetSession.waitingSelfSpawnMove = false;
   resetZombieInfectionProgress(targetSession);
   targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
@@ -10096,6 +10190,7 @@ function applyImpactDotKill(effect, targetSession, damage) {
   if (targetSession !== shooter) {
     assistant = resolveKillAssistant(shooter, targetSession);
     shooter.kills = numberOr(shooter.kills, 0) + 1;
+    recordMythicAwardedKill(shooter, targetSession);
     shooter.points = numberOr(shooter.points, 0) + 1;
     recordTdmTeamKill(shooter);
     shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
@@ -10357,6 +10452,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const targetCurrent = sessionCurrentHealthEnergy(targetSession);
   if (targetCurrent.health <= 0) {
     targetSession.dead = true;
+    resetMythicLife(targetSession);
     targetSession.waitingSelfSpawnMove = false;
     resetZombieInfectionProgress(targetSession);
     result.summary = `${targetActorId}:dead`;
@@ -10460,6 +10556,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     }
     recordContractKill(shooter, targetSession, weaponType, damageState?.weaponId, hitZone);
     targetSession.dead = true;
+    resetMythicLife(targetSession);
     targetSession.waitingSelfSpawnMove = false;
     resetZombieInfectionProgress(targetSession);
     targetSession.deaths = numberOr(targetSession.deaths, 0) + 1;
@@ -10472,6 +10569,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     if (targetSession !== shooter) {
       assistant = resolveKillAssistant(shooter, targetSession);
       shooter.kills = numberOr(shooter.kills, 0) + 1;
+      recordMythicAwardedKill(shooter, targetSession);
       shooter.points = numberOr(shooter.points, 0) + 1;
       recordTdmTeamKill(shooter);
       shooter.matchKills = numberOr(shooter.matchKills, 0) + 1;
@@ -11556,7 +11654,8 @@ function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round
 
 function resetSessionRoomProgress(session) {
   if (!session) return;
-  session.developerEffects = { spawnEffect: 0, deathEffect: 0 };
+  resetMythicLife(session, false);
+  session.developerEffects = { spawnEffect: 0, deathEffect: 0, mythicSet: false };
   session.developerEffectsGeneration = (session.developerEffectsGeneration || 0) + 1;
   // A pending API lookup carries its original room/actor identity and cannot
   // apply after this reset; a new room starts a fresh serialized chain.
@@ -15071,19 +15170,19 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       incomingActor: actorParam,
     });
     insertDeveloperEffectsIntoJoinResponses(responses, effectsRoom);
-    console.log(`[developer-effects] join actor=${session.actorId} player=${session.playerId} room=${effectsRoom.name} spawn=${session.developerEffects.spawnEffect} death=${session.developerEffects.deathEffect} snapshots=${effectsRoom.players.size}`);
+    console.log(`[developer-effects] join actor=${session.actorId} player=${session.playerId} room=${effectsRoom.name} spawn=${session.developerEffects.spawnEffect} death=${session.developerEffects.deathEffect} mythic=${session.developerEffects.mythicSet ? 1 : 0} snapshots=${effectsRoom.players.size}`);
     broadcastReliableToRoom(session, makeActorJoinEvent(session), channel, "actor-join", {
       markActorAnnounced: true,
       skipKnownActor: true,
     });
-    const ownEffectsEvent = makeDeveloperEffectsEvent(session.actorId, session.developerEffects);
+    const ownEffectsEvent = makeDeveloperEffectsEvent(session.actorId, session.developerEffects, session);
     for (const peer of effectsRoom.players.values()) {
       if (peer !== session) sendReliableToSession(peer, ownEffectsEvent, channel);
     }
     for (const { actorSession, result } of effectsRefreshes) {
       if (actorSession === session || !result.applied || !result.changed ||
           effectsRoom.players.get(actorSession.actorId) !== actorSession) continue;
-      const event = makeDeveloperEffectsEvent(actorSession.actorId, result.effects);
+      const event = makeDeveloperEffectsEvent(actorSession.actorId, result.effects, actorSession);
       for (const peer of effectsRoom.players.values()) {
         if (peer !== session) sendReliableToSession(peer, event, channel);
       }
@@ -15764,6 +15863,8 @@ if (process.env.CLAN_WARS_ENABLED === "1") {
 }
 
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
+const mythicPermissionInterval = setInterval(refreshActiveMythicPermissions, 15000);
+mythicPermissionInterval.unref();
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
 if (typeof outboundReliableRetryInterval.unref === "function") outboundReliableRetryInterval.unref();
