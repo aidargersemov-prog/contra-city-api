@@ -13,6 +13,7 @@ import {
   executeBattleStaffAction,
   legacyPermissionPayload,
   loadActiveStaffRole,
+  loadBattleDeveloperEffects,
   staffAjaxPayload,
   staffProfilePayload,
 } from "./staff-system.js";
@@ -24,7 +25,9 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-09-19-statistics-reset-v118";
+const API_BUILD_ID = "railway-api-2026-10-01-developer-mythic-set-v150";
+const WORKSHOP_ENABLED = false;
+const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
 const CREATE_BATCH_MAX = 100;
 const DEFAULT_KEY = process.env.DEFAULT_KEY || "contra-revive-key";
@@ -66,12 +69,14 @@ const LEVEL_EXP_STEP = Math.max(1, Number(process.env.LEVEL_EXP_STEP || START_EX
 // настраиваются независимо в shop-prices.js.
 const SHOP_PRICE = 100;
 const RETIRED_BATTLE_HOST = "54.145.212.225";
+const RETIRED_RELAY_HOST = "13.62.98.107";
 const DEFAULT_BATTLE_HOST = "3.76.0.237";
 const CONFIGURED_BATTLE_HOST = String(process.env.BATTLE_HOST || "").trim();
-const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRED_BATTLE_HOST
+const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRED_RELAY_HOST
   ? DEFAULT_BATTLE_HOST
   : CONFIGURED_BATTLE_HOST;
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
+const WARSAW_BATTLE_HOST = String(process.env.WARSAW_BATTLE_HOST || "").trim();
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
 const PROMO_ADMIN_TOKEN = process.env.PROMO_ADMIN_TOKEN || "";
@@ -369,7 +374,7 @@ function requestRatePolicy(pathname) {
   // Both endpoints are called by the single battle VPS for all online players.
   // Keep the service token as the real authorization boundary and avoid throttling
   // legitimate aggregate battle/social traffic.
-  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition") {
+  if (pathname === "/battle/event" || pathname === "/battle/security" || pathname === "/battle/social" || pathname === "/battle/clan-events" || pathname === "/battle/admin/action" || pathname === "/battle/expedition" || pathname === "/battle/developer-effects") {
     return { windowMs: 60000, limit: BATTLE_RATE_LIMIT_REQUESTS };
   }
   if (pathname === "/launcher-session" || pathname === "/launcher-device/challenge" || pathname === "/session" || pathname === "/vk-login") {
@@ -711,6 +716,172 @@ const weaponTitleById = {
 const ARCING_LAUNCHER_VELOCITY = 10;
 const ARCING_LAUNCHER_LIFE = 7000;
 const ARCING_LAUNCHER_DISTANCE = 10;
+const GADYUKA_GRENADE_STATS = Object.freeze({
+  vel: 6, rad: ARCING_LAUNCHER_DISTANCE, ang: 0,
+  rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE,
+  dev: 6, krit: 3, ammo: 4, ammo_tot: 8,
+  smindam: 36, smaxdam: 56, mmindam: 55, mmaxdam: 68, lmindam: 56, lmaxdam: 75
+});
+const GADYUKA_PARITY_LAUNCHERS = new Set([
+  "gl_grenadelauncher03", "gl_ex41", "gl_snowlauncher"
+]);
+const GADYUKA_PARITY_FIELDS = Object.keys(GADYUKA_GRENADE_STATS).filter((key) => !/^[sml](min|max)dam$/.test(key));
+
+// User-confirmed titles belong to model names, not historical numeric IDs.
+// Keep IDs stable so existing purchases, loadouts and workshop upgrades survive.
+const weaponIdentityBySname = new Map([
+  ["SG_DB", "Егерь"],
+  ["SG_Winchester1887", "ВьньЧестер"],
+  ["SG_Novapump", "Сибиряк"],
+  ["OHCA_Torch_F", "Светочь"],
+  ["OHCA_Icicle_W", "Ледовик"],
+  ["GL_EX41", "Страж"],
+  ["GL_SnowLauncher", "Павлик М"],
+  ["RL_RPG26", "Аврора"],
+  ["RL_RPG7", "Мини Катюша"],
+  ["MG_AK103D_O", "Побарабанщик"],
+  ["MG_AUG2_O", "Вектор"],
+  ["MG_AK103", "Кладенец"],
+  ["MG_AK47B08", "Звездочет"],
+  ["MG_M4_O", "Бюрократ"],
+  ["MG_M4D_O", "Наводка"],
+  ["MG_AK103_O", "Полкан"],
+  ["MG_AK47B07", "Смертобой"],
+  ["MG_AK47B06", "Засад"],
+  ["MG_M4", "Рык"],
+  ["MG_UMP45D_O", "Провокатор"],
+  ["MG_M16", "ММ-16"],
+  ["MG_UMP45", "Убойник"],
+  ["MG_AssaultRifle03", "Барс"],
+  ["MG_UMP45D2_O", "Ликвидатор"],
+  ["MG_AUG3_O", "Буран"],
+  ["MG_AK47", "Гост Комрад"],
+  ["HG_Walther_R", "Начальник"],
+  ["HG_TT", "Комиссар"],
+  ["HG_WaltherP99", "СверхДембель"],
+  ["HG_Makarov", "Гост Партизан"],
+  ["HG_Glock_S", "Политрук"],
+  ["HG_SIGSauerP226_B", "Дружинник"],
+  ["SR_SteyrB01", "Сторож"],
+  ["SR_SVD", "Гост Компостер"],
+  ["SR_HK417_D", "Дальнобойщик"],
+  ["SR_M110_B", "Клык"],
+  ["GG_M134B02", "Максимыч"],
+  ["GG_N2", "Берия"],
+  ["GG_M134", "Гост Стаханов"],
+  ["GG_M249", "Дон"],
+  ["SNG_Snowgun", "Вьюга"],
+].map(([sname, name]) => [sname.toLowerCase(), Object.freeze({ sname, name })]));
+
+// Purchase IDs are stable; localization IDs refer to the original model's
+// w_<id>_* records in the client TextAsset, and can be different.
+const weaponTextIdBySname = new Map([
+  ["HG_Makarov", 11],
+  ["MG_AK47", 12],
+  ["GG_M134", 13],
+  ["SR_SVD", 16],
+  ["GG_M134B02", 66],
+  ["GG_M249", 37],
+  ["GG_N2", 20],
+  ["GL_SnowLauncher", 46],
+  ["HG_Glock_S", 28],
+  ["HG_SIGSauerP226_B", 27],
+  ["HG_TT", 18],
+  ["HG_Walther_R", 26],
+  ["HG_WaltherP99", 24],
+  ["MG_AK47B06", 60],
+  ["MG_AK47B07", 62],
+  ["MG_AK47B08", 61],
+  ["MG_AssaultRifle03", 102],
+  ["MG_AUG2_O", 77],
+  ["MG_AUG3_O", 78],
+  ["MG_M4", 32],
+  ["MG_M4_O", 33],
+  ["MG_M4D_O", 34],
+  ["MG_UMP45", 55],
+  ["MG_UMP45D_O", 58],
+  ["MG_UMP45D2_O", 92],
+  ["OHCA_Icicle_W", 48],
+  ["RL_RPG7", 22],
+  ["SG_DB", 21],
+  ["SNG_Snowgun", 47],
+  ["SR_HK417_D", 35],
+  ["SR_M110_B", 36],
+  ["SR_SteyrB01", 57],
+].map(([sname, id]) => [sname.toLowerCase(), id]));
+
+// Confirmed base loadouts: magazine / spare rounds, before training or workshop.
+// ammo_tot is the Photon/client total, including the magazine.
+const baseWeaponAmmoBySname = new Map([
+  ["hg_makarov",8,16],
+  ["hg_tt",10,10],
+  ["hg_walther_r",8,16],
+  ["hg_waltherp99",10,10],
+  ["hg_sigsauerp226_b",13,13],
+  ["hg_glock_s",17,17],
+  ["hg_glockb01_s",20,20],
+  ["hg_desert",7,14],
+  ["hg_desertb01",7,7],
+  ["hg_taurus",6,6],
+  ["hg_usp",16,16],
+  ["mg_ak47",18,54],
+  ["mg_m16",20,40],
+  ["mg_ak103",18,36],
+  ["mg_m4",15,30],
+  ["mg_ak103_o",22,44],
+  ["mg_m4_o",40,80],
+  ["mg_m4d_o",40,80],
+  ["mg_ak103d_o",40,80],
+  ["mg_ump45",35,60],
+  ["mg_ump45d_o",30,60],
+  ["mg_ump45d2_o",30,60],
+  ["mg_ak47b06",40,80],
+  ["mg_ak47b08",40,80],
+  ["mg_ak47b07",40,80],
+  ["mg_aug3_o",25,50],
+  ["mg_aug2_o",28,56],
+  ["mg_aug4_o",30,60],
+  ["mg_aug1_o",35,70],
+  ["mg_aug5_o",35,70],
+  ["mg_assaultrifle03",42,84],
+  ["mg_assaultrifle02",28,56],
+  ["mg_ump45vkks_o",35,70],
+  ["gg_m134",100,220],
+  ["gg_n2",150,300],
+  ["gg_m249",75,150],
+  ["sng_snowgun",50,100],
+  ["fl_n1",50,100],
+  ["gg_m134b02",130,260],
+  ["gg_m134b03",200,400],
+  ["gg_fnmag",100,200],
+  ["sg_winchester1887",3,5],
+  ["sg_db",2,4],
+  ["sg_novapump",8,6],
+  ["sg_spas",5,7],
+  ["sg_remington",3,6],
+  ["rl_rpg26",1,2],
+  ["rl_rpg7",1,3],
+  ["rl_m202a1",4,2],
+  ["gl_snowlauncher",4,4],
+  ["gl_milkor",4,4],
+  ["gl_milkor_a",4,4],
+  ["gl_ex41",4,4],
+  ["gl_grenadelauncher03",4,4],
+  ["bl_stickyb02",4,2],
+  ["bl_sticky",4,2],
+  ["rl_rpg7b02",1,3],
+  ["sr_svd",3,4],
+  ["sr_steyr",1,3],
+  ["sr_steyrb01",1,3],
+  ["sr_hk417_d",7,6],
+  ["sr_m110_b",10,10],
+  ["sr_arctic",6,4],
+  ["sr_arcticb01",6,4],
+  ["sr_wildcat1",5,5],
+  ["sr_wildcat2",6,4],
+  ["sr_vintorez",7,4],
+  ["sr_sniperrifle03",3,3],
+].map(([sname, ammo, reserve]) => [sname, Object.freeze({ ammo, ammo_tot: ammo + reserve })]));
 
 function weaponBalance(slot, wt, id) {
   const bySlot = {
@@ -740,8 +911,206 @@ function weaponBalance(slot, wt, id) {
   };
 }
 
+// Confirmed shop ratings. Exactly the two user-specified categories are shown;
+// the missing category is explicitly zeroed, including on saved upgrades.
+const confirmedWeaponStarsBySname = new Map(Object.entries({
+  ohca_basebalbat: { stDi: 1, stDa: 1 },
+  ohca_candy: { stDi: 2, stDa: 2 },
+  ohca_candy2: { stDi: 1, stDa: 3 },
+  ohca_crowbar: { stDi: 1, stDa: 3 },
+  thca_scythe_b: { stDi: 5, stDa: 3 },
+  thca_katana_b: { stDi: 4, stDa: 4 },
+  ohca_torch_f: { stDi: 1, stDa: 2 },
+  ohca_icicle_w: { stDi: 1, stDa: 2 },
+  fl_n1: { stDi: 2, stDa: 1 },
+
+  hg_makarov: { stDi: 1, stDa: 2 },
+  hg_tt: { stDi: 2, stDa: 3 },
+  hg_walther_r: { stDi: 3, stDa: 3 },
+  hg_waltherp99: { stDi: 3, stDa: 4 },
+  hg_sigsauerp226_b: { stDi: 3, stDa: 4 },
+  hg_glock_s: { stRa: 4, stDi: 2 },
+  hg_glockb01_s: { stRa: 4, stDi: 3 },
+  hg_desert: { stDi: 5, stDa: 4 },
+  hg_desertb01: { stDi: 5, stDa: 5 },
+  hg_taurus: { stDi: 5, stDa: 5 },
+  hg_usp: { stRa: 5, stDa: 3 },
+
+  mg_ak47: { stRa: 1, stDa: 2 },
+  mg_m16: { stRa: 1, stDa: 2 },
+  mg_ak103: { stRa: 3, stDa: 3 },
+  mg_ak103_o: { stRa: 2, stDa: 3 },
+  mg_ak103d_o: { stRa: 3, stDa: 3 },
+  mg_ak47b06: { stRa: 3, stDa: 4 },
+  mg_ak47b07: { stRa: 3, stDa: 3 },
+  mg_ak47b08: { stRa: 3, stDa: 5 },
+  mg_m4: { stRa: 2, stDa: 2 },
+  mg_m4_o: { stRa: 3, stDa: 3 },
+  mg_m4d_o: { stRa: 3, stDa: 3 },
+  mg_ump45: { stRa: 5, stDa: 2 },
+  mg_ump45d_o: { stRa: 5, stDa: 3 },
+  mg_ump45d2_o: { stRa: 4, stDa: 3 },
+  mg_aug1_o: { stRa: 3, stDa: 5 },
+  mg_aug2_o: { stRa: 4, stDa: 3 },
+  mg_aug3_o: { stRa: 3, stDa: 3 },
+  mg_aug4_o: { stRa: 3, stDa: 5 },
+  mg_aug5_o: { stRa: 5, stDa: 5 },
+  mg_assaultrifle03: { stRa: 5, stDa: 4 },
+  mg_assaultrifle02: { stRa: 3, stDa: 5 },
+  mg_ump45vkks_o: { stRa: 5, stDa: 5 },
+
+  gg_m134: { stRa: 1, stDa: 2 },
+  gg_m134b01: { stDi: 2, stDa: 1 },
+  gg_m134b02: { stRa: 3, stDa: 3 },
+  gg_m134b03: { stRa: 3, stDa: 3 },
+  gg_m249: { stRa: 3, stDa: 2 },
+  gg_n2: { stRa: 2, stDa: 1 },
+  gg_fnmag: { stRa: 5, stDa: 2 },
+  sng_snowgun: { stDi: 2, stDa: 3 },
+
+  sg_winchester1887: { stDi: 1, stDa: 2 },
+  sg_db: { stDi: 2, stDa: 3 },
+  sg_novapump: { stDi: 2, stDa: 4 },
+  sg_spas: { stRa: 2, stDa: 5 },
+  sg_remington: { stDi: 4, stDa: 5 },
+
+  rl_rpg26: { stRa: 1, stDa: 2 },
+  rl_rpg7: { stRa: 1, stDa: 3 },
+  rl_rpg7b02: { stRa: 2, stDa: 4 },
+  rl_m202a1: { stRa: 5, stDa: 2 },
+  gl_milkor: { stDi: 3, stDa: 4 },
+  gl_milkor_a: { stDi: 3, stDa: 4 },
+  gl_grenadelauncher03: { stDi: 3, stDa: 4 },
+  gl_ex41: { stDi: 3, stDa: 4 },
+  gl_snowlauncher: { stDi: 3, stDa: 4 },
+  bl_sticky: { stDi: 3, stDa: 5 },
+  bl_stickyb02: { stDi: 3, stDa: 4 },
+
+  sr_svd: { stDi: 1, stDa: 2 },
+  sr_steyr: { stRa: 3, stDa: 3 },
+  sr_steyrb01: { stDi: 1, stDa: 2 },
+  sr_hk417_d: { stRa: 4, stDa: 2 },
+  sr_vintorez: { stRa: 3, stDa: 3 },
+  sr_sniperrifle03: { stRa: 2, stDa: 5 },
+  sr_arctic: { stRa: 3, stDa: 4 },
+  sr_arcticb01: { stRa: 4, stDa: 4 },
+  sr_wildcat1: { stRa: 3, stDa: 5 },
+  sr_wildcat2: { stRa: 4, stDa: 4 },
+  sr_m110_b: { stRa: 5, stDa: 3 },
+}));
+
+// не удалять
+//   gl_snowlauncher: { stDi: 3, stDa: 3 },
+  // bl_sticky: { stDi: 3, stDa: 5 },
+//  bl_stickyb02: { stDi: 3, stDa: 4 },
+function confirmedWeaponStars(sname) {
+  return confirmedWeaponStarsBySname.get(String(sname || "").toLowerCase()) || {};
+}
+
+function effectiveWeaponStars(sname) {
+  return { stRa: 0, stDi: 0, stDa: 0, ...confirmedWeaponStars(sname) };
+}
+
+// User damage table, 2026-09-29. Near body values are authoritative; ranged
+// columns are recalculated with the subsequently confirmed 0.65/1.35 rules.
+// Keep this block identical in battle-server and railway-api (separate deploys).
+const WEAPON_DAMAGE_BALANCE = Object.freeze({
+  ohca_basebalbat: { name: "Бита", near: 15, kind: "melee" },
+  ohca_crowbar: { name: "Лом", near: 15, kind: "melee" },
+  ohca_torch_f: { name: "Светоч", near: 15, kind: "melee", effect: 1 },
+  thca_katana_b: { name: "Самурай", near: 35, kind: "melee", effect: 2 },
+  thca_scythe_b: { name: "Косарь", near: 35, kind: "melee", effect: 2 },
+  ohca_candy2: { name: "Новогодняя Карамель", near: 20, kind: "melee", effect: 1 },
+  ohca_candy: { name: "Огненная Карамель", near: 20, kind: "melee", effect: 5 },
+  ohca_icicle_w: { name: "Ледовик", near: 15, kind: "melee", effect: 5 },
+  hg_makarov: { name: "Партизан / ГОСТ Партизан", near: 10, kind: "ranged" },
+  hg_tt: { name: "Комиссар", near: 10, kind: "ranged" },
+  hg_walther_r: { name: "Начальник", near: 12, kind: "ranged" },
+  hg_waltherp99: { name: "СверхДембель", near: 13, kind: "ranged" },
+  hg_sigsauerp226_b: { name: "Дружинник", near: 12, kind: "ranged", effect: 2 },
+  hg_glock_s: { name: "Политрук", near: 9, kind: "ranged" },
+  hg_glockb01_s: { name: "Спекулянт", near: 10, kind: "ranged", effect: 2 },
+  hg_desert: { name: "Сокол", near: 35, kind: "ranged" },
+  hg_desertb01: { name: "Пустынный Орел", near: 38, kind: "ranged" },
+  hg_usp: { name: "Скиф", near: 13, kind: "ranged", effect: 3 },
+  hg_taurus: { name: "Палач", near: 42, kind: "ranged" },
+  mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 8, kind: "ranged" },
+  mg_m16: { name: "ММ 16", near: 9, kind: "ranged" },
+  mg_ak103: { name: "Кладенец", near: 10, kind: "ranged" },
+  mg_m4: { name: "Рык", near: 12, kind: "ranged" },
+  mg_ak103_o: { name: "Полкан", near: 13, kind: "ranged" },
+  mg_m4_o: { name: "Бюрократ", near: 12, kind: "ranged" },
+  mg_m4d_o: { name: "Наводка", near: 13, kind: "ranged" },
+  mg_ak103d_o: { name: "Побарабанщик", near: 13, kind: "ranged" },
+  mg_ump45: { name: "Убойник", near: 13, kind: "ranged" },
+  mg_ump45d_o: { name: "Провокатор", near: 14, kind: "ranged" },
+  mg_ump45d2_o: { name: "Ликвидатор", near: 14, kind: "ranged" },
+  mg_ak47b06: { name: "Засад", near: 15, kind: "ranged" },
+  mg_ak47b08: { name: "Звездочет", near: 15, kind: "ranged" },
+  mg_ak47b07: { name: "Смертобой", near: 15, kind: "ranged" },
+  mg_aug3_o: { name: "Буран", near: 15, kind: "ranged" },
+  mg_aug2_o: { name: "Вектор", near: 15, kind: "ranged" },
+  mg_aug4_o: { name: "Кобра", near: 16, kind: "ranged", effect: 2 },
+  mg_aug1_o: { name: "Большевик", near: 17, kind: "ranged", effect: 3 },
+  mg_aug5_o: { name: "Повстанец", near: 17, kind: "ranged", effect: 1 },
+  mg_assaultrifle03: { name: "Барс", near: 14, kind: "ranged" },
+  mg_assaultrifle02: { name: "Адвокат", near: 15, kind: "ranged" },
+  mg_ump45vkks_o: { name: "Вождь", near: 17, kind: "ranged" },
+  gg_m134: { name: "Стаханов / ГОСТ Стаханов", near: 12, kind: "ranged" },
+  gg_n2: { name: "Берия", near: 13, kind: "ranged" },
+  gg_m249: { name: "Дон", near: 15, kind: "ranged" },
+  gg_m134b02: { name: "Максимыч", near: 16, kind: "ranged" },
+  gg_m134b03: { name: "Рой", near: 17, kind: "ranged" },
+  gg_fnmag: { name: "Бастион", near: 17, kind: "ranged" },
+  fl_n1: { name: "Примус", near: 10, kind: "ranged", effect: 1 },
+  sng_snowgun: { name: "Вьюга", near: 10, kind: "ranged", effect: 5 },
+  // Both existing catalog entries are named Вьюга; preserve their identities.
+  gg_m134b01: { name: "Вьюга", near: 10, kind: "ranged", effect: 5 },
+  sg_winchester1887: { name: "ВыньЧестер / ГОСТ ВыньЧестер", near: 8, kind: "ranged" },
+  sg_db: { name: "Егерь", near: 35, kind: "ranged" },
+  sg_novapump: { name: "Сибиряк", near: 29, kind: "ranged" },
+  sg_remington: { name: "Советник", near: 10, kind: "ranged", effect: 2 },
+  sg_spas: { name: "Кабан", near: 35, kind: "ranged" },
+  // Launcher critical floors are explicit table values, including 20/22 and 22/24.
+  rl_rpg26: { name: "Аврора / ГОСТ Аврора", near: 35, critical: 42, kind: "launcher" },
+  rl_rpg7: { name: "Мини Катюша", near: 42, critical: 50, kind: "launcher" },
+  rl_m202a1: { name: "Мэлс", near: 20, critical: 22, kind: "launcher" },
+  rl_rpg7b02: { name: "Троллебузина", near: 70, critical: 84, kind: "launcher", effect: 2 },
+  gl_milkor: { name: "Гранатин", near: 35, critical: 42, kind: "launcher", slowMs: 4000 },
+  gl_milkor_a: { name: "Гадюка", near: 45, critical: 54, kind: "launcher", effect: 3 },
+  gl_ex41: { name: "Страж", near: 45, critical: 54, kind: "launcher", effect: 1 },
+  gl_grenadelauncher03: { name: "Ворчун", near: 47, critical: 56, kind: "launcher", effect: 1 },
+  gl_snowlauncher: { name: "Павлик М", near: 45, critical: 54, kind: "launcher", effect: 5 },
+  bl_stickyb02: { name: "Репей", near: 20, critical: 22, kind: "launcher" },
+  bl_sticky: { name: "Йож", near: 22, critical: 24, kind: "launcher" },
+  sr_svd: { name: "Компостер / ГОСТ Компостер", near: 23, kind: "sniper" },
+  sr_steyr: { name: "Серп", near: 64, kind: "sniper" },
+  sr_steyrb01: { name: "Сторож", near: 64, kind: "sniper" },
+  sr_hk417_d: { name: "Дальнобойщик", near: 25, kind: "sniper" },
+  sr_arctic: { name: "Писец", near: 87, kind: "sniper" },
+  sr_arcticb01: { name: "Крик", near: 87, kind: "sniper" },
+  sr_m110_b: { name: "Клык", near: 25, kind: "sniper", effect: 2 },
+  sr_wildcat1: { name: "Росомаха", near: 110, kind: "sniper" },
+  sr_wildcat2: { name: "Шершень", near: 108, kind: "sniper", effect: 3 },
+  sr_vintorez: { name: "Вымпел", near: 111, kind: "sniper" },
+  sr_sniperrifle03: { name: "Анаконда", near: 125, kind: "sniper" },
+});
+
+function tableWeaponDamageStats(systemName) {
+  const definition = WEAPON_DAMAGE_BALANCE[String(systemName || "").toLowerCase()];
+  if (!definition) return {};
+  const near = definition.near;
+  const far = definition.kind === "sniper" ? Math.round(near * 135 / 100)
+    : definition.kind === "ranged" ? Math.round(near * 65 / 100) : near;
+  return { smindam: near, smaxdam: near + 4, mmindam: far, mmaxdam: far + 4, lmindam: far, lmaxdam: far + 4 };
+}
+// End user damage table.
+
 function weapon(id, wt, slot, sname, price, extra = {}) {
   const balance = weaponBalance(slot, wt, id);
+  const identity = weaponIdentityBySname.get(String(sname).toLowerCase());
+  const ammunition = baseWeaponAmmoBySname.get(String(sname).toLowerCase());
+  const textId = weaponTextIdBySname.get(String(sname).toLowerCase()) ?? id;
   return {
     itype: 1,
     id,
@@ -755,7 +1124,13 @@ function weapon(id, wt, slot, sname, price, extra = {}) {
     nlvl: 1,
     iS: 0,
     sc: cost(1000 + id, price),
-    ...extra
+    ...extra,
+    ...(identity ? { sname: identity.sname, sn: identity.sname, name: identity.name } : {}),
+    ...(ammunition || {}),
+    desc: `w_${textId}_desc`,
+    desca: `w_${textId}_desca`,
+    ...effectiveWeaponStars(sname),
+    ...tableWeaponDamageStats(sname)
   };
 }
 
@@ -808,53 +1183,53 @@ function enhancer(id, prices = 120) {
 
 const defaultWeapons = [
   weapon(1, 1, 1, "ohca_basebalbat", 0, { ammo: 0, ammo_tot: 0, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 }),
-  weapon(2, 3, 2, "hg_makarov", 0, { smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 }),
-  weapon(3, 4, 3, "mg_ak47", 0, { smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 }),
+  weapon(2, 3, 2, "hg_makarov", 0, { rap: 355,  smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 }),
+  weapon(3, 4, 3, "mg_ak47", 0, { rap: 126, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 }),
   weapon(4, 6, 4, "gg_m134", 0, { smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 }),
-  weapon(5, 7, 5, "sg_winchester1887", 0),
+  weapon(5, 7, 5, "sg_winchester1887", 0, { rap: 1165 }),
   weapon(6, 8, 6, "rl_rpg26", 0, { smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 }),
   weapon(7, 10, 7, "sr_svd", 0, { krit: 8, smindam: 34, smaxdam: 48, mmindam: 38, mmaxdam: 54, lmindam: 42, lmaxdam: 60 })
 ];
 
 const rebuiltShopWeaponCatalog = [
-  //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, stRa: 2, stDa: 2, ammo: 0, ammo_tot: 0, iS: 0 },
-  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, stRa: 2, stDa: 4, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
-  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
-  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, stRa: 2, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 6 },
-  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, stRa: 3, stDa: 3, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 8 },
+  //{ id: 10, slot: 1, sname: "ohca_basebalbat", name: "ГОСТ Бита", price: 100, ammo: 0, ammo_tot: 0, iS: 0 },
+  { id: 72, slot: 1, sname: "ohca_candy", name: "Огненная Карамель", price: 900, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
+  { id: 71, slot: 1, sname: "ohca_candy2", name: "Новогодняя Карамель", price: 900, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 12 },
+  { id: 17, slot: 1, sname: "OHCA_Crowbar", name: "Лом", price: 450, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 6 },
+  { id: 42, slot: 1, sname: "THCA_Scythe_B", name: "Косарь", price: 600, ammo: 0, ammo_tot: 0, iS: 0, nlvl: 8 },
 
 
-  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, stRa: 3, stDi: 3, stDa: 5, ammo: 6, ammo_tot: 38, iS: 0, nlvl: 40 },
-  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, stRa: 3, stDi: 3, stDa: 3, ammo: 13, ammo_tot: 45, iS: 0 },
-  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, stRa: 2, stDi: 3, stDa: 5, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 45 },
-  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, stRa: 3, stDi: 3, stDa: 4, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 30 },
-  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, stRa: 5, stDi: 2, stDa: 3, ammo: 18, ammo_tot: 108, iS: 0, nlvl: 22 },
+  { id: 108, slot: 2, sname: "hg_taurus", name: "Палач", price: 1900, ammo: 6, ammo_tot: 38, iS: 0, nlvl: 40 },
+  { id: 105, slot: 2, sname: "hg_usp", name: "Скиф", price: 1500, ammo: 13, ammo_tot: 45, iS: 0 },
+  { id: 69, slot: 2, sname: "HG_DesertB01", name: "Пустынный Орел", price: 1000, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 45 },
+  { id: 53, slot: 2, sname: "HG_Desert", name: "Сокол", price: 1000, ammo: 7, ammo_tot: 42, iS: 0, nlvl: 30 },
+  { id: 68, slot: 2, sname: "HG_GlockB01_S", name: "Спекулянт", price: 1000, ammo: 18, ammo_tot: 108, iS: 0, nlvl: 22 },
 
-  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, stRa: 4, stDi: 4, stDa: 4, ammo: 35, ammo_tot: 175, iS: 0, nlvl: 50 },
-  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, stRa: 4, stDi: 4, stDa: 5, ammo: 35, ammo_tot: 210, iS: 0 },
-  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, stRa: 4, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 180, iS: 0, nlvl: 40 },
-  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, stRa: 5, stDa: 4, ammo: 30, ammo_tot: 132, iS: 0 },
-  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, stRa: 5, stDi: 4, stDa: 4, ammo: 30, ammo_tot: 168, iS: 0, nlvl: 28 },
+  { id: 101, slot: 3, sname: "mg_assaultrifle02", name: "Адвокат", price: 2200, ammo: 35, ammo_tot: 175, iS: 0, nlvl: 50 },
+  { id: 73, slot: 3, sname: "mg_ump45vkks_o", name: "Вождь", price: 2100, ammo: 35, ammo_tot: 210, iS: 0 },
+  { id: 76, slot: 3, sname: "MG_AUG1_O", name: "Большевик", price: 1000, ammo: 35, ammo_tot: 105, iS: 0, nlvl: 40 },
+  { id: 80, slot: 3, sname: "mg_aug5_o", name: "Повстанец", price: 2300, ammo: 30, ammo_tot: 132, iS: 0 },
+  { id: 79, slot: 3, sname: "mg_aug4_o", name: "Кобра", price: 2300, ammo: 30, ammo_tot: 168, iS: 0, nlvl: 28 },
 
-  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, stRa: 5, stDi: 3, stDa: 5, ammo: 90, ammo_tot: 270, iS: 0 },
-  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, stRa: 5, stDi: 2, stDa: 4, ammo: 100, ammo_tot: 300, iS: 0, nlvl: 32 },
+  { id: 110, slot: 4, sname: "gg_fnmag", name: "Бастион", price: 2600, ammo: 90, ammo_tot: 270, iS: 0 },
+  { id: 67, slot: 4, sname: "gg_m134b03", name: "Рой", price: 2400, ammo: 100, ammo_tot: 300, iS: 0, nlvl: 32 },
 
-  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, stRa: 2, stDi: 2, stDa: 5, ammo: 3, ammo_tot: 11, iS: 0 },
-  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, stRa: 2, stDi: 3, stDa: 5, ammo: 5, ammo_tot: 24, iS: 0, nlvl: 38 },
+  { id: 109, slot: 5, sname: "sg_remington", name: "Советник", price: 2200, ammo: 3, ammo_tot: 11, iS: 0 },
+  { id: 106, slot: 5, sname: "sg_spas", name: "Кабан", price: 2100, ammo: 5, ammo_tot: 24, iS: 0, nlvl: 38 },
 
-  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, stRa: 2, stDi: 5, stDa: 5, ammo: 4, ammo_tot: 16, iS: 0, nlvl: 24 },
-  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 30, iS: 0, nlvl: 20 },
-  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, stRa: 3, stDi: 4, stDa: 4, ammo: 3, ammo_tot: 18, iS: 0, nlvl: 45},
-  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, stRa: 1, stDi: 5, stDa: 5, ammo: 1, ammo_tot: 9, iS: 0, nlvl: 15 },
-  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, stRa: 3, stDi: 4, stDa: 4, ammo: 6, ammo_tot: 36, iS: 0, nlvl: 30 },
+  { id: 43, slot: 6, sname: "rl_m202a1", name: "МЭЛС", price: 2500, ammo: 4, ammo_tot: 16, iS: 0, nlvl: 24 },
+  { id: 44, slot: 6, sname: "gl_milkor", name: "Гранатин", price: 2000, ammo: 6, ammo_tot: 30, iS: 0, nlvl: 20 },
+  { id: 104, slot: 6, sname: "gl_grenadelauncher03", name: "Ворчун", price: 2300, ammo: 3, ammo_tot: 18, iS: 0, nlvl: 45},
+  { id: 59, slot: 6, sname: "rl_rpg7b02", name: "Троллебузина", price: 2600, ammo: 1, ammo_tot: 9, iS: 0, nlvl: 15 },
+  { id: 45, slot: 6, sname: "gl_milkor_a", name: "Гадюка", price: 2200, ammo: 6, ammo_tot: 36, iS: 0, nlvl: 30 },
 
-  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, stRa: 4, stDi: 5, stDa: 4, ammo: 20, ammo_tot: 100, iS: 0, nlvl: 28 },
-  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, stRa: 1, stDi: 5, stDa: 5, ammo: 5, ammo_tot: 35, iS: 0, nlvl: 40 },
-  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 30 },
-  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, stRa: 2, stDi: 4, stDa: 4, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 35 },
-  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, stRa: 2, stDi: 4, ammo: 6, ammo_tot: 9, iS: 0, nlvl: 11},
-  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, stRa: 2, stDi: 4, ammo: 1, ammo_tot: 4, iS: 0, nlvl: 4 },
-  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, stRa: 3, stDi: 4, ammo: 1, ammo_tot: 12, iS: 0, nlvl: 14 }
+  { id: 107, slot: 7, sname: "sr_vintorez", name: "Вымпел", price: 2400, ammo: 20, ammo_tot: 100, iS: 0, nlvl: 28 },
+  { id: 103, slot: 7, sname: "sr_sniperrifle03", name: "Анаконда", price: 2300, ammo: 5, ammo_tot: 35, iS: 0, nlvl: 40 },
+  { id: 74, slot: 7, sname: "sr_wildcat1", name: "Росомаха", price: 2200, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 30 },
+  { id: 75, slot: 7, sname: "sr_wildcat2", name: "Шершень", price: 2200, ammo: 1, ammo_tot: 16, iS: 0, nlvl: 35 },
+  { id: 50, slot: 7, sname: "sr_Arctic", name: "Писец", price: 1000, ammo: 6, ammo_tot: 9, iS: 0, nlvl: 11},
+  { id: 23, slot: 7, sname: "sr_steyr", name: "Серп", price: 225, ammo: 1, ammo_tot: 4, iS: 0, nlvl: 4 },
+  { id: 70, slot: 7, sname: "sr_arcticb01", name: "Крик", price: 1200, ammo: 1, ammo_tot: 12, iS: 0, nlvl: 14 }
 ];
 
 const originalReloadTimeMs = {
@@ -879,7 +1254,7 @@ const originalReloadTimeMs = {
   rl_rpg7b02: 2967,
   gl_milkor: 6667,
   gl_milkor_a: 6667,
-  gl_grenadelauncher03: 4000,
+  gl_grenadelauncher03: 6667,
   sr_vintorez: 3167,
   sr_sniperrifle03: 3667,
   sr_wildcat1: 2333,
@@ -893,22 +1268,223 @@ const originalReloadTimeMs = {
 // Manual restore balance: no original damage table is available, so these
 // values follow the recovered client formulas plus the gameplay hierarchy.
 const canonicalShopWeaponStats = {
+  // Explicit temporary balance approved by the user on 2026-09-26.
+  // Replace individual entries when the final weapon table arrives.
+  bl_sticky: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 63, id: 63, wt: 15, ws: 6, sn: "bl_sticky", vel: 6, rad: 10, ang: 0, rap: 900, rt: 3000, ammo: 4, ammo_tot: 6, lt: 7000, krit: 4, dev: 6,
+    smindam: 60, smaxdam: 88, mmindam: 48, mmaxdam: 72, lmindam: 32, lmaxdam: 50
+  },
+  bl_stickyb02: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 64, id: 64, wt: 15, ws: 6, sn: "bl_stickyb02", vel: 6, rad: 10, ang: 0, rap: 850, rt: 3000, ammo: 4, ammo_tot: 6, lt: 7000, krit: 5, dev: 6,
+    smindam: 64, smaxdam: 92, mmindam: 50, mmaxdam: 76, lmindam: 34, lmaxdam: 54
+  },
+  fl_n1: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 25, id: 25, wt: 5, ws: 4, sn: "fl_n1", vel: 100, rad: 14, ang: 0.34906585, rap: 140, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 4, dev: 6,
+    smindam: 16, smaxdam: 24, mmindam: 12, mmaxdam: 20, lmindam: 8, lmaxdam: 14
+  },
+  gg_m134b01: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 47, id: 47, wt: 6, ws: 4, sn: "gg_m134b01", vel: 100, rad: 14, ang: 0, rap: 125, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 5, dev: 6,
+    smindam: 15, smaxdam: 24, mmindam: 12, mmaxdam: 21, lmindam: 9, lmaxdam: 17
+  },
+  gg_m134b02: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1002, id: 1002, wt: 6, ws: 4, sn: "gg_m134b02", vel: 100, rad: 14, ang: 0, rap: 115, rt: 3200, ammo: 130, ammo_tot: 390, lt: 1100, krit: 6, dev: 6,
+    smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 20
+  },
+  gg_m249: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 20, id: 20, wt: 6, ws: 4, sn: "gg_m249", vel: 100, rad: 14, ang: 0, rap: 135, rt: 3000, ammo: 75, ammo_tot: 225, lt: 1100, krit: 6, dev: 6,
+    smindam: 17, smaxdam: 27, mmindam: 14, mmaxdam: 23, lmindam: 10, lmaxdam: 18
+  },
+  gg_n2: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1003, id: 1003, wt: 6, ws: 4, sn: "gg_n2", vel: 100, rad: 14, ang: 0, rap: 110, rt: 3500, ammo: 150, ammo_tot: 450, lt: 1100, krit: 6, dev: 6,
+    smindam: 19, smaxdam: 30, mmindam: 16, mmaxdam: 26, lmindam: 12, lmaxdam: 21
+  },
+  gl_ex41: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 100, id: 100, wt: 9, ws: 6, sn: "gl_ex41", ...GADYUKA_GRENADE_STATS
+  },
+  gl_snowlauncher: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 48, id: 48, wt: 9, ws: 6, sn: "gl_snowlauncher", ...GADYUKA_GRENADE_STATS
+  },
+  hg_glock_s: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1004, id: 1004, wt: 3, ws: 2, sn: "hg_glock_s", vel: 100, rad: 10, ang: 0, rap: 219, rt: 2400, ammo: 17, ammo_tot: 34, lt: 520, krit: 7, dev: 6,
+    smindam: 18, smaxdam: 27, mmindam: 14, mmaxdam: 22, lmindam: 9, lmaxdam: 16
+  },
+  hg_sigsauerp226_b: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 28, id: 28, wt: 3, ws: 2, sn: "hg_sigsauerp226_b", vel: 100, rad: 10, ang: 0, rap: 405, rt: 2500, ammo: 13, ammo_tot: 26, lt: 520, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 31, mmindam: 16, mmaxdam: 25, lmindam: 11, lmaxdam: 19
+  },
+  hg_tt: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 24, id: 24, wt: 3, ws: 2, sn: "hg_tt", vel: 100, rad: 10, ang: 0, rap: 322, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6,
+    smindam: 23, smaxdam: 34, mmindam: 18, mmaxdam: 27, lmindam: 12, lmaxdam: 20
+  },
+  hg_walther_r: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 18, id: 18, wt: 3, ws: 2, sn: "hg_walther_r", vel: 100, rad: 10, ang: 0, rap: 355, rt: 2500, ammo: 8, ammo_tot: 24, lt: 520, krit: 9, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 17, mmaxdam: 26, lmindam: 11, lmaxdam: 20
+  },
+  hg_waltherp99: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1005, id: 1005, wt: 3, ws: 2, sn: "hg_waltherp99", vel: 100, rad: 10, ang: 0, rap: 420, rt: 2500, ammo: 10, ammo_tot: 20, lt: 520, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 31, mmindam: 16, mmaxdam: 25, lmindam: 10, lmaxdam: 18
+  },
+  mg_ak103: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 29, id: 29, wt: 4, ws: 3, sn: "mg_ak103", vel: 100, rad: 12, ang: 0, rap: 126, rt: 3000, ammo: 18, ammo_tot: 54, lt: 650, krit: 7, dev: 6,
+    smindam: 20, smaxdam: 30, mmindam: 16, mmaxdam: 26, lmindam: 12, lmaxdam: 21
+  },
+  mg_ak103_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 30, id: 30, wt: 4, ws: 3, sn: "mg_ak103_o", vel: 100, rad: 12, ang: 0, rap: 121, rt: 3000, ammo: 22, ammo_tot: 66, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 31, mmindam: 17, mmaxdam: 27, lmindam: 13, lmaxdam: 22
+  },
+  mg_ak103d_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  mg_ak47b06: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  mg_ak47b07: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
+    smindam: 22, smaxdam: 34, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_ak47b08: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
+  },
+  mg_assaultrifle03: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1006, id: 1006, wt: 4, ws: 3, sn: "mg_assaultrifle03", vel: 100, rad: 12, ang: 0, rap: 97, rt: 3000, ammo: 42, ammo_tot: 126, lt: 650, krit: 8, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_aug2_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 78, id: 78, wt: 4, ws: 3, sn: "mg_aug2_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3000, ammo: 28, ammo_tot: 84, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
+  },
+  mg_aug3_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1007, id: 1007, wt: 4, ws: 3, sn: "mg_aug3_o", vel: 100, rad: 12, ang: 0, rap: 96, rt: 3000, ammo: 25, ammo_tot: 75, lt: 650, krit: 9, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_m16: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 19, id: 19, wt: 4, ws: 3, sn: "mg_m16", vel: 100, rad: 12, ang: 0, rap: 124, rt: 3000, ammo: 20, ammo_tot: 60, lt: 650, krit: 7, dev: 6,
+    smindam: 19, smaxdam: 29, mmindam: 16, mmaxdam: 25, lmindam: 11, lmaxdam: 20
+  },
+  mg_m4: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 46, id: 46, wt: 4, ws: 3, sn: "mg_m4", vel: 100, rad: 12, ang: 0, rap: 140, rt: 3000, ammo: 15, ammo_tot: 45, lt: 650, krit: 7, dev: 6,
+    smindam: 19, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 20
+  },
+  mg_m4_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
+  },
+  mg_m4d_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
+  },
+  mg_ump45: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 58, id: 58, wt: 4, ws: 3, sn: "mg_ump45", vel: 100, rad: 12, ang: 0, rap: 94, rt: 2800, ammo: 35, ammo_tot: 95, lt: 650, krit: 7, dev: 6,
+    smindam: 19, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 10, lmaxdam: 18
+  },
+  mg_ump45d_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 60, id: 60, wt: 4, ws: 3, sn: "mg_ump45d_o", vel: 100, rad: 12, ang: 0, rap: 108, rt: 2800, ammo: 30, ammo_tot: 90, lt: 650, krit: 8, dev: 6,
+    smindam: 20, smaxdam: 31, mmindam: 16, mmaxdam: 26, lmindam: 11, lmaxdam: 20
+  },
+  mg_ump45d2_o: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 61, id: 61, wt: 4, ws: 3, sn: "mg_ump45d2_o", vel: 100, rad: 12, ang: 0, rap: 108, rt: 2800, ammo: 30, ammo_tot: 90, lt: 650, krit: 9, dev: 6,
+    smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 27, lmindam: 12, lmaxdam: 21
+  },
+  ohca_icicle_w: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1001, id: 1001, wt: 1, ws: 1, sn: "ohca_icicle_w", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
+    smindam: 25, smaxdam: 40, mmindam: 16, mmaxdam: 26, lmindam: 10, lmaxdam: 18
+  },
+  ohca_torch_f: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 40, id: 40, wt: 1, ws: 1, sn: "ohca_torch_f", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 9, dev: 2,
+    smindam: 25, smaxdam: 40, mmindam: 16, mmaxdam: 26, lmindam: 10, lmaxdam: 18
+  },
+  rl_rpg7: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 66, id: 66, wt: 8, ws: 6, sn: "rl_rpg7", vel: 65, rad: 28, ang: 0, rap: 900, rt: 3000, ammo: 1, ammo_tot: 4, lt: 1150, krit: 5, dev: 6,
+    smindam: 82, smaxdam: 120, mmindam: 66, mmaxdam: 100, lmindam: 46, lmaxdam: 76
+  },
+  sg_db: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1010, id: 1010, wt: 7, ws: 5, sn: "sg_db", vel: 100, rad: 18, ang: 0, rap: 900, rt: 3000, ammo: 2, ammo_tot: 6, lt: 900, krit: 8, dev: 22,
+    smindam: 58, smaxdam: 86, mmindam: 30, mmaxdam: 46, lmindam: 8, lmaxdam: 16
+  },
+  sg_novapump: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 38, id: 38, wt: 7, ws: 5, sn: "sg_novapump", vel: 100, rad: 18, ang: 0, rap: 950, rt: 6000, ammo: 8, ammo_tot: 14, lt: 900, krit: 8, dev: 22,
+    smindam: 46, smaxdam: 70, mmindam: 26, mmaxdam: 42, lmindam: 8, lmaxdam: 16
+  },
+  sng_snowgun: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1011, id: 1011, wt: 11, ws: 4, sn: "sng_snowgun", vel: 100, rad: 14, ang: 0.34906585, rap: 150, rt: 3000, ammo: 50, ammo_tot: 150, lt: 1100, krit: 5, dev: 6,
+    smindam: 17, smaxdam: 27, mmindam: 13, mmaxdam: 22, lmindam: 9, lmaxdam: 17
+  },
+  sr_hk417_d: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 1012, id: 1012, wt: 10, ws: 7, sn: "sr_hk417_d", vel: 100, rad: 10, ang: 0, rap: 750, rt: 3000, ammo: 7, ammo_tot: 13, lt: 1000, krit: 10, dev: 3,
+    smindam: 62, smaxdam: 82, mmindam: 72, mmaxdam: 96, lmindam: 88, lmaxdam: 116
+  },
+  sr_m110_b: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 57, id: 57, wt: 10, ws: 7, sn: "sr_m110_b", vel: 100, rad: 10, ang: 0, rap: 700, rt: 3000, ammo: 10, ammo_tot: 20, lt: 1000, krit: 11, dev: 3,
+    smindam: 64, smaxdam: 86, mmindam: 76, mmaxdam: 100, lmindam: 92, lmaxdam: 122
+  },
+  sr_steyrb01: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 102, id: 102, wt: 10, ws: 7, sn: "sr_steyrb01", vel: 100, rad: 10, ang: 0, rap: 1000, rt: 2500, ammo: 1, ammo_tot: 4, lt: 1000, krit: 12, dev: 3,
+    smindam: 78, smaxdam: 102, mmindam: 90, mmaxdam: 118, lmindam: 108, lmaxdam: 140
+  },
+  thca_katana_b: {
+    wsp: 0, launch: 0, shake: 0,
+    w_id: 41, id: 41, wt: 2, ws: 1, sn: "thca_katana_b", vel: 100, rad: 8, ang: 2.05, rap: 650, rt: 0, ammo: 0, ammo_tot: 0, lt: 250, krit: 10, dev: 2,
+    smindam: 32, smaxdam: 48, mmindam: 20, mmaxdam: 32, lmindam: 12, lmaxdam: 22
+  },
+
   ohca_candy: { rap: 330, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 10, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 35, mmindam: 14, mmaxdam: 24, lmindam: 9, lmaxdam: 15 },
   ohca_candy2: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 9, ammo: 0, ammo_tot: 0, smindam: 20, smaxdam: 35, mmindam: 13, mmaxdam: 24, lmindam: 9, lmaxdam: 16 },
   ohca_crowbar: { rap: 335, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 5, ammo: 0, ammo_tot: 0, smindam: 15, smaxdam: 22, mmindam: 10, mmaxdam: 19, lmindam: 5, lmaxdam: 8 },
   thca_scythe_b: { rap: 1111, rt: 0, lt: 250, vel: 100, rad: 8, ang: 0, dev: 2, krit: 12, ammo: 0, ammo_tot: 0, smindam: 34, smaxdam: 48, mmindam: 24, mmaxdam: 36, lmindam: 14, lmaxdam: 24 },
   
-  hg_taurus: { rap: 460, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
-  hg_usp: { rap: 240, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
-  hg_desertb01: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
-  hg_desert: { rap: 370, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, mmindam: 14, mmaxdam: 21, lmindam: 11, lmaxdam: 21 },
-  hg_glockb01_s: { rap: 150, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
+  hg_taurus: { rap: 564, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 6, ammo_tot: 38, smindam: 28, smaxdam: 42, mmindam: 20, mmaxdam: 31, lmindam: 13, lmaxdam: 22 },
+  hg_usp: { rap: 285, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 5, krit: 9, ammo: 13, ammo_tot: 45, smindam: 22, smaxdam: 34, mmindam: 17, mmaxdam: 27, lmindam: 11, lmaxdam: 19 },
+  hg_desertb01: { rap: 600, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 6, krit: 10, ammo: 7, ammo_tot: 42, smindam: 24, smaxdam: 37, mmindam: 20, mmaxdam: 29, lmindam: 12, lmaxdam: 19 },
+  hg_desert: { rap: 542, rt: 2533, lt: 520, vel: 100, rad: 10, ang: 0, dev: 7, krit: 9, ammo: 7, ammo_tot: 42, smindam: 21, smaxdam: 31, lmindam: 11, lmaxdam: 21 },
+  hg_glockb01_s: { rap: 194, rt: 2667, lt: 520, vel: 100, rad: 10, ang: 0, dev: 9, krit: 6, ammo: 18, ammo_tot: 108, smindam: 17, smaxdam: 25, mmindam: 12, mmaxdam: 19, lmindam: 9, lmaxdam: 16 },
 
-  mg_assaultrifle02: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_ump45vkks_o: { rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
-  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 145, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 30, ammo_tot: 180, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
-  mg_aug5_o: { rap: 135, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
-  mg_aug4_o: { rap: 130, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
+  mg_assaultrifle02: { rap: 121, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
+  mg_ump45vkks_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
+  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 105, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
+  mg_aug5_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
+  mg_aug4_o: { rap: 112, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
 
   gg_fnmag: { rap: 125, rt: 4000, lt: 1100, vel: 100, rad: 14, ang: 0, dev: 14, krit: 6, ammo: 90, ammo_tot: 270, smindam: 17, smaxdam: 29, mmindam: 15, mmaxdam: 25, lmindam: 11, lmaxdam: 19 },
   gg_m134b03: { rap: 115, rt: 800, lt: 1100, vel: 100, rad: 14, ang: 0, dev: 20, krit: 4, ammo: 100, ammo_tot: 300, smindam: 15, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 10, lmaxdam: 17 },
@@ -916,7 +1492,7 @@ const canonicalShopWeaponStats = {
   sg_remington: {
     desc: "Хороший или плохой советчик - решать вам.",
     desca: "- Наносит периодический урон типа \"кровотечение\"",
-    rap: 660,
+    rap: 428,
     rt: 3864,
     lt: 900,
     vel: 100,
@@ -935,7 +1511,7 @@ const canonicalShopWeaponStats = {
     wsp: 15,
     shake: 1
   },
-  sg_spas: { rap: 860, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
+  sg_spas: { rap: 1640, rt: 3500, lt: 900, vel: 100, rad: 18, ang: 0, dev: 22, krit: 8, ammo: 6, ammo_tot: 36, smindam: 48, smaxdam: 72, mmindam: 28, mmaxdam: 44, lmindam: 9, lmaxdam: 16 },
 
   rl_m202a1: {
     desc: "Карающая длань Четырех Вождей Красного Фронта.",
@@ -961,29 +1537,82 @@ const canonicalShopWeaponStats = {
     shake: 1
   },
   gl_milkor: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 30, smindam: 54, smaxdam: 82, mmindam: 42, mmaxdam: 66, lmindam: 28, lmaxdam: 48 },
-  gl_grenadelauncher03: { rap: 880, rt: 4000, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 5, krit: 4, ammo: 3, ammo_tot: 18, smindam: 68, smaxdam: 104, mmindam: 54, mmaxdam: 86, lmindam: 36, lmaxdam: 62 },
+  gl_grenadelauncher03: GADYUKA_GRENADE_STATS,
   rl_rpg7b02: { rap: 900, rt: 2967, lt: 1150, vel: 65, rad: 28, ang: 0, dev: 6, krit: 4, ammo: 1, ammo_tot: 9, smindam: 84, smaxdam: 126, mmindam: 68, mmaxdam: 104, lmindam: 48, lmaxdam: 78 },
-  gl_milkor_a: { rap: 900, rt: 6667, lt: ARCING_LAUNCHER_LIFE, vel: ARCING_LAUNCHER_VELOCITY, rad: ARCING_LAUNCHER_DISTANCE, ang: 0, dev: 6, krit: 3, ammo: 6, ammo_tot: 36, smindam: 36, smaxdam: 56, mmindam: 55, mmaxdam: 68, lmindam: 56, lmaxdam: 75 },
+  gl_milkor_a: GADYUKA_GRENADE_STATS,
 
-  sr_vintorez: { rap: 700, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
-  sr_sniperrifle03: { rap: 950, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
-  sr_wildcat1: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
-  sr_wildcat2: { rap: 980, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
-  sr_arcticb01: { rap: 1120, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 4, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
+  sr_vintorez: { rap: 1173, rt: 3167, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 3, krit: 10, ammo: 20, ammo_tot: 100, smindam: 74, smaxdam: 98, mmindam: 78, mmaxdam: 104, lmindam: 90, lmaxdam: 124 },
+  sr_sniperrifle03: { rap: 3190, rt: 3667, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 14, ammo: 5, ammo_tot: 35, smindam: 100, smaxdam: 120, mmindam: 110, mmaxdam: 132, lmindam: 120, lmaxdam: 150 },
+  sr_wildcat1: { rap: 1404, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 12, ammo: 1, ammo_tot: 16, smindam: 72, smaxdam: 96, mmindam: 76, mmaxdam: 102, lmindam: 88, lmaxdam: 122 },
+  sr_wildcat2: { rap: 1404, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 1, ammo_tot: 16, smindam: 70, smaxdam: 90, mmindam: 74, mmaxdam: 98, lmindam: 82, lmaxdam: 108 },
+  sr_arcticb01: { rap: 2815, rt: 2650, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 11, ammo: 4, ammo_tot: 12, smindam: 68, smaxdam: 88, mmindam: 72, mmaxdam: 94, lmindam: 80, lmaxdam: 104 },
   sr_steyr: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 7, ammo: 1, ammo_tot: 4, smindam: 45, smaxdam: 55, mmindam: 60, mmaxdam: 70, lmindam: 77, lmaxdam: 98 },
-  sr_arctic: { rap: 1000, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 6, ammo_tot: 9, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
+  sr_arctic: { rap: 2515, rt: 2333, lt: 1000, vel: 100, rad: 10, ang: 0, dev: 2, krit: 9, ammo: 6, ammo_tot: 9, smindam: 60, smaxdam: 78, mmindam: 66, mmaxdam: 86, lmindam: 74, lmaxdam: 96 }
 };
 
 function withCanonicalShopWeaponStats(item) {
   const key = String(item?.sname || item?.sn || "").toLowerCase();
-  const stats = canonicalShopWeaponStats[key] || {};
+  const stats = canonicalShopWeaponStats[key];
+  if (!stats) throw new Error(`Missing explicit weapon stats: ${key}`);
   const reloadTime = originalReloadTimeMs[key];
-  return reloadTime === undefined ? { ...item, ...stats } : { ...item, ...stats, rt: reloadTime };
+  return reloadTime === undefined
+    ? { ...item, ...stats, ...effectiveWeaponStars(key) }
+    : { ...item, ...stats, rt: reloadTime, ...effectiveWeaponStars(key) };
 }
 
-// The live weapon shop is the vetted resources.assets subset only.
+const additionalShopWeaponCatalog = [
+  { "id": 63, "slot": 6, "sname": "BL_Sticky", "ammo": 4, "ammo_tot": 20 },
+  { "id": 64, "slot": 6, "sname": "BL_StickyB02", "ammo": 4, "ammo_tot": 20 },
+  { "id": 25, "slot": 4, "sname": "FL_N1", "ammo": 100, "ammo_tot": 300 },
+  { "id": 47, "slot": 4, "sname": "GG_M134B01" },
+  { "id": 1002, "slot": 4, "sname": "GG_M134B02" },
+  { "id": 20, "slot": 4, "sname": "GG_M249" },
+  { "id": 1003, "slot": 4, "sname": "GG_N2" },
+  { "id": 100, "slot": 6, "sname": "GL_EX41", "ammo": 6, "ammo_tot": 30 },
+  { "id": 48, "slot": 6, "sname": "GL_SnowLauncher", "ammo": 1, "ammo_tot": 12 },
+  { "id": 1004, "slot": 2, "sname": "HG_Glock_S" },
+  { "id": 28, "slot": 2, "sname": "HG_SIGSauerP226_B" },
+  { "id": 24, "slot": 2, "sname": "HG_TT" },
+  { "id": 18, "slot": 2, "sname": "HG_Walther_R" },
+  { "id": 1005, "slot": 2, "sname": "HG_WaltherP99" },
+  { "id": 29, "slot": 3, "sname": "MG_AK103" },
+  { "id": 30, "slot": 3, "sname": "MG_AK103_O" },
+  { "id": 31, "slot": 3, "sname": "MG_AK103D_O" },
+  { "id": 32, "slot": 3, "sname": "MG_AK47B06" },
+  { "id": 33, "slot": 3, "sname": "MG_AK47B07" },
+  { "id": 34, "slot": 3, "sname": "MG_AK47B08" },
+  { "id": 1006, "slot": 3, "sname": "MG_AssaultRifle03" },
+  { "id": 78, "slot": 3, "sname": "MG_AUG2_O" },
+  { "id": 1007, "slot": 3, "sname": "MG_AUG3_O" },
+  { "id": 19, "slot": 3, "sname": "MG_M16" },
+  { "id": 46, "slot": 3, "sname": "MG_M4" },
+  { "id": 1008, "slot": 3, "sname": "MG_M4_O" },
+  { "id": 1009, "slot": 3, "sname": "MG_M4D_O" },
+  { "id": 58, "slot": 3, "sname": "MG_UMP45" },
+  { "id": 60, "slot": 3, "sname": "MG_UMP45D_O" },
+  { "id": 61, "slot": 3, "sname": "MG_UMP45D2_O" },
+  { "id": 1001, "slot": 1, "sname": "OHCA_Icicle_W", "ammo": 0, "ammo_tot": 0 },
+  { "id": 40, "slot": 1, "sname": "OHCA_Torch_F", "ammo": 0, "ammo_tot": 0 },
+  { "id": 66, "slot": 6, "sname": "RL_RPG7", "ammo": 1, "ammo_tot": 9 },
+  { "id": 1010, "slot": 5, "sname": "SG_DB", "ammo": 2, "ammo_tot": 24 },
+  { "id": 38, "slot": 5, "sname": "SG_Novapump", "ammo": 7, "ammo_tot": 42 },
+  { "id": 1011, "slot": 4, "sname": "SNG_Snowgun", "ammo": 100, "ammo_tot": 300 },
+  { "id": 1012, "slot": 7, "sname": "SR_HK417_D", "ammo": 10, "ammo_tot": 60 },
+  { "id": 57, "slot": 7, "sname": "SR_M110_B", "ammo": 10, "ammo_tot": 60 },
+  { "id": 102, "slot": 7, "sname": "SR_SteyrB01", "ammo": 1, "ammo_tot": 8 },
+  { "id": 41, "slot": 1, "sname": "THCA_Katana_B", "ammo": 0, "ammo_tot": 0 }
+];
+// New entries are explicitly tunable; their active workshop stats follow this
+// base table instead of retaining the former generated values in saved JSON.
+const temporaryBalanceWeaponKeys = new Set([
+  ...additionalShopWeaponCatalog.map((item) => item.sname.toLowerCase()),
+  "gl_grenadelauncher03", "gl_milkor_a"
+]);
+// Update firing intervals for these existing purchases without rebasing other stats.
+const correctedWeaponRapidityKeys = new Set(["sr_vintorez","hg_usp","sg_remington","hg_desert","hg_desertb01","sg_spas","sg_winchester1887","hg_taurus","hg_glockb01_s","hg_makarov","hg_tt","hg_walther_r","hg_waltherp99","hg_sigsauerp226_b","hg_glock_s","sr_sniperrifle03","sr_arctic","sr_arcticb01","sr_wildcat1","sr_wildcat2"]);
 const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
-const canonicalShopWeaponCatalog = rebuiltShopWeaponCatalog.map(withCanonicalShopWeaponStats);
+const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
+  .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
 
 function weaponTypeForSname(sname) {
   const prefix = String(sname || "").toLowerCase().split("_")[0];
@@ -1070,7 +1699,6 @@ const workshopPriceOverrides = Object.freeze({
 
 const workshopAmmoOverrides = Object.freeze({
   80: Object.freeze({ ammo: 35, ammo_tot: 206 }),   // Повстанец
-  104: Object.freeze({ ammo: 5, ammo_tot: 14 }),    // Ворчун
   105: Object.freeze({ ammo: 16, ammo_tot: 48 }),   // Скиф
   107: Object.freeze({ ammo: 8, ammo_tot: 41 }),    // Вымпел
   109: Object.freeze({ ammo: 3, ammo_tot: 17 })     // Советник
@@ -1082,6 +1710,46 @@ function stableWorkshopPrice(weaponId) {
 }
 
 const workshopUpgradeTextFallbacks = {
+  18: "- Увеличенный урон на дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас",
+  19: "- Повышенный шанс крит. урона\n- Увеличенный общий боезапас",
+  20: "- Увеличенный урон на дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный боезапас",
+  21: "- Увеличенный урон на дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас",
+  22: "- Увеличенный урон\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас",
+  24: "- Увеличенный общий боезапас",
+  25: "- Увеличенный боезапас\n- Увеличены длительность и урон от горения",
+  26: "- Увеличенный урон на средней и дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас",
+  27: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный общий боезапас",
+  28: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  29: "- Увеличенный урон на средней и дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  30: "- Увеличенный урон на средней и дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  31: "- Увеличенный урон на средней и дальней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  32: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  33: "- Увеличенный урон на средней и дальней дист.\n- Повышенный шанс критического урона\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  34: "- Увеличенный урон на средней и дальней дист.\n- Повышенный шанс критического урона\n- Увеличенный общий боезапас\n- Повышает скорость передвижения",
+  35: "- Увеличенный урон на ближней и средней дист.\n- Увеличенный общий боезапас\n- Наносит периодический урон типа \"кровотечение\"",
+  36: "- Повышенный шанс крит. урона\n- Увеличенные длительность и урон от кровотечения",
+  37: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный боезапас\n- Повышенная кучность выстрелов",
+  38: "- Увеличенный урон\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас\n- Увеличенная скорострельность",
+  40: "- Увеличенные длительность и урон от горения",
+  41: "- Повышает скорость передвижения\n- Увеличенные длительность и урон от кровотечения",
+  46: "- Увеличенный общий боезапас\n- Повышает скорость передвижения\n- Повышенный шанс крит. урона\n- Увеличенный радиус поражения",
+  47: "- Увеличенный боезапас\nУвеличенный урон от заморозки",
+  48: "- Увеличенный урон от заморозки",
+  55: "- Увеличенный урон на средней и дальней дист.\n- Повышает скорость передвижения\n- Увеличенный общий боезапас\n- Увеличенный шанс крит. урона\n- Ускоренная перезарядка",
+  57: "- Увеличенный урон на ближней дист.\n- Повышенный шанс крит. урона\n- Увеличенный общий боезапас",
+  58: "- Увеличенный урон на средней и дальней дист.\n- Повышает скорость передвижения\n- Увеличенный общий боезапас\n- Увеличенный шанс крит. урона\n- Ускоренная перезарядка",
+  60: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный общий боезапас\n- Увеличенный шанс крит. урона\n- Повышает скорость передвижения",
+  61: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный общий боезапас\n- Ускоренная перезарядка\n- Повышает скорость передвижения",
+  62: "- Увеличенный урон на средней и дальней дист.\n- Увеличенный шанс крит. урона.\n- Повышает скорость передвижения.",
+  63: "- Увеличенный урон и скорость передвижения игрока\n- Увеличенный шанс крит. урона\n- Увеличенный боезапас",
+  64: "- Увеличенный урон\n- Увеличенный шанс крит. урона\n- Увеличенный боезапас\n- Повышает скорость передвижения",
+  66: "- Увеличенный урон на ближней и дальней дист.\n- Увеличенный общий боезапас\n- Увеличенный шанс крит. урона",
+  77: "- Наносит периодический урон типа \"яд\"\n- Увеличенные скорость передвижения и боезапас\n- Повышенный шанс крит. урона",
+  78: "- Повышенный шанс крит. урона\n- Увеличенный общий боезапас\n- Увеличивает скорость передвижения",
+  92: "- Увеличенный урон на средней и дальней дист.\n- Повышает скорость передвижения\n- Увеличенный общий боезапас\n- Увеличенный шанс крит. урона\n- Ускоренная перезарядка",
+  100: "- Повышенный шанс крит. урона\n- Увеличеный общий боезапас\n- Увеличенный урон на всех дистанциях\n- Увеличенный урон типа огонь",
+  102: "- Повышенный шанс крит. урона\n- Ускоренная перезарядка\n- Увеличенная обойма и боезапас\n- Увеличенный урон на ближней дистанции на 2 ед.",
+
   10: "Повышенный шанс крит. урона",
   43: "Увеличенный общий боезапас",
   44: "Увеличенный урон\nУвеличенная длительность замедления\nУвеличенный общий боезапас",
@@ -1110,10 +1778,11 @@ const workshopUpgradeTextFallbacks = {
   110: "Повышенный шанс крит. урона\nУвеличенная обойма и общий боезапас\nУвеличивает скорость передвижения"
 };
 
-function workshopUpgradeContract(weaponId) {
+function workshopUpgradeContract(weaponId, systemName = "") {
+  const textId = weaponTextIdBySname.get(String(systemName).toLowerCase()) ?? weaponId;
   const text = String(
-    wearTextTranslations.get(`w_${weaponId}_descupgrade`)
-    || workshopUpgradeTextFallbacks[weaponId]
+    wearTextTranslations.get(`w_${textId}_descupgrade`)
+    || workshopUpgradeTextFallbacks[textId]
     || ""
   ).toLowerCase();
   const damageAll = /увеличен(?:ный|ная|ное|ные|нный)\s+урон(?:\s+на\s+всех\s+дист|\s+на\s+всех\s+дистанц)?(?:\.|$|\n)/m.test(text)
@@ -1150,18 +1819,18 @@ function upgradedWeaponItem(item) {
   const ammo = numericField(base.ammo, 0);
   const ammoTotal = numericField(base.ammo_tot, 0);
   const weaponId = numericField(base.w_id ?? base.id, 0);
-  const contract = workshopUpgradeContract(weaponId);
+  const contract = workshopUpgradeContract(weaponId, base.sname || base.sn);
   const upgraded = {
     ...base,
     u_id: 5000 + weaponId,
-    stRa: Math.min(5, numericField(base.stRa, 1) + 1),
-    stDi: Math.min(5, numericField(base.stDi, 1) + 1),
-    stDa: Math.min(5, numericField(base.stDa, 1) + 1),
+    stRa: base.stRa > 0 ? Math.min(5, base.stRa + 1) : 0,
+    stDi: base.stDi > 0 ? Math.min(5, base.stDi + 1) : 0,
+    stDa: base.stDa > 0 ? Math.min(5, base.stDa + 1) : 0,
     sc: timedCost(5000 + weaponId, stableWorkshopPrice(weaponId)),
     workshopImpactType: contract.impactType,
     workshopImpactDamagePercent: contract.impactDamage ? 25 : 0,
     // Slowing is a distinct non-damaging effect.  It has no DoT ticks;
-    // `GL_Milkor` duration is enforced by the battle server at three seconds.
+    // `GL_Milkor` duration is enforced by the battle server at four seconds.
     workshopImpactTicksBonus: contract.impactDuration && contract.impactType !== "slow" ? 2 : 0
   };
   if (contract.rapidity) upgraded.rap = Math.max(60, scaledStat(base.rap, 0.9, 100));
@@ -1186,6 +1855,16 @@ function upgradedWeaponItem(item) {
     upgraded.ammo = ammoOverride.ammo;
     upgraded.ammo_tot = ammoOverride.ammo_tot;
   }
+  // These launchers share Gadyuka's numeric workshop profile. Their own
+  // impact type, damage-over-time modifiers, identity and purchase stay intact.
+  if (GADYUKA_PARITY_LAUNCHERS.has(String(base.sname || base.sn || "").toLowerCase())) {
+    const reference = shopWeapons.find((weapon) => weapon.sname.toLowerCase() === "gl_milkor_a");
+    const referenceUpgrade = upgradedWeaponItem(reference);
+    for (const field of GADYUKA_PARITY_FIELDS) upgraded[field] = referenceUpgrade[field];
+  }
+  // Medium distance uses the far damage contract, including active upgrades.
+  upgraded.mmindam = upgraded.lmindam;
+  upgraded.mmaxdam = upgraded.lmaxdam;
   return upgraded;
 }
 
@@ -1313,8 +1992,12 @@ function wearTextFor(slot, sname) {
     if (typeof value === "string") localized[field] = value;
   }
   const result = { ...(wearTextOverrides[key] || {}), ...localized };
-  if (key === "Boots:slip99") {
-    result.desca = appendWearBonusText(result.desca, BLUE_SOLDIER_SLIP99_SHOTGUN_JUMP_BONUS);
+  if (slot === "Boots") {
+    const otherBonuses = String(result.desca || "").split(/\r?\n/)
+      .filter((line) => !/скорост[ьи]|прыж|немного меньше, чем у ботинок/iu.test(line))
+      .filter((line) => line.trim());
+    result.desca = [...otherBonuses, "+8% к скорости",
+      "Большой бонус к прыжку после выстрела из дробовика"].join("\n");
   }
   return result;
 }
@@ -1776,11 +2459,16 @@ const abilityValueDefinitions = {
   4: { type: "2", key: "cdecdam", values: [2, 4, 6, 8, 10] },
   5: { type: "2", key: "wrap", values: [2, 4, 6, 8, 10] },
   6: { type: "2", key: "wcrit", values: [5, 10, 15, 20, 25] },
-  7: { type: "2", key: "wam", values: [10, 30, 40, 50, 60] },
+  7: { type: "2", key: "wam", values: [20, 30, 40, 50, 60] },
   8: { type: "1", key: "wmdam", values: [1, 2, 3, 4, 5] },
   9: { type: "1", key: "wmxdam", values: [1, 2, 3, 4, 5] },
   10: { type: "1", key: "wacc", values: [1, 2, 3, 4, 5] },
-  11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] }
+  11: { type: "2", key: "whcrit", values: [5, 10, 15, 20, 25] },
+  12: { type: "2", key: "zzdam", values: [5, 10, 15, 20, 25] },
+  13: { type: "1", key: "zzheal", values: [50, 70, 80, 95, 110] },
+  14: { type: "2", key: "zzdecdam", values: [2, 4, 6, 8, 10] },
+  15: { type: "2", key: "zhdam", values: [2, 4, 6, 8, 10] },
+  16: { type: "2", key: "zhdecdam", values: [5, 10, 15, 20, 25] }
 };
 
 // Пять цен: для 1, 2, 3, 4 и 5 уровня способности.
@@ -1795,7 +2483,12 @@ const abilityPrices = {
   8: [130, 160, 210, 420, 1260], // Немаленький
   9: [130, 160, 210, 420, 1260], // Максималист
   10: [180, 200, 300, 600, 1800], // Точность по ГОСТу
-  11: [130, 160, 210, 420, 1260] // Охотник за головами
+  11: [130, 160, 210, 420, 1260], // Охотник за головами
+  12: [500, 500, 500, 500, 500],
+  13: [500, 500, 500, 500, 500],
+  14: [500, 500, 500, 500, 500],
+  15: [500, 500, 500, 500, 500],
+  16: [500, 500, 500, 500, 500]
 };
 const abilityCatalog = [];
 
@@ -1849,11 +2542,11 @@ const maps = [
   mapEntry(1, "Arena_3lvl", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
   mapEntry(13, "Zombi_2", MAP_MODE_DM_ZOMBIE),
   mapEntry(14, "Zombi", MAP_MODE_DM_ZOMBIE),
-  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG | MAP_MODE_CONTROL_POINTS),
+  mapEntry(15, "ArenaRing", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CONTROL_POINTS),
   mapEntry(16, "Bit_map", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH | MAP_MODE_CAPTURE_THE_FLAG),
+  mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
-  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH | MAP_MODE_ROGUELIKE),
+  mapEntry(19, "promzona", MAP_MODE_DEATHMATCH),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
@@ -1997,6 +2690,7 @@ let clanBannerSchemaReady = false;
 let pgSaveChain = Promise.resolve();
 const viewSelectionSaveVersions = new Map();
 const weaponSelectionSaveVersions = new Map();
+const tauntSelectionSaveVersions = new Map();
 const MANAGED_CATALOG_ITEM_TYPES = [1, 2, 3, 4];
 
 function enqueuePostgresMutation(operation) {
@@ -2035,6 +2729,17 @@ function nextViewSelectionSaveVersion(accountId) {
 
 function isLatestViewSelectionSaveVersion(accountId, version) {
   return Number(viewSelectionSaveVersions.get(String(accountId || 0)) || 0) === Number(version);
+}
+
+function nextTauntSelectionSaveVersion(accountId) {
+  const key = String(accountId || 0);
+  const version = Number(tauntSelectionSaveVersions.get(key) || 0) + 1;
+  tauntSelectionSaveVersions.set(key, version);
+  return version;
+}
+
+function isLatestTauntSelectionSaveVersion(accountId, version) {
+  return Number(tauntSelectionSaveVersions.get(String(accountId || 0)) || 0) === Number(version);
 }
 
 function jsonValue(value, fallback) {
@@ -2727,16 +3432,45 @@ function normalizeInventoryItem(item) {
     const canonical = canonicalWeaponForRawItem(item);
     if (canonical && item?.u_id != null) {
       if (!hasActiveWeaponUpgrade(item)) return clone(canonical);
+      const upgraded = temporaryBalanceWeaponKeys.has(weaponSnameKey(canonical))
+        ? { ...clone(item), ...upgradedWeaponItem(canonical), u_id: item.u_id, eD: item.eD, sc: item.sc ?? canonical.sc }
+        : clone(item);
+      if (Number(canonical.wt) === 4 || correctedWeaponRapidityKeys.has(weaponSnameKey(canonical))) {
+        // Apply current firing intervals to the affected existing upgrades
+        // without replacing their other purchased characteristics.
+        upgraded.rap = upgradedWeaponItem(canonical).rap;
+      }
+      if (weaponSnameKey(canonical) === "mg_aug1_o") {
+        // Refresh ammunition after the base balance correction; retain the
+        // purchased upgrade's other stats, identifier and expiry.
+        const ammunition = upgradedWeaponItem(canonical);
+        upgraded.ammo = ammunition.ammo;
+        upgraded.ammo_tot = ammunition.ammo_tot;
+      }
+      // Rebase only damage fields of saved upgrades onto the new damage table.
+      const damageUpgrade = upgradedWeaponItem(canonical);
+      for (const key of ["smindam", "smaxdam", "mmindam", "mmaxdam", "lmindam", "lmaxdam"]) {
+        upgraded[key] = damageUpgrade[key];
+      }
+      // Saved purchases can contain the previous third category. Reset all
+      // three ratings; the workshop raises only the two displayed categories.
+      const correctedStars = Object.fromEntries(
+        Object.entries(effectiveWeaponStars(canonical.sname))
+          .map(([key, stars]) => [key, stars > 0 ? Math.min(5, stars + 1) : 0])
+      );
       return {
         ...clone(canonical),
-        ...clone(item),
+        ...upgraded,
         id: canonical.id,
         w_id: canonical.w_id,
         sname: canonical.sname,
         sn: canonical.sn,
         wt: canonical.wt,
         ws: canonical.ws,
-        name: canonical.name
+        name: canonical.name,
+        desc: canonical.desc,
+        desca: canonical.desca,
+        ...correctedStars
       };
     }
     return canonical
@@ -2896,7 +3630,16 @@ function normalizeViewInventory(view, rawInventory = []) {
 }
 
 function profileInventoryItems(account) {
-  return Array.isArray(account?.inventory) ? account.inventory.map(normalizeInventoryItem) : [];
+  return Array.isArray(account?.inventory) ? account.inventory.map(clientInventoryItem).filter(Boolean) : [];
+}
+
+function clientInventoryItem(item) {
+  if (!ENHANCERS_ENABLED && Number(item?.itype || 0) === 2) return null;
+  if (!WORKSHOP_ENABLED && Number(item?.itype || 0) === 1 && item?.u_id != null) {
+    const canonical = canonicalWeaponForRawItem(item);
+    return canonical ? clone(canonical) : null;
+  }
+  return item;
 }
 
 function selectedProfileWear(inventory, wearId) {
@@ -3073,7 +3816,7 @@ function isWeaponSelectionSaveRequest(url) {
 
 function isEquipmentSelectionSaveRequest(url) {
   const { page, act } = normalizedAjaxRoute(url);
-  return page === "pl" && (act === "sweap" || act === "sview");
+  return page === "pl" && (act === "sweap" || act === "sview" || act === "staunt");
 }
 
 function accountFrom(url) {
@@ -3237,6 +3980,7 @@ async function loadPostgresAccount(id) {
     `SELECT mode, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
      FROM player_match_stats
      WHERE player_id = $1
+       AND id > COALESCE((SELECT mode_after_match_id FROM player_stat_reset_baselines WHERE player_id = $1), 0)
      GROUP BY mode
      ORDER BY play_time DESC, mode`,
     [Number(row.id)]
@@ -3245,6 +3989,7 @@ async function loadPostgresAccount(id) {
     `SELECT map_name, SUM(CASE WHEN won THEN 1 ELSE 0 END)::int AS wins, 0::int AS losses, SUM(play_time)::int AS play_time
      FROM player_match_stats
      WHERE player_id = $1
+       AND id > COALESCE((SELECT map_after_match_id FROM player_stat_reset_baselines WHERE player_id = $1), 0)
      GROUP BY map_name
      ORDER BY play_time DESC, map_name`,
     [Number(row.id)]
@@ -3311,7 +4056,6 @@ async function profileAccountForView(account, url) {
       const fresh = await loadPostgresAccount(targetId);
       if (fresh) {
         store.accounts[String(fresh.id)] = fresh;
-        account.money = nextPlayerMoney;
         target = fresh;
       }
     } catch (error) {
@@ -7617,7 +8361,7 @@ function profilePayload(account, full = false) {
       ek: Number(liveClan.ek || 0),
       ue: Number(account.exp || liveClan.ue || 0)
     };
-    payload.clinv = activeClanInventoryItems(clanRecord);
+    payload.clinv = ENHANCERS_ENABLED ? activeClanInventoryItems(clanRecord) : [];
   }
 
   payload.sA = statsBlock(account);
@@ -7632,9 +8376,10 @@ function inventoryPayload(account) {
     st: Math.floor(Date.now() / 1000),
     data: {
       items: JSON.stringify(
-        (account.inventory || []).filter(
-          (item) => !(Number(item?.itype || 0) === 2 && Number(item?.e_id ?? item?.id ?? 0) === 36)
-        )
+        (account.inventory || [])
+          .filter((item) => !(Number(item?.itype || 0) === 2 && Number(item?.e_id ?? item?.id ?? 0) === 36))
+          .map(clientInventoryItem)
+          .filter(Boolean)
       ),
       dw: clone(defaultWeapons)
     }
@@ -7683,7 +8428,10 @@ function mapsPayload() {
     .join(",") || "5055";
   const battleServers = BATTLE_HOST
     ? [
-        { h: BATTLE_HOST, p: battlePorts, n: BATTLE_NAME, pL: "100", lM: "0", lMa: "100", m: "0" },
+        { h: BATTLE_HOST, p: battlePorts, n: "Франкфурт", pL: "100", lM: "0", lMa: "5000", m: "0" },
+        ...(WARSAW_BATTLE_HOST && WARSAW_BATTLE_HOST !== BATTLE_HOST
+          ? [{ h: WARSAW_BATTLE_HOST, p: battlePorts, n: "Варшава", pL: "100", lM: "0", lMa: "5000", m: "0" }]
+          : []),
         { h: BATTLE_HOST, p: socialMasterPort, n: `${BATTLE_NAME} Master`, pL: "100", lM: "0", lMa: "100", m: "1" }
       ]
     : [];
@@ -8005,23 +8753,28 @@ function leagueIndexForExp(exp, limits) {
 
 async function leaguePayload(account) {
   const accounts = await allAccountsForStats();
-  const sorted = sortRatingAccounts(accounts, 2);
+  const sorted = sortRatingAccounts(accounts, 1);
   const currentIndex = sorted.findIndex((ratedAccount) => Number(ratedAccount.id) === Number(account.id));
   const currentAccount = currentIndex >= 0 ? sorted[currentIndex] : account;
-  const me = ratingUser(currentAccount, currentIndex >= 0 ? currentIndex + 1 : 1);
+  const me = ratingUser(currentAccount, currentIndex >= 0 ? currentIndex + 1 : -1);
   const limits = leagueLimits();
-  const leagues = Object.fromEntries(Array.from({ length: 15 }, (_, idx) => [`l${idx + 1}`, []]));
-
-  for (const ratedAccount of sorted) {
-    const row = ratingUser(ratedAccount);
-    const leagueIndex = leagueIndexForExp(row.exp, limits);
-    if (leagues[`l${leagueIndex}`].length < 101 || Number(row.id) === Number(account.id)) {
-      leagues[`l${leagueIndex}`].push(row);
-    }
-  }
-
+  const pageSize = 100;
+  const pageCount = Math.max(15, Math.ceil(sorted.length / pageSize));
+  // Sort everybody first, then partition by global position. Experience
+  // thresholds remain medal data only and never choose a player's list.
+  me.league = leagueIndexForExp(me.exp, limits);
+  me.rank_page = currentIndex >= 0 ? Math.floor(currentIndex / pageSize) + 1 : 1;
+  const leagues = Object.fromEntries(Array.from({ length: pageCount }, (_, idx) => {
+    const start = idx * pageSize;
+    if (idx >= 15) limits[String(idx + 1)] = [0, 0];
+    return [`l${idx + 1}`, sorted.slice(start, start + pageSize)
+      .map((ratedAccount, rowIndex) => ratingUser(ratedAccount, start + rowIndex + 1))];
+  }));
+  console.log(`[league-rating] mode=global-ranking users=${sorted.length} lists=${Math.ceil(sorted.length / pageSize)} top=${sorted[0]?.id || 0} user=${account.id} rank=${me.pos} list=${me.rank_page}`);
   return {
     result: true,
+    rank_pages: true,
+    page_count: pageCount,
     u: me,
     ls: limits,
     ...leagues
@@ -8104,7 +8857,7 @@ function statsBlock(account) {
 }
 
 function isSupportedStatisticResetType(type) {
-  return type === 1 || type === 2;
+  return Number.isInteger(type) && type >= 1 && type <= 4;
 }
 
 function applyStatisticResetToAccount(account, type) {
@@ -8115,6 +8868,14 @@ function applyStatisticResetToAccount(account, type) {
   if (type === 2) {
     account.stats = {};
     return "common";
+  }
+  if (type === 3) {
+    account.modeStats = [];
+    return "mode";
+  }
+  if (type === 4) {
+    account.mapStats = [];
+    return "map";
   }
   return "";
 }
@@ -8142,12 +8903,20 @@ async function resetStatisticPostgres(account, type) {
         return { result: false, err: [2] };
       }
 
-      const scope = type === 1 ? "weapon" : "common";
+      const scope = ["", "weapon", "common", "mode", "map"][type];
       if (type === 1) {
         await client.query("DELETE FROM player_weapon_stats WHERE player_id = $1", [Number(account.id)]);
-      } else {
+      } else if (type === 2) {
         await client.query(
           "UPDATE players SET stats = '{}'::jsonb WHERE id = $1",
+          [Number(account.id)]
+        );
+      } else {
+        const column = type === 3 ? "mode_after_match_id" : "map_after_match_id";
+        await client.query(
+          `INSERT INTO player_stat_reset_baselines (player_id, ${column})
+           VALUES ($1, COALESCE((SELECT MAX(id) FROM player_match_stats WHERE player_id = $1), 0))
+           ON CONFLICT (player_id) DO UPDATE SET ${column} = EXCLUDED.${column}`,
           [Number(account.id)]
         );
       }
@@ -8161,7 +8930,12 @@ async function resetStatisticPostgres(account, type) {
         playerId: account.id,
         eventType: "statistics_reset",
         category: "statistics",
-        description: scope === "weapon" ? "Сброшена статистика оружия" : "Сброшена общая статистика",
+        description: {
+          weapon: "Сброшена статистика оружия",
+          common: "Сброшена общая статистика",
+          mode: "Сброшена статистика режимов",
+          map: "Сброшена статистика карт"
+        }[scope],
         oldValue: { balance: money },
         newValue: { balance: nextMoney, type, scope },
         metadata: { cost: STATISTIC_RESET_COST, type, scope }
@@ -8171,8 +8945,7 @@ async function resetStatisticPostgres(account, type) {
       const fresh = await loadPostgresAccount(account.id);
       if (fresh) store.accounts[String(fresh.id)] = fresh;
       account.money = nextMoney;
-      if (type === 1) account.weaponStats = [];
-      else account.stats = {};
+      applyStatisticResetToAccount(account, type);
       console.log(`[stats-reset] pg player=${account.id} type=${type} scope=${scope} before=${money} after=${nextMoney}`);
       return ok({ req: "", vcur: nextMoney });
     } catch (error) {
@@ -9202,7 +9975,7 @@ function clanPayload(clan, options = {}) {
     payload.inv = clanInviteList(clan, targetStore);
     payload.ev = (clan.events || []).map(clanEventPayload);
     payload.etreas = (clan.treasuryEvents || []).map(clanTreasuryPayload);
-    payload.inventory = { items: activeClanInventoryItems(clan) };
+    payload.inventory = { items: ENHANCERS_ENABLED ? activeClanInventoryItems(clan) : [] };
   }
   return payload;
 }
@@ -10660,6 +11433,7 @@ function changeClanKoef(account, url) {
 }
 
 async function buyClanEnhancer(account, url) {
+  if (!ENHANCERS_ENABLED) return clanError(CLAN_ERROR.CLAN_ACCESS_DISABLE);
   account = ensureClanAccount(account);
   const clan = clanById(url.searchParams.get("cid"));
   const enhancerId = Number(url.searchParams.get("id") || 0);
@@ -11868,6 +12642,7 @@ async function buyTimedItemPostgres(account, item, duration, price) {
 }
 
 async function buyEnhancer(account, item, duration) {
+  if (!ENHANCERS_ENABLED) return { result: false, err: [1] };
   if (!item) return { result: false, err: [1] };
   if (Number(item.iC || 0) === 1) return { result: false, err: [1] };
   const selectedDuration = normalizeShopDuration(duration);
@@ -12024,6 +12799,7 @@ async function buyWeaponUpgradePostgres(account, upgrade, price) {
 }
 
 async function buyWeaponUpgrade(account, upgrade) {
+  if (!WORKSHOP_ENABLED) return { result: false, err: [1] };
   if (!upgrade) return { result: false, err: [1] };
   const price = weaponUpgradePrice(upgrade);
   if (!isValidShopPrice(price)) {
@@ -12282,11 +13058,87 @@ async function saveWeapons(account, url) {
   return ok({ weap: clone(account.weap) });
 }
 
-function saveTaunts(account, url) {
+function requestedTauntSelection(url, baseSelection = {}) {
+  const selection = { ...baseSelection };
   for (let i = 1; i <= 3; i += 1) {
-    if (url.searchParams.has(`i${i}`)) account.taun[`i${i - 1}`] = Number(url.searchParams.get(`i${i}`) || 0);
+    if (url.searchParams.has(`i${i}`)) selection[`i${i - 1}`] = Number(url.searchParams.get(`i${i}`) || 0);
   }
+  return selection;
+}
+
+function tauntSelectionSummary(selection = {}) {
+  return Array.from({ length: 3 }, (_, slot) => `${slot}:${Number(selection?.[`i${slot}`] || 0)}`).join(",");
+}
+
+async function saveTauntsPostgres(account, url, requestedSelection, saveVersion) {
+  return enqueuePostgresMutation(async () => {
+    if (!isLatestTauntSelectionSaveVersion(account.id, saveVersion)) {
+      console.log(`[save] staunt skip stale id=${account.id} version=${saveVersion} req=${tauntSelectionSummary(requestedSelection)}`);
+      return ok();
+    }
+
+    let client = null;
+    try {
+      client = await pgPool.connect();
+      await client.query("BEGIN");
+
+      const player = await client.query("SELECT cckey, taun FROM players WHERE id = $1 FOR UPDATE", [Number(account.id)]);
+      if (!player.rows[0] || player.rows[0].cckey !== account.key) {
+        await client.query("ROLLBACK");
+        return { result: false, error: "1" };
+      }
+
+      if (!isLatestTauntSelectionSaveVersion(account.id, saveVersion)) {
+        await client.query("ROLLBACK");
+        console.log(`[save] staunt skip stale id=${account.id} version=${saveVersion} req=${tauntSelectionSummary(requestedSelection)}`);
+        return ok();
+      }
+
+      const selection = requestedTauntSelection(url, jsonValue(player.rows[0].taun, {}));
+      const now = new Date().toISOString();
+      await client.query(
+        "UPDATE players SET taun = $2::jsonb, updated_at = $3 WHERE id = $1",
+        [Number(account.id), JSON.stringify(selection), now]
+      );
+      await client.query(
+        `INSERT INTO player_equipment (player_id, view, weap, taun, updated_at)
+         SELECT id, view, weap, $2::jsonb, now() FROM players WHERE id = $1
+         ON CONFLICT (player_id) DO UPDATE SET
+           taun = EXCLUDED.taun,
+           updated_at = now()`,
+        [Number(account.id), JSON.stringify(selection)]
+      );
+      await client.query("COMMIT");
+
+      const current = store.accounts[String(account.id)];
+      if (current && current.key === account.key) {
+        current.taun = { ...selection };
+        current.updatedAt = now;
+      }
+      console.log(`[save] staunt ok id=${account.id} version=${saveVersion} saved=${tauntSelectionSummary(selection)}`);
+      return ok();
+    } catch (error) {
+      try {
+        await client?.query("ROLLBACK");
+      } catch {
+        // The original error is more useful for diagnostics.
+      }
+      console.error("[postgres] save taunts failed", error);
+      return { result: false, err: [1] };
+    } finally {
+      if (client) client.release();
+    }
+  });
+}
+
+async function saveTaunts(account, url) {
+  const requestedSelection = requestedTauntSelection(url, account.taun || {});
+  const saveVersion = nextTauntSelectionSaveVersion(account.id);
+  if (pgPool) return saveTauntsPostgres(account, url, requestedSelection, saveVersion);
+  if (!isLatestTauntSelectionSaveVersion(account.id, saveVersion)) return ok();
+  account.taun = requestedSelection;
   persist(account);
+  console.log(`[save] staunt ok id=${account.id} version=${saveVersion} saved=${tauntSelectionSummary(requestedSelection)}`);
   return ok();
 }
 
@@ -12767,7 +13619,7 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
       if (url.searchParams.get("ai") === "1") {
         const deliveredItems = await claimPendingInventoryDeliveries(account.id);
         if (deliveredItems.length) {
-          payload.addItem = deliveredItems;
+          payload.addItem = deliveredItems.map(clientInventoryItem).filter(Boolean);
         }
       }
       return payload;
@@ -14484,6 +15336,33 @@ async function handleHttpRequest(req, res) {
       sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/battle/developer-effects") {
+    if (req.method !== "GET") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    if (!hasValidBattleServiceToken(req)) {
+      sendJson(res, { ok: false, error: "invalid_token" }, 403);
+      return;
+    }
+    const playerIdText = url.searchParams.get("playerId");
+    const playerId = Number(playerIdText);
+    if (url.searchParams.size !== 1 || url.searchParams.getAll("playerId").length !== 1 ||
+        !/^[1-9]\d*$/.test(playerIdText || "") || !Number.isSafeInteger(playerId)) {
+      sendJson(res, { ok: false, error: "invalid_player_id" }, 400);
+      return;
+    }
+    try {
+      const result = await loadBattleDeveloperEffects(pgPool, playerId);
+      const { status, ...payload } = result;
+      sendJson(res, payload, status || (payload.ok === false ? 400 : 200));
+    } catch (error) {
+      console.error(`[staff] developer effects lookup failed player=${playerId}`, error);
+      sendJson(res, { ok: false, error: "developer_effects_unavailable" }, serviceErrorStatus(error));
     }
     return;
   }
