@@ -111,6 +111,9 @@ function developerEffectsPayload(row = null) {
     result: true,
     spawnEffect: Number(row?.spawn_effect || 0),
     deathEffect: Number(row?.death_effect || 0),
+    spawnLevel: Number(row?.spawn_level || 1),
+    deathLevel: Number(row?.death_level || 1),
+    mythicSet: row?.mythic_set === true,
   };
 }
 
@@ -125,10 +128,15 @@ function validDeveloperEffectsParams(params, save) {
   if (save) {
     allowed.add("spawnEffect");
     allowed.add("deathEffect");
+    allowed.add("spawnLevel");
+    allowed.add("deathLevel");
+    allowed.add("mythicSet");
   }
   if (!params || [...params.keys()].some((key) => !allowed.has(key))) return false;
   if ([...params.keys()].some((key) => params.getAll(key).length !== 1)) return false;
-  return !save || (validDeveloperEffect(params.get("spawnEffect")) && validDeveloperEffect(params.get("deathEffect")));
+  return !save || (validDeveloperEffect(params.get("spawnEffect")) && validDeveloperEffect(params.get("deathEffect")) &&
+    ["spawnLevel", "deathLevel"].every((key) => !params.has(key) || /^[1-3]$/.test(params.get(key))) &&
+    (!params.has("mythicSet") || /^[01]$/.test(params.get("mythicSet"))));
 }
 
 export async function loadBattleDeveloperEffects(db, playerId) {
@@ -136,7 +144,7 @@ export async function loadBattleDeveloperEffects(db, playerId) {
   if (!db?.query || !id) return staffFailure("invalid_player_id", 400);
   if (await loadActiveStaffRole(db, id) !== "developer") return developerEffectsPayload();
   const result = await db.query(
-    `SELECT spawn_effect, death_effect
+    `SELECT spawn_effect, death_effect, spawn_level, death_level, mythic_set
      FROM player_developer_effects
      WHERE player_id = $1`,
     [id]
@@ -221,20 +229,26 @@ export async function staffAjaxPayload(db, account, act, searchParams) {
     if (normalizedAct === "developer_effects_save") {
       const spawnEffect = Number(searchParams.get("spawnEffect"));
       const deathEffect = Number(searchParams.get("deathEffect"));
+      const spawnLevel = searchParams.has("spawnLevel") ? Number(searchParams.get("spawnLevel")) : null;
+      const deathLevel = searchParams.has("deathLevel") ? Number(searchParams.get("deathLevel")) : null;
+      const mythicSet = searchParams.has("mythicSet") ? searchParams.get("mythicSet") === "1" : null;
       const saved = await db.query(
-        `INSERT INTO player_developer_effects (player_id, spawn_effect, death_effect, updated_at)
-         VALUES ($1, $2, $3, now())
+        `INSERT INTO player_developer_effects (player_id, spawn_effect, death_effect, spawn_level, death_level, mythic_set, updated_at)
+         VALUES ($1, $2, $3, COALESCE($4::smallint, 1), COALESCE($5::smallint, 1), COALESCE($6::boolean, false), now())
          ON CONFLICT (player_id) DO UPDATE SET
            spawn_effect = EXCLUDED.spawn_effect,
            death_effect = EXCLUDED.death_effect,
+           spawn_level = COALESCE($4::smallint, player_developer_effects.spawn_level),
+           death_level = COALESCE($5::smallint, player_developer_effects.death_level),
+           mythic_set = COALESCE($6::boolean, player_developer_effects.mythic_set),
            updated_at = now()
-         RETURNING spawn_effect, death_effect`,
-        [playerId, spawnEffect, deathEffect]
+         RETURNING spawn_effect, death_effect, spawn_level, death_level, mythic_set`,
+        [playerId, spawnEffect, deathEffect, spawnLevel, deathLevel, mythicSet]
       );
       return developerEffectsPayload(saved.rows[0]);
     }
     const result = await db.query(
-      `SELECT spawn_effect, death_effect
+      `SELECT spawn_effect, death_effect, spawn_level, death_level, mythic_set
        FROM player_developer_effects
        WHERE player_id = $1`,
       [playerId]
