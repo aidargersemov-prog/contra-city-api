@@ -1,4 +1,5 @@
 import http from "node:http";
+import { claimGameVisit, auditClientAddress, auditNetworkInfo } from "./admin-logs/game-access.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-03-magazine-timing-v153";
+const API_BUILD_ID = "railway-api-2026-10-04-audit-integrity-v154";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -156,8 +157,7 @@ const TELEGRAM_RESET_ADVISORY_LOCK = 741963522;
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
 const revokedGameLinkKeys = new Map();
-const gameLoginSeen = new Map();
-const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 30 * 60 * 1000));
+const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 60 * 1000));
 const playerBanCache = new Map();
 const PLAYER_BAN_CACHE_TTL_MS = Math.max(1000, Number(process.env.PLAYER_BAN_CACHE_TTL_MS || 15000));
 const requestAuditContext = new AsyncLocalStorage();
@@ -178,10 +178,17 @@ async function auditGameEvent(db, event) {
   });
 }
 
+function auditRequestNetwork(req) {
+  const cloudFront = auditClientAddress(cloudFrontViewerIp(req));
+  return cloudFront ? { ip: cloudFront, source: "cloudfront" } : auditNetworkInfo(req,
+    Boolean(process.env.RAILWAY_ENVIRONMENT_ID), [WARSAW_BATTLE_HOST, BATTLE_HOST, "13.62.98.107"].filter(Boolean));
+}
+
 async function recordPlayerAccess(account, req, kind, source) {
   if (!pgPool || !account?.id) return;
-  const ipAddress = requestClientIp(req);
-  const geo = requestGeo(req);
+  const network = auditRequestNetwork(req);
+  const ipAddress = network.ip;
+  const geo = { ...requestGeo(req), ip: ipAddress, source: network.source };
   const device = String(req.headers["user-agent"] || "").slice(0, 300);
   try {
     const previousResult = await pgPool.query(
@@ -198,7 +205,7 @@ async function recordPlayerAccess(account, req, kind, source) {
     await touchPlayerActivity(pgPool, { playerId: account.id, kind, ipAddress, device, source, geo });
     await writeAuditEvent(pgPool, {
       playerId: account.id,
-      eventType: kind === "logout" ? "player_logout" : "player_login",
+      eventType: kind === "logout" ? "player_logout" : source === "game_api_login" ? "player_login" : "account_auth",
       category: "session",
       severity: kind !== "logout" && (countryChanged || deviceChanged) ? "notice" : "info",
       suspicious: kind !== "logout" && (countryChanged || deviceChanged),
@@ -234,18 +241,25 @@ function hasValidCloudFrontOrigin(req) {
     safeTokenEquals(req?.headers?.[CLOUDFRONT_ORIGIN_HEADER], CLOUDFRONT_ORIGIN_SECRET);
 }
 
-async function recordGameLoginOnce(account, req) {
-  if (!account?.id) return;
-  const now = Date.now();
-  const ip = requestClientIp(req);
+async function recordGameLoginOnce(account, req, url) {
+  if (!pgPool || !account?.id) return;
+  // Profile/catalog requests made by either battle server are not game logins.
+  if (safeTokenEquals(req.headers["x-battle-token"], BATTLE_EVENT_TOKEN)) return;
   const deviceKey = stableIdentityHash(req.headers["user-agent"] || "unknown");
-  const key = `${account.id}:${ip}:${deviceKey}`;
-  const previous = Number(gameLoginSeen.get(key) || 0);
-  if (now - previous < GAME_LOGIN_DEDUPE_TTL_MS) return;
-  if (gameLoginSeen.has(key)) gameLoginSeen.delete(key);
-  gameLoginSeen.set(key, now);
-  while (gameLoginSeen.size > 10000) gameLoginSeen.delete(gameLoginSeen.keys().next().value);
-  await recordPlayerAccess(account, req, "login", "game_api_login");
+  try {
+    const page = url.searchParams.get("page"), act = url.searchParams.get("act");
+    const authentication = (page === "auth" && act === "g") || (page === "account" && url.searchParams.get("action") === "login");
+    if (authentication && await claimGameVisit(pgPool, Number(account.id), deviceKey, GAME_LOGIN_DEDUPE_TTL_MS)) {
+      await recordPlayerAccess(account, req, "login", "game_api_login");
+    } else {
+      const network = auditRequestNetwork(req);
+      await touchPlayerActivity(pgPool, {playerId:account.id,kind:"seen",ipAddress:network.ip,
+        device:String(req.headers["user-agent"] || "").slice(0,300),source:"game_api_request",
+        geo:{...requestGeo(req),ip:network.ip,source:network.source}});
+    }
+  } catch (error) {
+    console.error(`[admin-logs] visit tracking failed player=${account.id}`, error.code || error.name);
+  }
 }
 
 function decodeCloudFrontHeader(value, maxLength = 160) {
@@ -3167,7 +3181,10 @@ async function savePostgresStore(nextStore) {
         ]
       );
 
-      await client.query("DELETE FROM player_inventory WHERE player_id = $1", [account.id]);
+      // Delete only genuinely removed items. A full DELETE/INSERT produced fake
+      // removal/addition events for every unchanged item on every save.
+      await client.query("DELETE FROM player_inventory WHERE player_id = $1 AND NOT (item_key = ANY($2::text[]))",
+        [account.id, (account.inventory || []).map(inventoryItemKey)]);
       for (const item of account.inventory || []) {
         await client.query(
           `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
@@ -3397,7 +3414,7 @@ if (pgPool && TELEGRAM_LINK_API_TOKEN) {
 const adminLogsApi = createAdminLogsApi({
   getPool: () => pgPool,
   readJsonBody,
-  requestIp: requestClientIp,
+  requestIp: (req) => auditRequestNetwork(req).ip,
   requestGeo,
   onPlayerChanged: async (playerId) => {
     if (!pgPool) return;
@@ -14348,9 +14365,9 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
 
     if (playTimeMinutes > 0 || kills > 0 || deaths > 0 || headshots > 0 || hasWon) {
       await client.query(
-        `INSERT INTO player_match_stats (player_id, map_name, mode, kills, deaths, headshots, play_time, won)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false]
+        `INSERT INTO player_match_stats (player_id, map_name, mode, kills, deaths, headshots, play_time, won, server_host, server_port, match_instance_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false, String(event.serverHost || BATTLE_HOST || "").slice(0,128), Number(event.serverPort || 5055), String(event.matchInstanceId || "").slice(0,200)]
       );
     }
     // Contract accounting consumes only the authoritative per-session summary
@@ -14432,7 +14449,7 @@ async function recordBattleEvent(event) {
          server_host, server_port, room_settings, updated_at
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
-       ON CONFLICT (room_name) DO UPDATE SET
+       ON CONFLICT (server_host, server_port, room_name) DO UPDATE SET
          map_name = EXCLUDED.map_name,
          mode = EXCLUDED.mode,
          max_players = EXCLUDED.max_players,
@@ -14520,20 +14537,20 @@ async function recordBattleEvent(event) {
     if (type === "join" || type === "leave") {
       await touchPlayerActivity(client, {
         playerId,
-        kind: type === "join" ? "login" : "logout",
+        kind: "seen",
         ipAddress: remoteIp,
         source: "battle_server"
       });
       await writeAuditEvent(client, {
         playerId,
         playerName: event.playerName,
-        eventType: type === "join" ? "player_login" : "player_logout",
+        eventType: type === "join" ? "battle_join" : "battle_leave",
         category: "session",
         severity: "info",
         description: type === "join" ? `Игрок вошёл в бой ${roomName}` : `Игрок вышел из боя ${roomName}`,
         source: "battle_server",
         ipAddress: remoteIp,
-        metadata: { roomName, mapName, mode, actorId, serverPort }
+        metadata: { roomName, mapName, mode, actorId, serverHost, serverPort }
       });
     }
     // Combat counters and rewards are persisted above by recordStatEvent.
@@ -14704,7 +14721,7 @@ async function handleHttpRequest(req, res) {
             ? `Создан промокод ${promo.code}: ${promo.rewardAmount} контрабаксов`
             : `Промокод ${promo.code} ${promo.active ? "включён" : "выключен"}`,
           source: "telegram_admin",
-          ipAddress: requestClientIp(req),
+          ipAddress: auditRequestNetwork(req).ip,
           device: String(req.headers["user-agent"] || "").slice(0, 300),
           newValue: promo,
           metadata: {
@@ -14937,7 +14954,7 @@ async function handleHttpRequest(req, res) {
         severity: "warning",
         description: `Администратор удалил старую игровую ссылку, привязку устройства и Telegram`,
         source: "legacy_admin_token",
-        ipAddress: requestClientIp(req),
+        ipAddress: auditRequestNetwork(req).ip,
         device: String(req.headers["user-agent"] || "").slice(0, 300),
         newValue: {
           linkRotated: true,
@@ -15200,7 +15217,7 @@ async function handleHttpRequest(req, res) {
         return;
       }
       const auditContext = {
-        ipAddress: requestClientIp(req),
+        ipAddress: auditRequestNetwork(req).ip,
         device: String(req.headers["user-agent"] || "").slice(0, 300),
         geo: requestGeo(req),
         source: "battle_pass_case"
@@ -15238,7 +15255,7 @@ async function handleHttpRequest(req, res) {
         return;
       }
       const auditContext = {
-        ipAddress: requestClientIp(req),
+        ipAddress: auditRequestNetwork(req).ip,
         device: String(req.headers["user-agent"] || "").slice(0, 300),
         geo: requestGeo(req),
         source: "battle_pass_case_resolution"
@@ -15266,9 +15283,9 @@ async function handleHttpRequest(req, res) {
       sendJson(res, { result: false, error: "1" }, 403);
       return;
     }
-    await recordGameLoginOnce(account, req);
+    await recordGameLoginOnce(account, req, url);
     const auditContext = {
-      ipAddress: requestClientIp(req),
+      ipAddress: auditRequestNetwork(req).ip,
       device: String(req.headers["user-agent"] || "").slice(0, 300),
       geo: requestGeo(req),
       source: "game_api"

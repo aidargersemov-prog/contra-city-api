@@ -1,4 +1,4 @@
-const PANEL_VERSION = 47;
+const PANEL_VERSION = 48;
 const CONFIG = window.__LOG_PANEL_CONFIG__ || {};
 const API_BASE = String(CONFIG.apiBaseUrl || "https://contra-city-api-production-fedf.up.railway.app").replace(/\/+$/, "");
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -20,7 +20,7 @@ const CATEGORY_LABELS = {
 const TYPE_LABELS = {
   battle_chat: "Чат", player_report: "Жалоба на игрока",
   security_udp_quarantine: "UDP-карантин", security_pending_global_cap: "Лимит подключений", security_full_session_cap: "Лимит сессий", admin_login_bruteforce: "Подбор пароля администратора",
-  player_login: "Вход", player_logout: "Выход", purchase: "Покупка", weapon_upgrade: "Улучшение оружия",
+  account_auth: "Авторизация аккаунта", battle_join: "Вход в бой", battle_leave: "Выход из боя", player_login: "Вход", player_logout: "Выход", purchase: "Покупка", weapon_upgrade: "Улучшение оружия",
   daily_quest_progress: "Прогресс задания", daily_quest_claim: "Ежедневное задание", achievement_complete: "Достижение",
   clan_create: "Создание клана", clan_delete: "Удаление клана", clan_rename: "Переименование клана",
   clan_join_request: "Заявка в клан", clan_join: "Вступление в клан", clan_leave: "Выход из клана",
@@ -334,19 +334,25 @@ function formatPlaytime(minutes) {
   return value >= 60 ? `${Math.floor(value / 60)} ч ${value % 60} мин` : `${value} мин`;
 }
 
+function battleServerName(host) {
+  return ({"3.76.0.237":"Франкфурт", "34.116.179.250":"Варшава", unknown:"Старые записи без сервера"})[host] || host;
+}
+function renderTelemetry(activity) {
+  return `<details class="server-telemetry"><summary>Источники статистики · все серверы</summary>${(activity.telemetry || []).map(row=>`<span>${escapeHtml(battleServerName(row.host))} · последние данные ${escapeHtml(formatDate(row.lastEventAt))}</span>`).join("")}<small>Это время последнего полученного события сервера, не индикатор его доступности. Старые итоги без адреса также входят в сумму.</small></details>`;
+}
 function renderPlayerActivity(activity) {
   if (!activity) return `<p class="activity-note">Статистика времени недоступна. Обновите API панели.</p>`;
   if (!activity.records) {
     const known = activity.coverage?.records > 0;
-    return `<div class="activity-no-data"><strong>Нет записей о времени за этот период</strong><p>${known ? `Последний сохранённый итог: ${escapeHtml(formatDate(activity.coverage.lastRecordAt))}. Выберите другой период.` : "По этому игроку ещё не сохранено ни одного итога боя. Рассчитать плейтайм по одним входам в игру нельзя."}</p><small>Это отсутствие данных, а не подтверждённые 0 минут.</small></div>`;
+    return `${renderTelemetry(activity)}<div class="activity-no-data"><strong>Нет записей о времени за этот период</strong><p>${known ? `Последний сохранённый итог: ${escapeHtml(formatDate(activity.coverage.lastRecordAt))}. Выберите другой период.` : "По этому игроку ещё не сохранено ни одного итога боя. Рассчитать плейтайм по одним входам в игру нельзя."}</p><small>Это отсутствие данных, а не подтверждённые 0 минут.</small></div>`;
   }
   const modeNames = {1:"Каждый за себя",2:"Командный бой",4:"Захват флага",8:"Контроль точек",16:"Оборона",32:"Сопровождение",64:"Зомби",128:"Экспедиция"};
   const peak = Math.max(1, ...activity.daily.map(day => day.minutes));
   const ranking = (rows, modes = false) => rows.length ? rows.map(row => `<div class="activity-ranking-row"><span>${escapeHtml(modes ? modeNames[row.name] || `Режим ${row.name}` : row.name)}</span><b>${formatPlaytime(row.minutes)}</b></div>`).join("") : `<p class="activity-note">Нет сохранённых итогов боя за период</p>`;
-  return `<div class="playtime-summary"><div><span>Время в боях</span><strong>${formatPlaytime(activity.minutes)}</strong></div><div><span>Активных дней</span><strong>${activity.activeDays} / ${activity.days}</strong></div><div><span>Сохранённых итогов</span><strong>${formatNumber(activity.records)}</strong></div></div>
+  return `${renderTelemetry(activity)}<div class="playtime-summary"><div><span>Время в боях</span><strong>${formatPlaytime(activity.minutes)}</strong></div><div><span>Активных дней</span><strong>${activity.activeDays} / ${activity.days}</strong></div><div><span>Сохранённых итогов</span><strong>${formatNumber(activity.records)}</strong></div></div>
     <h3 class="section-title">Активность по дням · МСК</h3>
     <div class="player-daily">${activity.daily.map(day => `<div class="player-day"><time datetime="${day.date}">${escapeHtml(day.date.slice(8) + "." + day.date.slice(5,7))}</time><div class="player-day-track"><i style="width:${Math.max(0,day.minutes / peak * 100)}%"></i></div><b>${formatPlaytime(day.minutes)}</b></div>`).join("")}</div>
-    <div class="activity-breakdowns"><section><h3 class="section-title">Карты</h3>${ranking(activity.maps)}</section><section><h3 class="section-title">Режимы</h3>${ranking(activity.modes,true)}</section></div>
+    <div class="activity-breakdowns"><section><h3 class="section-title">Карты</h3>${ranking(activity.maps)}</section><section><h3 class="section-title">Режимы</h3>${ranking(activity.modes,true)}</section><section><h3 class="section-title">Серверы</h3>${ranking((activity.servers || []).map(row=>({...row,name:battleServerName(row.name)})))}</section></div>
     <p class="activity-note">Последний сохранённый итог: ${escapeHtml(formatDate(activity.coverage?.lastRecordAt))}.<br>По сохранённым итогам боя, с округлением вверх до минуты. Время относится к дате записи итога; текущий бой и время в меню не включены.</p>`;
 }
 
@@ -361,14 +367,16 @@ async function openPlayer(playerId, period = "7d", page = 1, range = {}) {
     state.playerDetail = data;
     const selectedPeriod = data.activity?.period || period;
     showModal(`<div class="modal-header"><div><h2>${escapeHtml(p.name)}</h2><p class="modal-subtitle">Игрок #${p.id}</p></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
+      <section class="telegram-binding"><h3>Telegram-привязка</h3>${data.telegram ? `<b>${escapeHtml(data.telegram.telegram_username ? "@" + data.telegram.telegram_username : "Без @username")}</b><span>${escapeHtml([data.telegram.telegram_first_name,data.telegram.telegram_last_name].filter(Boolean).join(" "))}</span><small>TG ID ${escapeHtml(data.telegram.telegram_id)} · Привязан ${escapeHtml(formatDate(data.telegram.telegram_linked_at))}</small>` : '<span>Telegram не привязан</span>'}</section>
       <div class="player-period-row"><label for="player-period">Период статистики</label><select id="player-period" data-profile-id="${p.id}">${[["1d","Сегодня"],["7d","Последние 7 дней"],["week","Эта неделя"],["last-week","Прошлая неделя"],["30d","Последние 30 дней"],["custom","Выбрать даты"]].map(([value,label])=>`<option value="${value}" ${selectedPeriod===value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
       <form id="player-date-form" class="player-date-form ${selectedPeriod === "custom" ? "" : "hidden"}" data-profile-id="${p.id}"><label>С<input name="dateFrom" type="date" required value="${escapeHtml(data.activity?.dateFrom || "")}"></label><label>По<input name="dateTo" type="date" required value="${escapeHtml(data.activity?.dateTo || "")}"></label><button type="submit" class="button secondary">Применить</button><p class="form-error" id="player-date-error"></p></form>
       <p class="period-caption">${data.activity ? `${escapeHtml(data.activity.dateFrom || "")} — ${escapeHtml(data.activity.dateTo || "")} · время по Москве` : ""}</p>
       ${renderPlayerActivity(data.activity)}
       <div class="player-period-totals"><span>Событий: <b>${formatNumber(data.events.total)}</b></span><span>Покупок: <b>${formatNumber(data.summary?.purchases?.count)}</b></span><span>Подозрительных: <b>${formatNumber(data.summary?.suspicious)}</b></span></div>
       <h3 class="section-title">Профиль сейчас</h3>
+
       <div class="profile-summary"><div class="mini-stat"><span>УРОВЕНЬ</span><b>${formatNumber(p.level)}</b></div><div class="mini-stat"><span>ОПЫТ</span><b>${formatNumber(p.exp)}</b></div><div class="mini-stat"><span>БАЛАНС</span><b>${formatNumber(p.money)}</b></div><div class="mini-stat"><span>КЛАН</span><b>${escapeHtml(p.clan_name || "—")}</b></div><div class="mini-stat"><span>ПОСЛЕДНИЙ ВХОД</span><b>${escapeHtml(formatDate(p.last_login_at,true))}</b></div></div>
-      <details class="raw-details"><summary>Входы и устройство</summary><div class="detail-grid"><div class="detail-box"><span>ПОСЛЕДНИЙ ВЫХОД</span><code>${escapeHtml(formatDate(p.last_logout_at))}</code></div><div class="detail-box"><span>ПОСЛЕДНЯЯ АКТИВНОСТЬ</span><code>${escapeHtml(formatDate(p.last_seen_at))}</code></div><div class="detail-box"><span>IP</span><code>${escapeHtml(p.last_ip_address || "нет данных")}</code></div><div class="detail-box"><span>УСТРОЙСТВО</span><code>${escapeHtml(p.last_device || "нет данных")}</code></div></div></details>
+      <details class="raw-details" open><summary>Входы и устройство</summary><div class="detail-grid"><div class="detail-box"><span>ПОСЛЕДНИЙ ВЫХОД</span><code>${escapeHtml(formatDate(p.last_logout_at))}</code></div><div class="detail-box"><span>ПОСЛЕДНЯЯ АКТИВНОСТЬ</span><code>${escapeHtml(formatDate(p.last_seen_at))}</code></div><div class="detail-box"><span>IP</span><code>${escapeHtml(p.last_ip_address || "нет данных")}</code></div><div class="detail-box"><span>УСТРОЙСТВО</span><code>${escapeHtml(p.device_label || "Нет данных клиента")}</code></div></div></details>
       <h3 class="section-title">События за период · ${formatNumber(data.events.total)}</h3><div class="player-history-scroll"><div class="event-list">${renderEventRows(data.events.items)}</div></div>
       <div class="player-history-pages"><button class="button secondary" data-profile-page="${data.events.page - 1}" data-profile-id="${p.id}" data-period="${selectedPeriod}" ${data.events.page <= 1 ? "disabled" : ""}>Назад</button><span>${data.events.page} / ${data.events.pages}</span><button class="button secondary" data-profile-page="${data.events.page + 1}" data-profile-id="${p.id}" data-period="${selectedPeriod}" ${data.events.page >= data.events.pages ? "disabled" : ""}>Далее</button></div>
     </div>`);
@@ -422,15 +430,17 @@ function openModalLoading(title) { showModal(`<div class="modal-header"><h2>${es
 function showModalError(message) { showModal(`<div class="modal-header"><h2>Ошибка</h2><button class="modal-close">×</button></div><div class="modal-body"><div class="empty-state">${escapeHtml(message)}</div></div>`); }
 function showModal(html) { state.detailRevision = (state.detailRevision || 0) + 1; $("#detail-content").innerHTML = `<div class="modal-shell">${html}</div>`; const modal = $("#detail-modal"); if (!modal.open) modal.showModal(); }
 
-async function searchPlayers() {
+async function searchPlayers(page = 1) {
   const q = $("#player-search").value.trim();
-  if (!q) return;
+  const linked = $("#player-linked-only").checked ? "1" : "";
   const revision = state.playerSearchRevision = (state.playerSearchRevision || 0) + 1;
   $("#player-search-results").innerHTML = '<div class="empty-state">Поиск…</div>';
   try {
-    const data = await api("/admin/logs/players", {query: {q}});
+    const data = await api("/admin/logs/players", {query: {q, linked, page}});
     if (state.playerSearchRevision !== revision || !state.admin) return;
-    $("#player-search-results").innerHTML = data.items.length ? data.items.map(player => `<button class="player-result" data-player-id="${player.id}"><span class="avatar">${escapeHtml(String(player.name || "?")[0])}</span><span><b>${escapeHtml(player.name)}</b><small>ID ${player.id} · Уровень ${formatNumber(player.level)}</small></span><span>Открыть статистику</span></button>`).join("") : '<div class="empty-state">Игрок не найден. Проверьте ник или ID.</div>';
+    $("#player-search-total").textContent = `Найдено: ${formatNumber(data.total ?? data.items.length)}`;
+    $("#player-search-pages").innerHTML = data.pages > 1 ? `<button class="button secondary" data-player-search-page="${data.page-1}" ${data.page <= 1 ? "disabled" : ""}>Назад</button><span>${data.page} / ${data.pages}</span><button class="button secondary" data-player-search-page="${data.page+1}" ${data.page >= data.pages ? "disabled" : ""}>Далее</button>` : "";
+    $("#player-search-results").innerHTML = data.items.length ? data.items.map(player => `<button class="player-result" data-player-id="${player.id}"><span class="avatar">${escapeHtml(String(player.name || "?")[0])}</span><span><b>${escapeHtml(player.name)}</b><small>ID ${player.id} · Уровень ${formatNumber(player.level)}</small></span><span class="player-telegram">${player.telegram_id ? `${escapeHtml(player.telegram_username ? "@" + player.telegram_username : "Без @username")}<small>${escapeHtml([player.telegram_first_name,player.telegram_last_name].filter(Boolean).join(" "))} · TG ID ${escapeHtml(player.telegram_id)}</small>` : "Telegram не привязан"}</span></button>`).join("") : '<div class="empty-state">Игрок не найден. Проверьте ник или ID.</div>';
   } catch (error) {
     if (state.playerSearchRevision === revision) $("#player-search-results").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
@@ -453,13 +463,14 @@ function switchView(view, options = {}) {
   $("#export-button").classList.toggle("hidden", view === "players" || view === "admins" || !state.admin?.permissions.includes("export"));
   $$(".content-view").forEach((node) => node.classList.add("hidden"));
   $(`#${view}-view`)?.classList.remove("hidden");
-  const titles = { dashboard: "Главная", players: "Игроки и плейтайм", events: "Все события", admins: "Администраторы" };
+  const titles = { dashboard: "Главная", players: "Игроки и Telegram", events: "Журнал событий", admins: "Администраторы" };
   const activeNode = options.nav || $(`.nav-item[data-view="${view}"]`);
   setActiveNav(activeNode);
   $("#page-title").textContent = options.title || titles[view] || titles.dashboard;
   $("#sidebar").classList.remove("open");
   if (view === "events") loadEvents();
   if (view === "admins") loadAdmins();
+  if (view === "players") searchPlayers();
 }
 
 function openFilters() { $("#filter-drawer").classList.add("open"); $("#filter-drawer").setAttribute("aria-hidden", "false"); $("#drawer-backdrop").classList.remove("hidden"); }
@@ -498,6 +509,7 @@ async function exportCsv() {
 }
 
 function bindUi() {
+  $("#player-linked-only").addEventListener("change", () => searchPlayers());
   $("#player-search-form").addEventListener("submit", event => { event.preventDefault(); searchPlayers(); });
   $("#detail-modal").addEventListener("submit", event => {
     if (event.target.id !== "player-date-form") return;
@@ -591,6 +603,8 @@ function bindUi() {
     catch (error) { toast(error.message, "error"); }
   });
   document.addEventListener("click", (event) => {
+    const searchPage = event.target.closest("[data-player-search-page]");
+    if (searchPage && !searchPage.disabled) { searchPlayers(Number(searchPage.dataset.playerSearchPage)); return; }
     const player = event.target.closest("[data-player-id]");
     if (player) { event.stopPropagation(); openPlayer(player.dataset.playerId); return; }
     const clan = event.target.closest("[data-clan-id]");

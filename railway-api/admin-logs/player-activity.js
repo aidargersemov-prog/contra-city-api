@@ -46,6 +46,7 @@ export function summarizePlayerActivity(rows, window) {
   const days = new Map(daily.map(day => [day.date, day]));
   const maps = new Map();
   const modes = new Map();
+  const servers = new Map();
   const add = (target, key, minutes, records) => {
     const entry = target.get(key) || { name: key, minutes: 0, records: 0 };
     entry.minutes += minutes;
@@ -61,6 +62,7 @@ export function summarizePlayerActivity(rows, window) {
     day.records += records;
     add(maps, String(row.map_name || "Неизвестная карта"), minutes, records);
     add(modes, String(row.mode), minutes, records);
+    add(servers, String(row.server_host || "unknown"), minutes, records);
   }
   const ranked = entries => [...entries.values()].sort((a, b) => b.minutes - a.minutes || a.name.localeCompare(b.name));
   return {
@@ -68,27 +70,29 @@ export function summarizePlayerActivity(rows, window) {
     minutes: daily.reduce((sum, day) => sum + day.minutes, 0),
     records: daily.reduce((sum, day) => sum + day.records, 0),
     activeDays: daily.filter(day => day.minutes > 0).length,
-    daily, maps: ranked(maps), modes: ranked(modes)
+    daily, maps: ranked(maps), modes: ranked(modes), servers: ranked(servers)
   };
 }
 
 export async function loadPlayerActivity(pool, playerId, window) {
-  const [result, coverage] = await Promise.all([pool.query(
+  const [result, coverage, telemetry] = await Promise.all([pool.query(
     `SELECT to_char(created_at AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD') AS day,
-            map_name, mode, COALESCE(sum(GREATEST(play_time, 0)), 0)::bigint AS minutes,
+            map_name, mode, server_host, COALESCE(sum(GREATEST(play_time, 0)), 0)::bigint AS minutes,
             count(*)::int AS records
      FROM player_match_stats
      WHERE player_id = $1 AND created_at >= $2::timestamptz AND created_at < $3::timestamptz
-     GROUP BY 1, map_name, mode`,
+     GROUP BY 1, map_name, mode, server_host`,
     [playerId, window.from, window.to]
   ), pool.query(
     `SELECT min(created_at) AS first_record_at, max(created_at) AS last_record_at,
             count(*)::int AS records, COALESCE(sum(GREATEST(play_time, 0)), 0)::bigint AS minutes
      FROM player_match_stats WHERE player_id = $1`, [playerId]
-  )]);
+  ), pool.query(`SELECT server_host, max(updated_at) AS last_event_at
+       FROM battle_rooms GROUP BY server_host`)]);
   const lifetime = coverage.rows[0] || {};
   return {
     ...summarizePlayerActivity(result.rows, window),
+    telemetry: telemetry.rows.map(row => ({host:row.server_host,lastEventAt:row.last_event_at})),
     coverage: { firstRecordAt: lifetime.first_record_at || null, lastRecordAt: lifetime.last_record_at || null,
       records: Number(lifetime.records || 0), minutes: Number(lifetime.minutes || 0) }
   };

@@ -1,3 +1,5 @@
+import { deviceLabel, auditClientAddress } from "./game-access.js";
+import { searchPlayers, playerTelegramBinding } from "./player-search.js";
 import { describeAuditItem, enrichAuditItems } from "./item-presentation.js";
 import { playerActivityWindow, loadPlayerActivity } from "./player-activity.js";
 import crypto from "node:crypto";
@@ -244,6 +246,9 @@ function eventFilterSql(url, { includePagination = true } = {}) {
       OR COALESCE(e.geo->>'country', '') ILIKE $${values.length}
       OR CAST(e.id AS text) ILIKE $${values.length}
       OR CAST(e.player_id AS text) ILIKE $${values.length}
+      OR EXISTS (SELECT 1 FROM launcher_telegram_bindings tg WHERE tg.player_id=e.player_id
+        AND (tg.telegram_username ILIKE replace($${values.length}, '@', '')
+          OR tg.telegram_user_id::text ILIKE $${values.length}))
     )`);
   }
   const exactFilters = [
@@ -288,7 +293,7 @@ function eventFilterSql(url, { includePagination = true } = {}) {
 
 // This panel tracks administration/economy, not combat telemetry.
 const JOURNAL_COMBAT_TYPES = "'battle_kill', 'battle_death', 'battle_shot', 'battle_move', 'battle_spawn', 'statistics_change'";
-const JOURNAL_EVENT_FILTER = `event_type NOT IN (${JOURNAL_COMBAT_TYPES})`;
+const JOURNAL_EVENT_FILTER = `event_type NOT IN (${JOURNAL_COMBAT_TYPES}) AND NOT audit_noise`;
 
 const EVENT_SELECT = `
   SELECT e.*, a.login AS admin_login, a.display_name AS admin_display_name,
@@ -418,7 +423,7 @@ async function playerDetails(pool, playerId, url) {
       [playerId, window.from, window.to]
     )
   ]);
-  return { profile: profile.rows[0], summary: { ...totals.rows[0], purchases: purchases.rows[0] }, activity, events };
+  return { telegram: await playerTelegramBinding(pool, playerId), profile: { ...profile.rows[0], last_ip_address: auditClientAddress(profile.rows[0].last_ip_address), device_label: deviceLabel(profile.rows[0].last_device) }, summary: { ...totals.rows[0], purchases: purchases.rows[0] }, activity, events };
 }
 
 async function clanDetails(pool, clanId, url) {
@@ -659,7 +664,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGe
                     array_agg(DISTINCT category ORDER BY category) AS categories
              FROM audit_events WHERE ${JOURNAL_EVENT_FILTER}`
           );
-          sendJson(res, { ok: true, panelApiVersion: 47, features: ["player_activity", "item_names", "player_search", "custom_period"], ...result.rows[0], roles: ADMIN_ROLES, permissions: ROLE_PERMISSIONS }, 200, cors.headers);
+          sendJson(res, { ok: true, panelApiVersion: 48, features: ["player_activity", "item_names", "player_search", "custom_period"], ...result.rows[0], roles: ADMIN_ROLES, permissions: ROLE_PERMISSIONS }, 200, cors.headers);
           return true;
         }
         if (path === "/admin/logs/stats" && req.method === "GET") {
@@ -685,17 +690,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGe
         }
 
         if (path === "/admin/logs/players" && req.method === "GET") {
-          const q = cleanText(url.searchParams.get("q"), 80);
-          if (!q) { sendJson(res, { ok: true, items: [] }, 200, cors.headers); return true; }
-          const numericId = /^\d+$/.test(q) && Number.isSafeInteger(Number(q)) ? Number(q) : 0;
-          const result = await pool.query(
-            `SELECT p.id, p.name, p.level, pa.last_seen_at
-             FROM players p LEFT JOIN player_activity pa ON pa.player_id = p.id
-             WHERE ($1::bigint > 0 AND p.id = $1) OR p.name ILIKE $2
-             ORDER BY (p.id = $1) DESC, (lower(p.name) = lower($3)) DESC, p.name, p.id LIMIT 30`,
-            [numericId, `%${q.replace(/[\\%_]/g, "\\$&")}%`, q]
-          );
-          sendJson(res, { ok: true, items: result.rows.map(row => ({ ...row, id: Number(row.id) })) }, 200, cors.headers);
+          sendJson(res, { ok: true, ...await searchPlayers(pool, url) }, 200, cors.headers);
           return true;
         }
 

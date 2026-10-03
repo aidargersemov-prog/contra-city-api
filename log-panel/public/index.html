@@ -7,9 +7,10 @@
   <meta name="theme-color" content="#111318">
   <title>Contra City — Логи игры</title>
   <meta name="description" content="История событий игроков Contra City">
-  <link rel="stylesheet" href="/styles.css?v=47">
+  <link rel="stylesheet" href="/styles.css?v=48">
+  <link rel="stylesheet" href="/theme.css?v=48">
   <script src="/config.js" defer></script>
-  <script src="/app.js?v=47" defer></script>
+  <script src="/app.js?v=48" defer></script>
 </head>
 <body>
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
@@ -18,7 +19,7 @@
     <div class="login-card">
       <div class="brand brand-login">
         <span class="brand-mark" aria-hidden="true">C</span>
-        <span><b>CONTRA CITY</b><small>Логи игры</small></span>
+        <span><b>CONTRA <span>CITY</span></b><small>Логи игры</small></span>
       </div>
       <h1>Вход</h1>
       <form id="login-form" autocomplete="on">
@@ -34,11 +35,11 @@
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">C</span>
-        <span><b>CONTRA CITY</b><small>Логи игры</small></span>
+        <span><b>CONTRA <span>CITY</span></b><small>Логи игры</small></span>
       </div>
       <nav class="main-nav" aria-label="Навигация">
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10 12 3l9 7v11h-6v-7H9v7H3Z"/></svg></span><span>Главная</span></button>
-        <button class="nav-item" data-view="players"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg></span><span>Игроки и плейтайм</span></button>
+        <button class="nav-item" data-view="players"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg></span><span>Игроки и Telegram</span></button>
         <button class="nav-item" data-view="events"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></span><span>Все события</span><em id="nav-event-count">0</em></button>
         <button class="nav-item" data-filter-categories="session" data-page-title="Входы и выходы"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4H4v16h6M13 8l4 4-4 4M8 12h13"/></svg></span><span>Входы и выходы</span></button>
         <button class="nav-item" data-filter-categories="economy,weapons,workshop,clothes,taunts,enhancers,abilities,inventory" data-page-title="Покупки и монеты"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h2l3 12h11l2-8H6M9 20h.01M18 20h.01"/></svg></span><span>Покупки и монеты</span></button>
@@ -50,7 +51,7 @@
         <button class="nav-item owner-only hidden" data-view="admins"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/></svg></span><span>Администраторы</span></button>
       </nav>
       <div class="sidebar-footer">
-        <span id="panel-version" class="sync-time">Панель v47</span>
+        <span id="panel-version" class="sync-time">Панель v48</span>
         <span id="sync-time" class="sync-time">Ещё не обновлено</span>
         <button id="logout-button" class="profile-button">
           <span class="avatar" id="admin-avatar">A</span>
@@ -63,10 +64,10 @@
     <main class="main-content">
       <header class="topbar">
         <button id="menu-button" class="icon-button menu-button" aria-label="Открыть меню">☰</button>
-        <h1 id="page-title">Главная</h1>
+        <div><h1 id="page-title">Главная</h1><p id="page-subtitle" class="page-subtitle">Действия игроков и изменения аккаунтов</p></div>
         <div class="topbar-actions">
           <button id="refresh-button" class="button secondary" title="Обновить">Обновить</button>
-          <button id="export-button" class="button secondary export-capability">Скачать логи</button>
+          <button id="export-button" class="button primary export-capability">Скачать логи</button>
         </div>
       </header>
 
@@ -111,7 +112,7 @@
 
       <div id="events-view" class="content-view hidden">
         <section class="event-toolbar">
-          <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Ник, ID игрока, клан или событие" autocomplete="off"></label>
+          <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Ник, ID игрока или @Telegram" autocomplete="off"></label>
           <button id="filter-button" class="button secondary"><span>Фильтры</span><em id="filter-count" class="filter-count hidden">0</em></button>
           <form id="player-lookup" class="player-lookup"><input name="playerId" type="number" min="1" step="1" required placeholder="ID игрока" aria-label="ID игрока"><button type="submit" class="button secondary">Открыть игрока</button></form>
         </section>
@@ -121,9 +122,9 @@
       </div>
 
       <div id="players-view" class="content-view hidden">
-        <form id="player-search-form" class="player-search-form"><label for="player-search">Найти игрока</label><div><input id="player-search" name="q" type="search" required maxlength="80" placeholder="Ник или ID игрока" autocomplete="off"><button class="button primary" type="submit">Найти</button></div></form>
-        <p class="activity-note">Откройте игрока, чтобы увидеть время в боях, активность по дням и историю за выбранный период.</p>
-        <div id="player-search-results" class="player-search-results" aria-live="polite"></div>
+        <form id="player-search-form" class="player-search-form"><label for="player-search">Найти игрока</label><div><input id="player-search" name="q" type="search" maxlength="80" placeholder="Ник, ID игрока, @Telegram или TG ID" autocomplete="off"><button class="button primary" type="submit">Найти</button></div></form>
+        <label class="linked-filter"><input id="player-linked-only" type="checkbox" checked> Только с Telegram-привязкой</label><span id="player-search-total" class="activity-note"></span><p class="activity-note">Пустой поиск показывает все привязки. Откройте игрока, чтобы увидеть время в боях, активность по дням и историю за выбранный период.</p>
+        <div id="player-search-results" class="player-search-results" aria-live="polite"></div><nav id="player-search-pages" class="pagination"></nav>
       </div>
       <div id="admins-view" class="content-view hidden">
         <section class="admin-layout">

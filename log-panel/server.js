@@ -40,11 +40,11 @@ function send(res, status, body, type, cache = "no-store") {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   if (url.pathname === "/health") {
-    send(res, 200, JSON.stringify({ ok: true, service: "contra-city-log-panel", version: 47, api: API_BASE_URL }), "application/json; charset=utf-8");
+    send(res, 200, JSON.stringify({ ok: true, service: "contra-city-log-panel", version: 48, api: API_BASE_URL }), "application/json; charset=utf-8");
     return;
   }
   if (url.pathname === "/config.js") {
-    const body = `window.__LOG_PANEL_CONFIG__=${JSON.stringify({ apiBaseUrl: API_BASE_URL, uiVersion: 47 })};`;
+    const body = `window.__LOG_PANEL_CONFIG__=${JSON.stringify({ apiBaseUrl: API_BASE_URL, uiVersion: 48 })};`;
     send(res, 200, body, "text/javascript; charset=utf-8");
     return;
   }
