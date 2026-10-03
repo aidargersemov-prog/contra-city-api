@@ -26,7 +26,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-02-weapon-balance-v361";
+const BUILD_ID = "battle-server-2026-10-03-magazine-timing-v363";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -3379,22 +3379,22 @@ const WEAPON_STAT_OVERRIDES = {
   },
   mg_ak103d_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 612, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_ak47b06: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 609, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_ak47b07: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 609, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
+    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
     smindam: 22, smaxdam: 34, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_ak47b08: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 609, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
+    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
   },
   mg_assaultrifle03: {
@@ -3424,12 +3424,12 @@ const WEAPON_STAT_OVERRIDES = {
   },
   mg_m4_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 612, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_m4d_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 612, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_ump45: {
@@ -11702,6 +11702,10 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
   forgetActorForRoom(room, actorId);
   maybeFinishZombieRound(room, `leave-${reason}`, options.channel || 0);
   if (options.postSummary !== false) postSessionBattleSummary(playerSession, reason);
+  postBattleEvent(playerSession, "leave", {
+    eventData: { reason, remainingPlayers: room.players.size },
+    playerData: { remote: playerSession.rinfo?.address || "", name: playerSession.playerName },
+  });
   resetSessionRoomProgress(playerSession);
   if (playerSession.room === room) playerSession.room = null;
   console.log(`[state] room player removed reason=${reason} room=${room.name} map=${room.map || DEFAULT_MAP} actor=${actorId} player=${playerSession.playerId || "unknown"} peers=${peers}`);
@@ -14091,7 +14095,10 @@ async function executeBattleEventJob(job) {
   } catch {
     result = null;
   }
-  emitAchievementEvents(job.session, result?.achievements);
+  if (!result || result.ok !== true || result.skipped) {
+    throw new Error(result?.skipped ? "storage-unavailable" : "invalid-acknowledgement");
+  }
+  emitAchievementEvents(job.session, result.achievements);
 }
 
 function drainBattleEventQueue() {
@@ -14106,6 +14113,11 @@ function drainBattleEventQueue() {
       .catch((error) => {
         battleApiStats.failed += 1;
         if (String(error?.message || "").includes("timeout")) battleApiStats.timedOut += 1;
+        // Bounded diagnostics; do not print payloads, auth keys or chat text.
+        if (battleApiStats.failed === 1 || battleApiStats.failed % 100 === 0) {
+          const status = /^status=\d{3}$/.test(String(error?.message)) ? error.message : "delivery-or-storage-failed";
+          console.warn(`[battle-audit] failed=${battleApiStats.failed} type=${job.type} reason=${status} queued=${battleEventQueueSize()}`);
+        }
         job.resolve(false);
       })
       .finally(() => {
