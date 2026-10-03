@@ -1,3 +1,4 @@
+import { playerActivityWindow, loadPlayerActivity } from "./player-activity.js";
 import crypto from "node:crypto";
 import {
   ADMIN_ROLES,
@@ -10,6 +11,7 @@ import {
 const SESSION_TTL_HOURS = Math.max(1, Math.min(72, Number(process.env.LOG_PANEL_SESSION_TTL_HOURS || 12)));
 const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_FAILURE_LIMIT = 8;
+const LOGIN_FAILURE_BUCKET_CAP = Math.max(128, Number(process.env.LOG_PANEL_LOGIN_BUCKET_CAP || 4096));
 const loginFailures = new Map();
 
 const ROLE_PERMISSIONS = Object.freeze({
@@ -113,10 +115,14 @@ function eventDto(row) {
     source: row.source,
     ipAddress: row.ip_address || "",
     device: row.device || "",
+    geo: row.geo || {},
     admin: row.admin_login
       ? { id: Number(row.admin_user_id), login: row.admin_login, displayName: row.admin_display_name || row.admin_login }
       : null,
-    metadata: row.metadata || {},
+    metadata: {
+      ...(row.metadata || {}),
+      ...(row.geo && Object.keys(row.geo).length ? { accessGeo: row.geo } : {}),
+    },
     reviewStatus: row.review_status,
     adminNote: row.admin_note || "",
     reviewedBy: row.reviewer_login || "",
@@ -181,6 +187,29 @@ function recordLoginFailure(key) {
   } else {
     bucket.count += 1;
   }
+  if (loginFailures.has(key)) {
+    const value = loginFailures.get(key);
+    loginFailures.delete(key);
+    loginFailures.set(key, value);
+  }
+  while (loginFailures.size > LOGIN_FAILURE_BUCKET_CAP) loginFailures.delete(loginFailures.keys().next().value);
+  return Number(loginFailures.get(key)?.count || 0);
+}
+
+function isDatabaseUnavailable(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const message = String(error?.message || "").toLowerCase();
+  return code === "DATABASE_BUSY" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code.startsWith("08") ||
+    ["57P01", "57P02", "57P03", "53300", "53400"].includes(code) ||
+    message.includes("database_busy") ||
+    message.includes("timeout") ||
+    message.includes("connection") ||
+    message.includes("connect econn") ||
+    message.includes("too many connections");
 }
 
 function addFilter(conditions, values, sql, value) {
@@ -204,6 +233,11 @@ function eventFilterSql(url, { includePagination = true } = {}) {
       OR e.clan_name ILIKE $${values.length}
       OR e.event_type ILIKE $${values.length}
       OR e.description ILIKE $${values.length}
+      OR e.ip_address ILIKE $${values.length}
+      OR e.device ILIKE $${values.length}
+      OR e.source ILIKE $${values.length}
+      OR COALESCE(e.geo->>'city', '') ILIKE $${values.length}
+      OR COALESCE(e.geo->>'country', '') ILIKE $${values.length}
       OR CAST(e.id AS text) ILIKE $${values.length}
       OR CAST(e.player_id AS text) ILIKE $${values.length}
     )`);
@@ -214,6 +248,7 @@ function eventFilterSql(url, { includePagination = true } = {}) {
     ["eventType", "e.event_type = ?", String],
     ["category", "e.category = ?", String],
     ["severity", "e.severity = ?", String],
+    ["source", "e.source = ?", String],
     ["reviewStatus", "e.review_status = ?", String]
   ];
   for (const [key, sql, convert] of exactFilters) {
@@ -231,14 +266,25 @@ function eventFilterSql(url, { includePagination = true } = {}) {
   if (categories.length) addFilter(conditions, values, "e.category = ANY(?::text[])", categories);
   const suspicious = url.searchParams.get("suspicious");
   if (suspicious === "true" || suspicious === "false") addFilter(conditions, values, "e.suspicious = ?", suspicious === "true");
+  const ipAddress = cleanText(url.searchParams.get("ipAddress"), 128);
+  const city = cleanText(url.searchParams.get("city"), 120);
+  const countryCode = cleanText(url.searchParams.get("countryCode"), 8).toUpperCase();
+  if (ipAddress) addFilter(conditions, values, "e.ip_address = ?", ipAddress);
+  if (city) addFilter(conditions, values, "COALESCE(e.geo->>'city', '') ILIKE ?", city);
+  if (countryCode) addFilter(conditions, values, "upper(COALESCE(e.geo->>'countryCode', '')) = ?", countryCode);
   const from = cleanText(url.searchParams.get("dateFrom") || dateFromPeriod(url.searchParams.get("period")), 40);
   const to = cleanText(url.searchParams.get("dateTo"), 40);
   if (from && !Number.isNaN(Date.parse(from))) addFilter(conditions, values, "e.created_at >= ?", new Date(from).toISOString());
   if (to && !Number.isNaN(Date.parse(to))) addFilter(conditions, values, "e.created_at <= ?", new Date(to).toISOString());
   const sinceId = numberId(url.searchParams.get("sinceId"));
   if (sinceId) addFilter(conditions, values, "e.id > ?", sinceId);
+  conditions.push(`e.${JOURNAL_EVENT_FILTER}`);
   return { where: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", values, includePagination };
 }
+
+// This panel tracks administration/economy, not combat telemetry.
+const JOURNAL_COMBAT_TYPES = "'battle_kill', 'battle_death', 'battle_shot', 'battle_move', 'battle_spawn', 'statistics_change'";
+const JOURNAL_EVENT_FILTER = `event_type NOT IN (${JOURNAL_COMBAT_TYPES})`;
 
 const EVENT_SELECT = `
   SELECT e.*, a.login AS admin_login, a.display_name AS admin_display_name,
@@ -276,7 +322,7 @@ async function exportEvents(pool, url) {
   const columns = [
     "id", "created_at", "player_name", "player_id", "clan_name", "clan_id", "event_type", "category",
     "severity", "suspicious", "description", "old_value", "new_value", "source", "ip_address", "device",
-    "admin_login", "review_status", "admin_note", "reviewer_login", "reviewed_at"
+    "geo", "admin_login", "review_status", "admin_note", "reviewer_login", "reviewed_at"
   ];
   return `\ufeff${columns.join(",")}\r\n${rows.rows.map((row) => columns.map((key) => csvCell(row[key])).join(",")).join("\r\n")}`;
 }
@@ -291,18 +337,18 @@ async function dashboardStats(pool, url) {
               count(DISTINCT clan_id)::int AS clans,
               count(*) FILTER (WHERE suspicious)::int AS suspicious,
               count(*) FILTER (WHERE review_status = 'violation')::int AS violations
-       FROM audit_events WHERE created_at >= $1`,
+       FROM audit_events WHERE ${JOURNAL_EVENT_FILTER} AND created_at >= $1`,
       [from]
     ),
     pool.query(
       `SELECT category, count(*)::int AS count
-       FROM audit_events WHERE created_at >= $1 GROUP BY category ORDER BY count DESC`,
+       FROM audit_events WHERE ${JOURNAL_EVENT_FILTER} AND created_at >= $1 GROUP BY category ORDER BY count DESC`,
       [from]
     ),
     pool.query(
       `SELECT date_trunc('hour', created_at) AS bucket, count(*)::int AS count,
               count(*) FILTER (WHERE suspicious)::int AS suspicious
-       FROM audit_events WHERE created_at >= $1
+       FROM audit_events WHERE ${JOURNAL_EVENT_FILTER} AND created_at >= $1
        GROUP BY bucket ORDER BY bucket`,
       [from]
     ),
@@ -311,12 +357,12 @@ async function dashboardStats(pool, url) {
               max(e.created_at) AS last_event_at, count(DISTINCT e.id)::int AS events
        FROM clans c
        LEFT JOIN clan_members cm ON cm.clan_id = c.id
-       LEFT JOIN audit_events e ON e.clan_id = c.id AND e.created_at >= $1
+       LEFT JOIN audit_events e ON e.clan_id = c.id AND e.${JOURNAL_EVENT_FILTER} AND e.created_at >= $1
        WHERE c.deleted_at IS NULL
        GROUP BY c.id ORDER BY events DESC, c.money DESC LIMIT 6`,
       [from]
     ),
-    pool.query(`${EVENT_SELECT} ORDER BY e.created_at DESC, e.id DESC LIMIT 8`)
+    pool.query(`${EVENT_SELECT} WHERE e.${JOURNAL_EVENT_FILTER} AND e.created_at >= $1 ORDER BY e.created_at DESC, e.id DESC LIMIT 8`, [from])
   ]);
   return {
     period,
@@ -332,7 +378,7 @@ async function dashboardStats(pool, url) {
 async function playerDetails(pool, playerId, url) {
   const profile = await pool.query(
     `SELECT p.id, p.name, p.level, p.exp, p.money, p.stats, p.created_at, p.updated_at,
-            pa.last_seen_at, pa.last_login_at, pa.last_logout_at, pa.last_ip_address, pa.last_device,
+            pa.last_seen_at, pa.last_login_at, pa.last_logout_at, pa.last_ip_address, pa.last_device, pa.last_geo,
             c.id AS clan_id, c.name AS clan_name, c.tag AS clan_tag
      FROM players p
      LEFT JOIN player_activity pa ON pa.player_id = p.id
@@ -342,21 +388,31 @@ async function playerDetails(pool, playerId, url) {
     [playerId]
   );
   if (!profile.rowCount) return null;
+  const window = playerActivityWindow(url.searchParams.get("period"));
   const eventUrl = new URL(url);
   eventUrl.searchParams.set("playerId", String(playerId));
-  eventUrl.searchParams.set("pageSize", String(Math.min(100, Number(url.searchParams.get("pageSize") || 50))));
-  const [events, totals, purchases] = await Promise.all([
-    listEvents(pool, eventUrl, 100),
+  eventUrl.searchParams.set("dateFrom", window.from);
+  eventUrl.searchParams.set("dateTo", window.to);
+  eventUrl.searchParams.set("pageSize", "20");
+  const [events, activity, totals, purchases] = await Promise.all([
+    listEvents(pool, eventUrl, 20),
+    loadPlayerActivity(pool, playerId, window),
     pool.query(
       `SELECT count(*)::int AS events,
               count(*) FILTER (WHERE suspicious)::int AS suspicious,
               count(*) FILTER (WHERE review_status = 'violation')::int AS violations
-       FROM audit_events WHERE player_id = $1`,
-      [playerId]
+       FROM audit_events WHERE ${JOURNAL_EVENT_FILTER} AND player_id = $1
+         AND created_at >= $2::timestamptz AND created_at <= $3::timestamptz`,
+      [playerId, window.from, window.to]
     ),
-    pool.query(`SELECT count(*)::int AS count, COALESCE(sum(price), 0)::bigint AS spent FROM purchase_history WHERE player_id = $1`, [playerId])
+    pool.query(
+      `SELECT count(*)::int AS count, COALESCE(sum(price), 0)::bigint AS spent
+       FROM purchase_history WHERE player_id = $1
+         AND created_at >= $2::timestamptz AND created_at <= $3::timestamptz`,
+      [playerId, window.from, window.to]
+    )
   ]);
-  return { profile: profile.rows[0], summary: { ...totals.rows[0], purchases: purchases.rows[0] }, events };
+  return { profile: profile.rows[0], summary: { ...totals.rows[0], purchases: purchases.rows[0] }, activity, events };
 }
 
 async function clanDetails(pool, clanId, url) {
@@ -491,7 +547,7 @@ async function manualAction(pool, admin, body, onPlayerChanged) {
   }
 }
 
-export function createAdminLogsApi({ getPool, readJsonBody, requestIp, onPlayerChanged } = {}) {
+export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGeo, onPlayerChanged } = {}) {
   return {
     async initialize() {
       const pool = getPool?.();
@@ -530,7 +586,21 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, onPlayerC
           const result = await pool.query("SELECT * FROM admin_users WHERE lower(login) = $1 AND active = TRUE LIMIT 1", [login]);
           const admin = result.rows[0];
           if (!admin || !verifyAdminPassword(body.password, admin.password_salt, admin.password_hash)) {
-            recordLoginFailure(key);
+            const failureCount = recordLoginFailure(key);
+            if (failureCount === LOGIN_FAILURE_LIMIT) {
+              await writeAuditEvent(pool, {
+                eventType: "admin_login_bruteforce",
+                category: "security",
+                severity: "critical",
+                suspicious: true,
+                description: `Многократные неуспешные попытки входа администратора: ${login || "unknown"}`,
+                source: "admin_panel",
+                ipAddress: cleanText(requestIp?.(req) || req.socket?.remoteAddress, 128),
+                device: cleanText(req.headers["user-agent"], 300),
+                geo: requestGeo?.(req) || {},
+                metadata: { login, failureCount },
+              });
+            }
             sendJson(res, { ok: false, error: "invalid_credentials" }, 401, cors.headers);
             return true;
           }
@@ -539,6 +609,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, onPlayerC
           const sessionId = crypto.randomUUID();
           const device = cleanText(req.headers["user-agent"], 300);
           const ipAddress = cleanText(requestIp?.(req) || req.socket?.remoteAddress, 128);
+          const geo = requestGeo?.(req) || {};
           await pool.query(
             `INSERT INTO admin_sessions (id, admin_user_id, token_hash, ip_address, device, expires_at)
              VALUES ($1, $2, $3, $4, $5, now() + ($6::int * interval '1 hour'))`,
@@ -552,6 +623,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, onPlayerC
             source: "admin_panel",
             ipAddress,
             device,
+            geo,
             adminUserId: admin.id
           });
           sendJson(res, { ok: true, token, expiresInSeconds: SESSION_TTL_HOURS * 3600, admin: publicAdmin(admin) }, 200, cors.headers);
@@ -579,7 +651,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, onPlayerC
           const result = await pool.query(
             `SELECT array_agg(DISTINCT event_type ORDER BY event_type) AS event_types,
                     array_agg(DISTINCT category ORDER BY category) AS categories
-             FROM audit_events`
+             FROM audit_events WHERE ${JOURNAL_EVENT_FILTER}`
           );
           sendJson(res, { ok: true, ...result.rows[0], roles: ADMIN_ROLES, permissions: ROLE_PERMISSIONS }, 200, cors.headers);
           return true;
@@ -717,9 +789,9 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, onPlayerC
           "invalid_player_id", "player_not_found", "invalid_amount", "catalog_item_not_found", "invalid_punishment", "unknown_action"
         ]);
         const message = error?.message || "admin_logs_failed";
-        const status = known.has(message) ? 400 : message.includes("unique") ? 409 : 500;
+        const status = isDatabaseUnavailable(error) ? 503 : known.has(message) ? 400 : message.includes("unique") ? 409 : 500;
         if (status === 500) console.error("[admin-logs] request failed", error);
-        sendJson(res, { ok: false, error: status === 500 ? "admin_logs_failed" : message }, status, cors.headers);
+        sendJson(res, { ok: false, error: status === 503 ? "service_unavailable" : (status === 500 ? "admin_logs_failed" : message) }, status, cors.headers);
         return true;
       }
     }

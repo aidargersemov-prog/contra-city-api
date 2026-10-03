@@ -5,7 +5,6 @@ export const ADMIN_ROLES = Object.freeze(["owner", "head_admin", "admin", "moder
 const SUSPICION_RULES = Object.freeze({
   purchase: { minutes: 5, count: 8 },
   weapon_upgrade: { minutes: 10, count: 5 },
-  daily_quest_claim: { minutes: 60, count: 4 },
   achievement_complete: { minutes: 10, count: 8 },
   balance_change: { minutes: 10, count: 6 },
   inventory_change: { minutes: 10, count: 10 },
@@ -29,6 +28,22 @@ function cleanId(value) {
 
 function cleanSeverity(value) {
   return ["info", "notice", "warning", "critical"].includes(value) ? value : "info";
+}
+
+function cleanGeo(value) {
+  const geo = value && typeof value === "object" ? value : {};
+  const cleaned = {
+    source: cleanText(geo.source, 32),
+    countryCode: cleanText(geo.countryCode, 8),
+    country: cleanText(geo.country, 120),
+    regionCode: cleanText(geo.regionCode, 32),
+    region: cleanText(geo.region, 120),
+    city: cleanText(geo.city, 120),
+    postalCode: cleanText(geo.postalCode, 32),
+    timeZone: cleanText(geo.timeZone, 80),
+    asn: Math.max(0, Number(geo.asn || 0) || 0),
+  };
+  return Object.values(cleaned).some((item) => item !== "" && item !== 0) ? cleaned : {};
 }
 
 async function automaticSuspicion(db, event) {
@@ -65,6 +80,7 @@ export async function writeAuditEvent(db, rawEvent = {}) {
     ipAddress: cleanText(rawEvent.ipAddress, 128),
     device: cleanText(rawEvent.device, 300),
     adminUserId: cleanId(rawEvent.adminUserId),
+    geo: cleanGeo(rawEvent.geo),
     metadata: rawEvent.metadata && typeof rawEvent.metadata === "object" ? rawEvent.metadata : {}
   };
 
@@ -84,23 +100,35 @@ export async function writeAuditEvent(db, rawEvent = {}) {
       kind: "seen",
       ipAddress: event.ipAddress,
       device: event.device,
+      geo: event.geo,
       source: event.source
     });
   }
 
   const result = await db.query(
-    `INSERT INTO audit_events (
+    `WITH resolved_clan AS (
+       SELECT COALESCE(
+         $3::bigint,
+         (SELECT cm.clan_id
+          FROM clan_members cm
+          JOIN clans c ON c.id = cm.clan_id AND c.deleted_at IS NULL
+          WHERE cm.player_id = $1
+          ORDER BY cm.joined_at DESC, cm.clan_id DESC
+          LIMIT 1)
+       ) AS clan_id
+     )
+     INSERT INTO audit_events (
        player_id, player_name, clan_id, clan_name, event_type, category, severity,
        suspicious, description, old_value, new_value, source, ip_address, device,
-       admin_user_id, metadata
+       admin_user_id, geo, metadata
      )
-     VALUES (
+     SELECT
        $1,
        COALESCE(NULLIF($2, ''), (SELECT name FROM players WHERE id = $1), ''),
-       $3,
-       COALESCE(NULLIF($4, ''), (SELECT name FROM clans WHERE id = $3), ''),
-       $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb
-     )
+       resolved_clan.clan_id,
+       COALESCE(NULLIF($4, ''), (SELECT name FROM clans WHERE id = resolved_clan.clan_id), ''),
+       $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb, $17::jsonb
+     FROM resolved_clan
      RETURNING id, created_at, suspicious, severity`,
     [
       event.playerId,
@@ -118,6 +146,7 @@ export async function writeAuditEvent(db, rawEvent = {}) {
       event.ipAddress,
       event.device,
       event.adminUserId,
+      JSON.stringify(event.geo),
       JSON.stringify(event.metadata)
     ]
   );
@@ -132,13 +161,13 @@ export async function touchPlayerActivity(db, rawActivity = {}) {
   await db.query(
     `INSERT INTO player_activity (
        player_id, last_seen_at, last_login_at, last_logout_at,
-       last_ip_address, last_device, last_source, updated_at
+       last_ip_address, last_device, last_source, last_geo, updated_at
      )
      VALUES (
        $1, now(),
        CASE WHEN $2 = 'login' THEN now() ELSE NULL END,
        CASE WHEN $2 = 'logout' THEN now() ELSE NULL END,
-       $3, $4, $5, now()
+       $3, $4, $5, $6::jsonb, now()
      )
      ON CONFLICT (player_id) DO UPDATE SET
        last_seen_at = now(),
@@ -147,13 +176,15 @@ export async function touchPlayerActivity(db, rawActivity = {}) {
        last_ip_address = CASE WHEN $3 <> '' THEN $3 ELSE player_activity.last_ip_address END,
        last_device = CASE WHEN $4 <> '' THEN $4 ELSE player_activity.last_device END,
        last_source = CASE WHEN $5 <> '' THEN $5 ELSE player_activity.last_source END,
+       last_geo = CASE WHEN $6::jsonb <> '{}'::jsonb THEN $6::jsonb ELSE player_activity.last_geo END,
        updated_at = now()`,
     [
       playerId,
       kind,
       cleanText(rawActivity.ipAddress, 128),
       cleanText(rawActivity.device, 300),
-      cleanText(rawActivity.source, 80)
+      cleanText(rawActivity.source, 80),
+      JSON.stringify(cleanGeo(rawActivity.geo))
     ]
   );
 }
