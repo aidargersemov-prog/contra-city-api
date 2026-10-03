@@ -1,3 +1,4 @@
+import { describeAuditItem, enrichAuditItems } from "./item-presentation.js";
 import { playerActivityWindow, loadPlayerActivity } from "./player-activity.js";
 import crypto from "node:crypto";
 import {
@@ -98,6 +99,7 @@ function publicAdmin(row) {
 }
 
 function eventDto(row) {
+  const item = describeAuditItem(row);
   return {
     id: Number(row.id),
     createdAt: row.created_at,
@@ -109,7 +111,9 @@ function eventDto(row) {
     category: row.category,
     severity: row.severity,
     suspicious: Boolean(row.suspicious),
-    description: row.description,
+    description: item ? `${item.action}: ${item.name}${row.event_type === "purchase" && row.metadata?.price != null ? ` · ${row.metadata.price} монет` : ""}` : row.description,
+    originalDescription: row.description,
+    item,
     oldValue: row.old_value,
     newValue: row.new_value,
     source: row.source,
@@ -307,7 +311,7 @@ async function listEvents(pool, url, maximum = 100) {
     values
   );
   const total = Number(count.rows[0]?.count || 0);
-  return { items: rows.rows.map(eventDto), total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) };
+  return { items: (await enrichAuditItems(pool, rows.rows)).map(eventDto), total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) };
 }
 
 function csvCell(value) {
@@ -324,7 +328,9 @@ async function exportEvents(pool, url) {
     "severity", "suspicious", "description", "old_value", "new_value", "source", "ip_address", "device",
     "geo", "admin_login", "review_status", "admin_note", "reviewer_login", "reviewed_at"
   ];
-  return `\ufeff${columns.join(",")}\r\n${rows.rows.map((row) => columns.map((key) => csvCell(row[key])).join(",")).join("\r\n")}`;
+  const enriched = await enrichAuditItems(pool, rows.rows);
+  const exportRows = enriched.map(row => ({ ...row, description: eventDto(row).description }));
+  return `\ufeff${columns.join(",")}\r\n${exportRows.map((row) => columns.map((key) => csvCell(row[key])).join(",")).join("\r\n")}`;
 }
 
 async function dashboardStats(pool, url) {
@@ -370,7 +376,7 @@ async function dashboardStats(pool, url) {
     categories: categories.rows,
     activity: activity.rows,
     clans: clans.rows.map((row) => ({ ...row, id: Number(row.id), money: Number(row.money), level: Number(row.level) })),
-    latest: latest.rows.map(eventDto),
+    latest: (await enrichAuditItems(pool, latest.rows)).map(eventDto),
     serverTime: new Date().toISOString()
   };
 }
@@ -388,11 +394,11 @@ async function playerDetails(pool, playerId, url) {
     [playerId]
   );
   if (!profile.rowCount) return null;
-  const window = playerActivityWindow(url.searchParams.get("period"));
+  const window = playerActivityWindow(url.searchParams.get("period"), new Date(), { dateFrom: url.searchParams.get("dateFrom"), dateTo: url.searchParams.get("dateTo") });
   const eventUrl = new URL(url);
   eventUrl.searchParams.set("playerId", String(playerId));
   eventUrl.searchParams.set("dateFrom", window.from);
-  eventUrl.searchParams.set("dateTo", window.to);
+  eventUrl.searchParams.set("dateTo", new Date(Date.parse(window.to) - 1).toISOString());
   eventUrl.searchParams.set("pageSize", "20");
   const [events, activity, totals, purchases] = await Promise.all([
     listEvents(pool, eventUrl, 20),
@@ -402,13 +408,13 @@ async function playerDetails(pool, playerId, url) {
               count(*) FILTER (WHERE suspicious)::int AS suspicious,
               count(*) FILTER (WHERE review_status = 'violation')::int AS violations
        FROM audit_events WHERE ${JOURNAL_EVENT_FILTER} AND player_id = $1
-         AND created_at >= $2::timestamptz AND created_at <= $3::timestamptz`,
+         AND created_at >= $2::timestamptz AND created_at < $3::timestamptz`,
       [playerId, window.from, window.to]
     ),
     pool.query(
       `SELECT count(*)::int AS count, COALESCE(sum(price), 0)::bigint AS spent
        FROM purchase_history WHERE player_id = $1
-         AND created_at >= $2::timestamptz AND created_at <= $3::timestamptz`,
+         AND created_at >= $2::timestamptz AND created_at < $3::timestamptz`,
       [playerId, window.from, window.to]
     )
   ]);
@@ -653,7 +659,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGe
                     array_agg(DISTINCT category ORDER BY category) AS categories
              FROM audit_events WHERE ${JOURNAL_EVENT_FILTER}`
           );
-          sendJson(res, { ok: true, ...result.rows[0], roles: ADMIN_ROLES, permissions: ROLE_PERMISSIONS }, 200, cors.headers);
+          sendJson(res, { ok: true, panelApiVersion: 47, features: ["player_activity", "item_names", "player_search", "custom_period"], ...result.rows[0], roles: ADMIN_ROLES, permissions: ROLE_PERMISSIONS }, 200, cors.headers);
           return true;
         }
         if (path === "/admin/logs/stats" && req.method === "GET") {
@@ -675,6 +681,21 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGe
             "content-length": String(Buffer.byteLength(csv))
           });
           res.end(csv);
+          return true;
+        }
+
+        if (path === "/admin/logs/players" && req.method === "GET") {
+          const q = cleanText(url.searchParams.get("q"), 80);
+          if (!q) { sendJson(res, { ok: true, items: [] }, 200, cors.headers); return true; }
+          const numericId = /^\d+$/.test(q) && Number.isSafeInteger(Number(q)) ? Number(q) : 0;
+          const result = await pool.query(
+            `SELECT p.id, p.name, p.level, pa.last_seen_at
+             FROM players p LEFT JOIN player_activity pa ON pa.player_id = p.id
+             WHERE ($1::bigint > 0 AND p.id = $1) OR p.name ILIKE $2
+             ORDER BY (p.id = $1) DESC, (lower(p.name) = lower($3)) DESC, p.name, p.id LIMIT 30`,
+            [numericId, `%${q.replace(/[\\%_]/g, "\\$&")}%`, q]
+          );
+          sendJson(res, { ok: true, items: result.rows.map(row => ({ ...row, id: Number(row.id) })) }, 200, cors.headers);
           return true;
         }
 
@@ -706,7 +727,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGe
              WHERE id = $1 RETURNING *`,
             [Number(reviewMatch[1]), status, cleanText(body.adminNote, 2000), admin.id]
           );
-          sendJson(res, result.rowCount ? { ok: true, event: eventDto(result.rows[0]) } : { ok: false, error: "event_not_found" }, result.rowCount ? 200 : 404, cors.headers);
+          sendJson(res, result.rowCount ? { ok: true, event: eventDto((await enrichAuditItems(pool, result.rows))[0]) } : { ok: false, error: "event_not_found" }, result.rowCount ? 200 : 404, cors.headers);
           return true;
         }
 
@@ -786,7 +807,7 @@ export function createAdminLogsApi({ getPool, readJsonBody, requestIp, requestGe
       } catch (error) {
         const known = new Set([
           "admin_password_length", "invalid_admin_account", "protected_admin_account", "invalid_admin_role",
-          "invalid_player_id", "player_not_found", "invalid_amount", "catalog_item_not_found", "invalid_punishment", "unknown_action"
+          "invalid_date_range", "invalid_player_id", "player_not_found", "invalid_amount", "catalog_item_not_found", "invalid_punishment", "unknown_action"
         ]);
         const message = error?.message || "admin_logs_failed";
         const status = isDatabaseUnavailable(error) ? 503 : known.has(message) ? 400 : message.includes("unique") ? 409 : 500;
