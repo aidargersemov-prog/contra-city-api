@@ -25,7 +25,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-01-developer-mythic-set-v150";
+const API_BUILD_ID = "railway-api-2026-10-03-magazine-timing-v153";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -1026,36 +1026,36 @@ const WEAPON_DAMAGE_BALANCE = Object.freeze({
   hg_makarov: { name: "Партизан / ГОСТ Партизан", near: 10, kind: "ranged" },
   hg_tt: { name: "Комиссар", near: 10, kind: "ranged" },
   hg_walther_r: { name: "Начальник", near: 12, kind: "ranged" },
-  hg_waltherp99: { name: "СверхДембель", near: 13, kind: "ranged" },
-  hg_sigsauerp226_b: { name: "Дружинник", near: 12, kind: "ranged", effect: 2 },
-  hg_glock_s: { name: "Политрук", near: 9, kind: "ranged" },
-  hg_glockb01_s: { name: "Спекулянт", near: 10, kind: "ranged", effect: 2 },
+  hg_waltherp99: { name: "СверхДембель", near: 22, kind: "ranged" },
+  hg_sigsauerp226_b: { name: "Дружинник", near: 19, kind: "ranged", effect: 2 },
+  hg_glock_s: { name: "Политрук", near: 10, kind: "ranged" },
+  hg_glockb01_s: { name: "Спекулянт", near: 11, kind: "ranged", effect: 2 },
   hg_desert: { name: "Сокол", near: 35, kind: "ranged" },
   hg_desertb01: { name: "Пустынный Орел", near: 38, kind: "ranged" },
   hg_usp: { name: "Скиф", near: 13, kind: "ranged", effect: 3 },
   hg_taurus: { name: "Палач", near: 42, kind: "ranged" },
-  mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 8, kind: "ranged" },
-  mg_m16: { name: "ММ 16", near: 9, kind: "ranged" },
-  mg_ak103: { name: "Кладенец", near: 10, kind: "ranged" },
-  mg_m4: { name: "Рык", near: 12, kind: "ranged" },
-  mg_ak103_o: { name: "Полкан", near: 13, kind: "ranged" },
-  mg_m4_o: { name: "Бюрократ", near: 12, kind: "ranged" },
-  mg_m4d_o: { name: "Наводка", near: 13, kind: "ranged" },
-  mg_ak103d_o: { name: "Побарабанщик", near: 13, kind: "ranged" },
-  mg_ump45: { name: "Убойник", near: 13, kind: "ranged" },
-  mg_ump45d_o: { name: "Провокатор", near: 14, kind: "ranged" },
-  mg_ump45d2_o: { name: "Ликвидатор", near: 14, kind: "ranged" },
-  mg_ak47b06: { name: "Засад", near: 15, kind: "ranged" },
-  mg_ak47b08: { name: "Звездочет", near: 15, kind: "ranged" },
-  mg_ak47b07: { name: "Смертобой", near: 15, kind: "ranged" },
-  mg_aug3_o: { name: "Буран", near: 15, kind: "ranged" },
-  mg_aug2_o: { name: "Вектор", near: 15, kind: "ranged" },
-  mg_aug4_o: { name: "Кобра", near: 16, kind: "ranged", effect: 2 },
-  mg_aug1_o: { name: "Большевик", near: 17, kind: "ranged", effect: 3 },
-  mg_aug5_o: { name: "Повстанец", near: 17, kind: "ranged", effect: 1 },
+  mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 9, kind: "ranged" },
+  mg_m16: { name: "ММ 16", near: 10, kind: "ranged" },
+  mg_ak103: { name: "Кладенец", near: 11, kind: "ranged" },
+  mg_m4: { name: "Рык", near: 13, kind: "ranged" },
+  mg_ak103_o: { name: "Полкан", near: 15, kind: "ranged" },
+  mg_m4_o: { name: "Бюрократ", near: 13, kind: "ranged" },
+  mg_m4d_o: { name: "Наводка", near: 16, kind: "ranged" },
+  mg_ak103d_o: { name: "Побарабанщик", near: 16, kind: "ranged" },
+  mg_ump45: { name: "Убойник", near: 14, kind: "ranged" },
+  mg_ump45d_o: { name: "Провокатор", near: 15, kind: "ranged" },
+  mg_ump45d2_o: { name: "Ликвидатор", near: 15, kind: "ranged" },
+  mg_ak47b06: { name: "Засад", near: 18, kind: "ranged" },
+  mg_ak47b08: { name: "Звездочет", near: 18, kind: "ranged" },
+  mg_ak47b07: { name: "Смертобой", near: 18, kind: "ranged" },
+  mg_aug3_o: { name: "Буран", near: 17, kind: "ranged" },
+  mg_aug2_o: { name: "Вектор", near: 17, kind: "ranged" },
+  mg_aug4_o: { name: "Кобра", near: 17, kind: "ranged", effect: 2 },
+  mg_aug1_o: { name: "Большевик", near: 18, kind: "ranged", effect: 3 },
+  mg_aug5_o: { name: "Повстанец", near: 18, kind: "ranged", effect: 1 },
   mg_assaultrifle03: { name: "Барс", near: 14, kind: "ranged" },
-  mg_assaultrifle02: { name: "Адвокат", near: 15, kind: "ranged" },
-  mg_ump45vkks_o: { name: "Вождь", near: 17, kind: "ranged" },
+  mg_assaultrifle02: { name: "Адвокат", near: 18, kind: "ranged" },
+  mg_ump45vkks_o: { name: "Вождь", near: 19, kind: "ranged" },
   gg_m134: { name: "Стаханов / ГОСТ Стаханов", near: 12, kind: "ranged" },
   gg_n2: { name: "Берия", near: 13, kind: "ranged" },
   gg_m249: { name: "Дон", near: 15, kind: "ranged" },
@@ -1086,13 +1086,13 @@ const WEAPON_DAMAGE_BALANCE = Object.freeze({
   sr_svd: { name: "Компостер / ГОСТ Компостер", near: 23, kind: "sniper" },
   sr_steyr: { name: "Серп", near: 64, kind: "sniper" },
   sr_steyrb01: { name: "Сторож", near: 64, kind: "sniper" },
-  sr_hk417_d: { name: "Дальнобойщик", near: 25, kind: "sniper" },
+  sr_hk417_d: { name: "Дальнобойщик", near: 40, kind: "sniper" },
   sr_arctic: { name: "Писец", near: 87, kind: "sniper" },
-  sr_arcticb01: { name: "Крик", near: 87, kind: "sniper" },
-  sr_m110_b: { name: "Клык", near: 25, kind: "sniper", effect: 2 },
+  sr_arcticb01: { name: "Крик", near: 89, kind: "sniper" },
+  sr_m110_b: { name: "Клык", near: 35, kind: "sniper", effect: 2 },
   sr_wildcat1: { name: "Росомаха", near: 110, kind: "sniper" },
   sr_wildcat2: { name: "Шершень", near: 108, kind: "sniper", effect: 3 },
-  sr_vintorez: { name: "Вымпел", near: 111, kind: "sniper" },
+  sr_vintorez: { name: "Вымпел", near: 115, kind: "sniper" },
   sr_sniperrifle03: { name: "Анаконда", near: 125, kind: "sniper" },
 });
 
@@ -1350,22 +1350,22 @@ const canonicalShopWeaponStats = {
   },
   mg_ak103d_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_ak47b06: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_ak47b07: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
+    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
     smindam: 22, smaxdam: 34, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_ak47b08: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
+    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
   },
   mg_assaultrifle03: {
@@ -1395,12 +1395,12 @@ const canonicalShopWeaponStats = {
   },
   mg_m4_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_m4d_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_ump45: {
@@ -1482,7 +1482,7 @@ const canonicalShopWeaponStats = {
 
   mg_assaultrifle02: { rap: 121, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_ump45vkks_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
-  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 105, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
+  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 8, ammo: 35, ammo_tot: 105, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_aug5_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
   mg_aug4_o: { rap: 112, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
 
@@ -3446,6 +3446,8 @@ function normalizeInventoryItem(item) {
         const ammunition = upgradedWeaponItem(canonical);
         upgraded.ammo = ammunition.ammo;
         upgraded.ammo_tot = ammunition.ammo_tot;
+        // Rebase the critical chance while retaining the workshop bonus.
+        upgraded.krit = ammunition.krit;
       }
       // Rebase only damage fields of saved upgrades onto the new damage table.
       const damageUpgrade = upgradedWeaponItem(canonical);
@@ -14442,7 +14444,7 @@ async function recordBattleEvent(event) {
          room_settings = EXCLUDED.room_settings,
          updated_at = now()
        RETURNING id`,
-      [roomName, mapName, mode, maxPlayers, Boolean(event.friendlyFire), type === "leave" ? "closed" : "running", playerId, serverHost, serverPort, roomSettings]
+      [roomName, mapName, mode, maxPlayers, Boolean(event.friendlyFire), type === "leave" && Number(details.remainingPlayers || 0) === 0 ? "closed" : "running", playerId, serverHost, serverPort, roomSettings]
     );
 
     const roomId = room.rows[0].id;
@@ -14473,7 +14475,7 @@ async function recordBattleEvent(event) {
       await client.query(
         `INSERT INTO battle_chat_events (room_id, player_id, actor_id, channel, message)
          VALUES ($1, $2, $3, $4, $5)`,
-        [roomId, playerId, actorId, Number(event.channel || 0), String(event.message).slice(0, 500)]
+        [roomId, playerId, actorId, Number(event.channel ?? details.type ?? 253), String(event.message).slice(0, 500)]
       );
     } else if (type === "player_report") {
       const targetPlayerId = Number(event.targetPlayerId || details.targetPlayerId || 0);
@@ -14534,50 +14536,31 @@ async function recordBattleEvent(event) {
         metadata: { roomName, mapName, mode, actorId, serverPort }
       });
     }
-    if (type === "summary") {
+    // Combat counters and rewards are persisted above by recordStatEvent.
+    // The administrative journal intentionally contains no per-kill/death,
+    // shot, movement, spawn or match-summary entries.
+    if (type === "chat" && event.message) {
       await writeAuditEvent(client, {
         playerId,
         playerName: event.playerName,
-        eventType: "statistics_change",
-        category: "battle",
-        description: `Обновлена статистика матча на карте ${mapName}`,
-        newValue: details,
+        eventType: "battle_chat",
+        category: "chat",
+        description: String(event.message).slice(0, 500),
         source: "battle_server",
-        metadata: { roomName, mapName, mode }
+        metadata: { roomName, mapName, mode, actorId, channel: Number(event.channel ?? details.type ?? 253), team, serverHost, serverPort }
       });
     }
-    if (type === "death" || type === "score") {
-      const killerId = Number(event.killerPlayerId || details.killerPlayerId || 0);
-      const victimId = Number(event.victimPlayerId || details.victimPlayerId || 0);
-      const combatValue = {
-        roomName,
-        mapName,
-        mode,
-        weaponId: Number(event.weaponId || details.weaponId || 0),
-        hitZone: Number(event.hitZone || details.hitZone || 0),
-        killerPlayerId: killerId,
-        victimPlayerId: victimId
-      };
-      if (killerId > 0 && killerId !== victimId) {
-        await writeAuditEvent(client, {
-          playerId: killerId,
-          eventType: "battle_kill",
-          category: "battle",
-          description: `Убийство игрока #${victimId} на карте ${mapName}`,
-          newValue: combatValue,
-          source: "battle_server"
-        });
-      }
-      if (victimId > 0) {
-        await writeAuditEvent(client, {
-          playerId: victimId,
-          eventType: "battle_death",
-          category: "battle",
-          description: `Смерть от игрока #${killerId} на карте ${mapName}`,
-          newValue: combatValue,
-          source: "battle_server"
-        });
-      }
+    if (type === "player_report") {
+      await writeAuditEvent(client, {
+        playerId,
+        playerName: event.playerName,
+        eventType: "player_report",
+        category: "moderation",
+        description: `Жалоба на игрока #${Number(event.targetPlayerId || details.targetPlayerId || 0)}`,
+        source: "battle_server",
+        severity: "notice",
+        metadata: { roomName, mapName, targetPlayerId: Number(event.targetPlayerId || details.targetPlayerId || 0), reason: event.reportReason || details.reason, details: event.reportDetails || details.details }
+      });
     }
 
     await client.query("COMMIT");
