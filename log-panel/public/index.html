@@ -7,9 +7,9 @@
   <meta name="theme-color" content="#111318">
   <title>Contra City — Логи игры</title>
   <meta name="description" content="История событий игроков Contra City">
-  <link rel="stylesheet" href="/styles.css?v=46">
+  <link rel="stylesheet" href="/styles.css?v=47">
   <script src="/config.js" defer></script>
-  <script src="/app.js?v=46" defer></script>
+  <script src="/app.js?v=47" defer></script>
 </head>
 <body>
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
@@ -38,6 +38,7 @@
       </div>
       <nav class="main-nav" aria-label="Навигация">
         <button class="nav-item active" data-view="dashboard"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10 12 3l9 7v11h-6v-7H9v7H3Z"/></svg></span><span>Главная</span></button>
+        <button class="nav-item" data-view="players"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="7" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg></span><span>Игроки и плейтайм</span></button>
         <button class="nav-item" data-view="events"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></span><span>Все события</span><em id="nav-event-count">0</em></button>
         <button class="nav-item" data-filter-categories="session" data-page-title="Входы и выходы"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4H4v16h6M13 8l4 4-4 4M8 12h13"/></svg></span><span>Входы и выходы</span></button>
         <button class="nav-item" data-filter-categories="economy,weapons,workshop,clothes,taunts,enhancers,abilities,inventory" data-page-title="Покупки и монеты"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h2l3 12h11l2-8H6M9 20h.01M18 20h.01"/></svg></span><span>Покупки и монеты</span></button>
@@ -49,6 +50,7 @@
         <button class="nav-item owner-only hidden" data-view="admins"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/></svg></span><span>Администраторы</span></button>
       </nav>
       <div class="sidebar-footer">
+        <span id="panel-version" class="sync-time">Панель v47</span>
         <span id="sync-time" class="sync-time">Ещё не обновлено</span>
         <button id="logout-button" class="profile-button">
           <span class="avatar" id="admin-avatar">A</span>
@@ -68,6 +70,7 @@
         </div>
       </header>
 
+      <div id="compatibility-notice" class="compatibility-notice hidden" role="status"></div>
       <div id="dashboard-view" class="content-view">
         <section id="stat-grid" class="stat-grid" aria-label="Статистика"></section>
 
@@ -117,6 +120,11 @@
         <nav id="pagination" class="pagination" aria-label="Страницы"></nav>
       </div>
 
+      <div id="players-view" class="content-view hidden">
+        <form id="player-search-form" class="player-search-form"><label for="player-search">Найти игрока</label><div><input id="player-search" name="q" type="search" required maxlength="80" placeholder="Ник или ID игрока" autocomplete="off"><button class="button primary" type="submit">Найти</button></div></form>
+        <p class="activity-note">Откройте игрока, чтобы увидеть время в боях, активность по дням и историю за выбранный период.</p>
+        <div id="player-search-results" class="player-search-results" aria-live="polite"></div>
+      </div>
       <div id="admins-view" class="content-view hidden">
         <section class="admin-layout">
           <article class="panel">

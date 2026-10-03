@@ -1,3 +1,4 @@
+const PANEL_VERSION = 47;
 const CONFIG = window.__LOG_PANEL_CONFIG__ || {};
 const API_BASE = String(CONFIG.apiBaseUrl || "https://contra-city-api-production-fedf.up.railway.app").replace(/\/+$/, "");
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -93,6 +94,8 @@ async function api(path, options = {}) {
 
 function errorLabel(code) {
   const labels = {
+    invalid_date_range: "Выберите корректные даты: не более 92 дней, без будущих дат",
+    player_not_found: "Игрок с таким ID не найден",
     invalid_credentials: "Неверный логин или пароль",
     login_rate_limited: "Слишком много попыток. Подождите 15 минут",
     origin_not_allowed: "Сайт не подключён к серверу",
@@ -148,6 +151,7 @@ function eventDescription(event) {
     const access = [place, event.ipAddress].filter(Boolean).join(" · ");
     return access ? `${event.description} · ${access}` : event.description;
   }
+  if (event.item) return `${event.item.action}: ${event.item.name}`;
   if (event.eventType === "player_state_change") {
     const labels = {
       balance: "баланс", experience: "опыт", level: "уровень", statistics: "статистика",
@@ -171,7 +175,7 @@ function renderEventRows(events, compact = false) {
       <time class="event-time" datetime="${escapeHtml(event.createdAt)}">${escapeHtml(formatDate(event.createdAt, true))}</time>
       <span class="event-person" ${event.playerId ? `data-player-id="${event.playerId}" role="button" tabindex="0"` : ""}><b>${escapeHtml(event.playerName || "Игра")}</b><small>${event.playerId ? `ID ${event.playerId}` : "Система"}${event.clanName ? ` · ${escapeHtml(event.clanName)}` : ""}</small></span>
       <span class="event-type">${escapeHtml(type)}</span>
-      <span class="event-description" title="${escapeHtml(eventDescription(event))}">${escapeHtml(eventDescription(event))}${eventValue(event) ? ` <strong class="event-value">${escapeHtml(eventValue(event))}</strong>` : ""}</span>
+      <span class="event-description" title="${escapeHtml(eventDescription(event))}">${escapeHtml(eventDescription(event))}${event.item ? `<small class="item-row-meta">${escapeHtml(event.item.typeLabel)} · ${escapeHtml(event.item.key)}</small>` : ""}${eventValue(event) ? ` <strong class="event-value">${escapeHtml(eventValue(event))}</strong>` : ""}</span>
       <span class="event-status status-${escapeHtml(status)}">${escapeHtml(reviewLabel(status))}</span>
     </article>`;
   }).join("");
@@ -235,7 +239,11 @@ async function loadInitialData() {
 
 async function loadMeta() {
   state.meta = await api("/admin/logs/meta");
-  const categories = state.meta.categories || state.meta.categories || [];
+  $("#panel-version").textContent = `Панель v${PANEL_VERSION} · API ${state.meta.panelApiVersion ? `v${state.meta.panelApiVersion}` : "старая версия"}`;
+  const incompatible = Number(state.meta.panelApiVersion || 0) < PANEL_VERSION;
+  $("#compatibility-notice").classList.toggle("hidden", !incompatible);
+  $("#compatibility-notice").textContent = "API панели не обновлён: названия предметов и статистика могут быть недоступны. Нужна версия API панели v47.";
+  const categories = state.meta.categories || [];
   $("#filter-category").innerHTML = `<option value="">Все категории</option>${categories.map((item) => `<option value="${escapeHtml(item)}">${escapeHtml(CATEGORY_LABELS[item] || item)}</option>`).join("")}`;
   const types = state.meta.event_types || [];
   $("#filter-event-type").innerHTML = `<option value="">Все события</option>${types.map((item) => `<option value="${escapeHtml(item)}">${escapeHtml(TYPE_LABELS[item] || item)}</option>`).join("")}`;
@@ -328,6 +336,10 @@ function formatPlaytime(minutes) {
 
 function renderPlayerActivity(activity) {
   if (!activity) return `<p class="activity-note">Статистика времени недоступна. Обновите API панели.</p>`;
+  if (!activity.records) {
+    const known = activity.coverage?.records > 0;
+    return `<div class="activity-no-data"><strong>Нет записей о времени за этот период</strong><p>${known ? `Последний сохранённый итог: ${escapeHtml(formatDate(activity.coverage.lastRecordAt))}. Выберите другой период.` : "По этому игроку ещё не сохранено ни одного итога боя. Рассчитать плейтайм по одним входам в игру нельзя."}</p><small>Это отсутствие данных, а не подтверждённые 0 минут.</small></div>`;
+  }
   const modeNames = {1:"Каждый за себя",2:"Командный бой",4:"Захват флага",8:"Контроль точек",16:"Оборона",32:"Сопровождение",64:"Зомби",128:"Экспедиция"};
   const peak = Math.max(1, ...activity.daily.map(day => day.minutes));
   const ranking = (rows, modes = false) => rows.length ? rows.map(row => `<div class="activity-ranking-row"><span>${escapeHtml(modes ? modeNames[row.name] || `Режим ${row.name}` : row.name)}</span><b>${formatPlaytime(row.minutes)}</b></div>`).join("") : `<p class="activity-note">Нет сохранённых итогов боя за период</p>`;
@@ -335,21 +347,25 @@ function renderPlayerActivity(activity) {
     <h3 class="section-title">Активность по дням · МСК</h3>
     <div class="player-daily">${activity.daily.map(day => `<div class="player-day"><time datetime="${day.date}">${escapeHtml(day.date.slice(8) + "." + day.date.slice(5,7))}</time><div class="player-day-track"><i style="width:${Math.max(0,day.minutes / peak * 100)}%"></i></div><b>${formatPlaytime(day.minutes)}</b></div>`).join("")}</div>
     <div class="activity-breakdowns"><section><h3 class="section-title">Карты</h3>${ranking(activity.maps)}</section><section><h3 class="section-title">Режимы</h3>${ranking(activity.modes,true)}</section></div>
-    <p class="activity-note">По сохранённым итогам боя, с округлением вверх до минуты. Время относится к дате записи итога; текущий бой и время в меню не включены.</p>`;
+    <p class="activity-note">Последний сохранённый итог: ${escapeHtml(formatDate(activity.coverage?.lastRecordAt))}.<br>По сохранённым итогам боя, с округлением вверх до минуты. Время относится к дате записи итога; текущий бой и время в меню не включены.</p>`;
 }
 
-async function openPlayer(playerId, period = "7d", page = 1) {
+async function openPlayer(playerId, period = "7d", page = 1, range = {}) {
   $("#detail-modal").classList.remove("event-inspector");
   openModalLoading("Статистика игрока");
   const revision = state.detailRevision;
   try {
-    const data = await api(`/admin/logs/players/${playerId}`, { query: { period, page } });
+    const data = await api(`/admin/logs/players/${playerId}`, { query: { period, page, ...range } });
     if (!$("#detail-modal").open || revision !== state.detailRevision || !state.admin) return;
     const p = data.profile;
+    state.playerDetail = data;
     const selectedPeriod = data.activity?.period || period;
     showModal(`<div class="modal-header"><div><h2>${escapeHtml(p.name)}</h2><p class="modal-subtitle">Игрок #${p.id}</p></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
-      <div class="player-period-row"><label for="player-period">Период статистики</label><select id="player-period" data-profile-id="${p.id}">${[["1d","Сегодня"],["7d","Последние 7 дней"],["30d","Последние 30 дней"]].map(([value,label])=>`<option value="${value}" ${selectedPeriod===value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+      <div class="player-period-row"><label for="player-period">Период статистики</label><select id="player-period" data-profile-id="${p.id}">${[["1d","Сегодня"],["7d","Последние 7 дней"],["week","Эта неделя"],["last-week","Прошлая неделя"],["30d","Последние 30 дней"],["custom","Выбрать даты"]].map(([value,label])=>`<option value="${value}" ${selectedPeriod===value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+      <form id="player-date-form" class="player-date-form ${selectedPeriod === "custom" ? "" : "hidden"}" data-profile-id="${p.id}"><label>С<input name="dateFrom" type="date" required value="${escapeHtml(data.activity?.dateFrom || "")}"></label><label>По<input name="dateTo" type="date" required value="${escapeHtml(data.activity?.dateTo || "")}"></label><button type="submit" class="button secondary">Применить</button><p class="form-error" id="player-date-error"></p></form>
+      <p class="period-caption">${data.activity ? `${escapeHtml(data.activity.dateFrom || "")} — ${escapeHtml(data.activity.dateTo || "")} · время по Москве` : ""}</p>
       ${renderPlayerActivity(data.activity)}
+      <div class="player-period-totals"><span>Событий: <b>${formatNumber(data.events.total)}</b></span><span>Покупок: <b>${formatNumber(data.summary?.purchases?.count)}</b></span><span>Подозрительных: <b>${formatNumber(data.summary?.suspicious)}</b></span></div>
       <h3 class="section-title">Профиль сейчас</h3>
       <div class="profile-summary"><div class="mini-stat"><span>УРОВЕНЬ</span><b>${formatNumber(p.level)}</b></div><div class="mini-stat"><span>ОПЫТ</span><b>${formatNumber(p.exp)}</b></div><div class="mini-stat"><span>БАЛАНС</span><b>${formatNumber(p.money)}</b></div><div class="mini-stat"><span>КЛАН</span><b>${escapeHtml(p.clan_name || "—")}</b></div><div class="mini-stat"><span>ПОСЛЕДНИЙ ВХОД</span><b>${escapeHtml(formatDate(p.last_login_at,true))}</b></div></div>
       <details class="raw-details"><summary>Входы и устройство</summary><div class="detail-grid"><div class="detail-box"><span>ПОСЛЕДНИЙ ВЫХОД</span><code>${escapeHtml(formatDate(p.last_logout_at))}</code></div><div class="detail-box"><span>ПОСЛЕДНЯЯ АКТИВНОСТЬ</span><code>${escapeHtml(formatDate(p.last_seen_at))}</code></div><div class="detail-box"><span>IP</span><code>${escapeHtml(p.last_ip_address || "нет данных")}</code></div><div class="detail-box"><span>УСТРОЙСТВО</span><code>${escapeHtml(p.last_device || "нет данных")}</code></div></div></details>
@@ -388,6 +404,7 @@ async function openEvent(eventId) {
   const canReview = state.admin.permissions.includes("review");
   showModal(`<div class="modal-header"><div><h2>${escapeHtml(TYPE_LABELS[event.eventType] || event.eventType)}</h2><p class="modal-subtitle">Событие #${event.id}</p></div><button class="modal-close" aria-label="Закрыть">×</button></div><div class="modal-body">
     <div class="profile-summary"><div class="mini-stat"><span>ИГРОК</span><b>${escapeHtml(event.playerName || "—")}</b></div><div class="mini-stat"><span>ID</span><b>${event.playerId || "—"}</b></div><div class="mini-stat"><span>КЛАН</span><b>${escapeHtml(event.clanName || "—")}</b></div><div class="mini-stat"><span>ВАЖНОСТЬ</span><b>${escapeHtml({info:"Обычное",notice:"Важное",warning:"Предупреждение",critical:"Критическое"}[event.severity] || event.severity)}</b></div><div class="mini-stat"><span>ВРЕМЯ</span><b>${escapeHtml(formatDate(event.createdAt, true))}</b></div></div>
+    ${event.item ? `<section class="event-item-card"><span>${escapeHtml(event.item.typeLabel)} · ${escapeHtml(event.item.action)}</span><h3>${escapeHtml(event.item.name)}</h3><small>ID ${escapeHtml(event.item.key)}${event.item.systemName ? ` · ${escapeHtml(event.item.systemName)}` : ""}</small>${!event.item.resolved ? '<p class="activity-note">Название отсутствует в записи, каталоге и локализации клиента.</p>' : ""}</section>` : ""}
     <p class="event-full-description">${escapeHtml(event.description)}</p>
     <dl class="event-facts">${Object.entries({
       "Источник": {battle_server:"Сервер игры",game_api:"Игровой API",admin_panel:"Администрация"}[event.source] || event.source,
@@ -405,6 +422,20 @@ function openModalLoading(title) { showModal(`<div class="modal-header"><h2>${es
 function showModalError(message) { showModal(`<div class="modal-header"><h2>Ошибка</h2><button class="modal-close">×</button></div><div class="modal-body"><div class="empty-state">${escapeHtml(message)}</div></div>`); }
 function showModal(html) { state.detailRevision = (state.detailRevision || 0) + 1; $("#detail-content").innerHTML = `<div class="modal-shell">${html}</div>`; const modal = $("#detail-modal"); if (!modal.open) modal.showModal(); }
 
+async function searchPlayers() {
+  const q = $("#player-search").value.trim();
+  if (!q) return;
+  const revision = state.playerSearchRevision = (state.playerSearchRevision || 0) + 1;
+  $("#player-search-results").innerHTML = '<div class="empty-state">Поиск…</div>';
+  try {
+    const data = await api("/admin/logs/players", {query: {q}});
+    if (state.playerSearchRevision !== revision || !state.admin) return;
+    $("#player-search-results").innerHTML = data.items.length ? data.items.map(player => `<button class="player-result" data-player-id="${player.id}"><span class="avatar">${escapeHtml(String(player.name || "?")[0])}</span><span><b>${escapeHtml(player.name)}</b><small>ID ${player.id} · Уровень ${formatNumber(player.level)}</small></span><span>Открыть статистику</span></button>`).join("") : '<div class="empty-state">Игрок не найден. Проверьте ник или ID.</div>';
+  } catch (error) {
+    if (state.playerSearchRevision === revision) $("#player-search-results").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 async function loadAdmins() {
   try {
     const data = await api("/admin/logs/admins");
@@ -419,9 +450,10 @@ function setActiveNav(activeNode) {
 function switchView(view, options = {}) {
   state.eventRequestId += 1;
   state.currentView = view;
+  $("#export-button").classList.toggle("hidden", view === "players" || view === "admins" || !state.admin?.permissions.includes("export"));
   $$(".content-view").forEach((node) => node.classList.add("hidden"));
   $(`#${view}-view`)?.classList.remove("hidden");
-  const titles = { dashboard: "Главная", events: "Все события", admins: "Администраторы" };
+  const titles = { dashboard: "Главная", players: "Игроки и плейтайм", events: "Все события", admins: "Администраторы" };
   const activeNode = options.nav || $(`.nav-item[data-view="${view}"]`);
   setActiveNav(activeNode);
   $("#page-title").textContent = options.title || titles[view] || titles.dashboard;
@@ -466,17 +498,30 @@ async function exportCsv() {
 }
 
 function bindUi() {
+  $("#player-search-form").addEventListener("submit", event => { event.preventDefault(); searchPlayers(); });
+  $("#detail-modal").addEventListener("submit", event => {
+    if (event.target.id !== "player-date-form") return;
+    event.preventDefault();
+    const range = Object.fromEntries(new FormData(event.target));
+    const days = (Date.parse(range.dateTo) - Date.parse(range.dateFrom)) / 86400000 + 1;
+    if (!Number.isFinite(days) || days < 1 || days > 92) { $("#player-date-error").textContent = "Выберите от 1 до 92 дней"; return; }
+    openPlayer(event.target.dataset.profileId, "custom", 1, range);
+  });
   $("#player-lookup").addEventListener("submit", event => {
     event.preventDefault();
     const playerId = Number(new FormData(event.target).get("playerId"));
     if (Number.isSafeInteger(playerId) && playerId > 0) openPlayer(playerId);
   });
   $("#detail-modal").addEventListener("change", event => {
-    if (event.target.id === "player-period") openPlayer(event.target.dataset.profileId, event.target.value);
+    if (event.target.id === "player-period") {
+      const custom = event.target.value === "custom";
+      $("#player-date-form").classList.toggle("hidden", !custom);
+      if (!custom) openPlayer(event.target.dataset.profileId, event.target.value);
+    }
   });
   $("#detail-modal").addEventListener("click", event => {
     const button = event.target.closest("[data-profile-page]");
-    if (button && !button.disabled) openPlayer(button.dataset.profileId, button.dataset.period, Number(button.dataset.profilePage));
+    if (button && !button.disabled) openPlayer(button.dataset.profileId, button.dataset.period, Number(button.dataset.profilePage), state.playerDetail?.activity?.period === "custom" ? {dateFrom: state.playerDetail.activity.dateFrom, dateTo: state.playerDetail.activity.dateTo} : {});
   });
   document.addEventListener("keydown", (event) => {
     if ((event.key === "Enter" || event.key === " ") && event.target.matches("[data-event-id][role=button], [data-player-id][role=button]")) {
@@ -500,7 +545,7 @@ function bindUi() {
   });
   $("#logout-button").addEventListener("click", () => signOut(true));
   $("#menu-button").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
-  $("#refresh-button").addEventListener("click", () => state.currentView === "dashboard" ? loadStats() : state.currentView === "events" ? loadEvents() : loadAdmins());
+  $("#refresh-button").addEventListener("click", () => state.currentView === "dashboard" ? loadStats() : state.currentView === "events" ? loadEvents() : state.currentView === "players" ? searchPlayers() : loadAdmins());
   $("#stats-period").addEventListener("change", () => loadStats());
   $("#export-button").addEventListener("click", exportCsv);
   $("#filter-button").addEventListener("click", openFilters);

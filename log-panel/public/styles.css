@@ -392,3 +392,23 @@ body{font-size:13px}button,input,select,textarea{font-size:12px}button:focus-vis
 .player-history-scroll .event-row { min-width:695px; }
 .player-history-pages { display:flex; justify-content:flex-end; align-items:center; gap:12px; margin-top:12px; color:var(--muted); font-size:11px; }
 @media(max-width:520px) { .playtime-summary>div { padding:10px; } .playtime-summary strong { font-size:17px; } .playtime-summary span { font-size:10px; } .activity-breakdowns { grid-template-columns:1fr; gap:0; } .player-period-row { gap:8px; } }
+
+/* v47: identifiable items and a dedicated player workflow. */
+.compatibility-notice { margin:12px 20px 0; padding:12px; border:1px solid #72533a; border-radius:5px; color:#f2bf95; background:#30251d; font-size:12px; }
+.item-row-meta { display:block; color:var(--muted); font-size:10px; margin-top:2px; }
+.event-item-card { border:1px solid var(--line); border-left:2px solid var(--orange); padding:14px; margin-bottom:14px; }
+.event-item-card>span { color:var(--orange); font-size:11px; }
+.event-item-card h3 { margin:7px 0; font-size:19px; font-weight:600; overflow-wrap:anywhere; }
+.event-item-card>small { color:var(--muted); font-size:10px; }
+.player-search-form { max-width:640px; gap:9px; }
+.player-search-form>div { display:flex; gap:8px; }
+.player-search-results { max-width:850px; margin-top:20px; }
+.player-result { width:100%; display:grid; grid-template-columns:32px minmax(0,1fr) auto; align-items:center; gap:12px; padding:14px; background:var(--panel); color:var(--text); border:0; border-bottom:1px solid var(--line); text-align:left; }
+.player-result:hover { background:var(--panel-hover); }
+.player-result b { display:block; font-size:14px; }.player-result small { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
+.player-result>span:last-child { color:var(--orange); font-size:11px; }
+.player-date-form { grid-template-columns:1fr 1fr auto; align-items:end; margin-bottom:12px; }.player-date-form .form-error { grid-column:1/-1; }
+.period-caption { color:var(--muted); font-size:11px; margin:0 0 14px; }
+.activity-no-data { padding:20px; background:var(--field); border:1px solid var(--line); border-left:2px solid var(--orange); }.activity-no-data strong{font-size:16px;font-weight:600}.activity-no-data p{font-size:12px;line-height:1.6;color:var(--muted)}.activity-no-data small{font-size:11px;color:var(--orange)}
+.player-period-totals { display:flex; gap:20px; flex-wrap:wrap; margin:14px 0; padding:12px 0; border-bottom:1px solid var(--line); color:var(--muted); font-size:11px; }.player-period-totals b{color:var(--text)}
+@media(max-width:520px){.player-date-form{grid-template-columns:1fr 1fr}.player-date-form button{grid-column:1/-1}.player-result{grid-template-columns:28px minmax(0,1fr)}.player-result>span:last-child{grid-column:2}.player-period-totals{gap:12px}}
