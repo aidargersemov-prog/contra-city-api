@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BASE_URL = String(process.env.LOG_API_BASE_URL || "https://contra-city-api-production.up.railway.app").replace(/\/+$/, "");
+const API_BASE_URL = String(process.env.LOG_API_BASE_URL || "https://contra-city-api-production-fedf.up.railway.app").replace(/\/+$/, "");
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, "public");
 const CONTENT_TYPES = new Map([

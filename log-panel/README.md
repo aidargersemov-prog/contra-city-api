@@ -4,7 +4,7 @@
 
 ## Railway: основной API
 
-В существующем API-сервисе с доменом `https://contra-city-api-production.up.railway.app` добавьте Variables:
+В существующем API-сервисе с доменом `https://contra-city-api-production-fedf.up.railway.app` добавьте Variables:
 
 ```text
 LOG_PANEL_OWNER_LOGIN=<логин владельца>
@@ -25,7 +25,7 @@ LOG_PANEL_SESSION_TTL_HOURS=12
 3. Добавьте Variable:
 
 ```text
-LOG_API_BASE_URL=https://contra-city-api-production.up.railway.app
+LOG_API_BASE_URL=https://contra-city-api-production-fedf.up.railway.app
 ```
 
 4. Нажмите Deploy и затем Generate Domain.
@@ -34,9 +34,15 @@ LOG_API_BASE_URL=https://contra-city-api-production.up.railway.app
 
 ## Проверка
 
-- API: `/health` должен вернуть build `railway-api-2026-07-12-admin-audit-panel-v42` и `storage=postgres`.
+- API: `/health` должен вернуть build `railway-api-2026-10-03-admin-journal-v152` и `storage=postgres`.
 - Панель: `/health` должна вернуть `service=contra-city-log-panel` и правильный адрес API.
 - После входа в логах API должна появиться строка `[admin-logs] owner ready id=...`.
-- После входа игрока, покупки, улучшения оружия или кланового действия запись должна появиться в панели автоматически не позднее 10 секунд.
+- После входа игрока, покупки, улучшения оружия или кланового действия после нажатия «Обновить» запись должна появиться в панели. Автообновление выключено, чтобы не сбрасывать текущий просмотр.
 
 Никогда не размещайте `LOG_PANEL_OWNER_PASSWORD`, `DATABASE_URL`, `ADMIN_API_TOKEN` или `BATTLE_EVENT_TOKEN` в переменных сервиса панели. Они должны находиться только в API/battle services.
+
+## Журнал v45 / 2026-10-03
+
+Журнал содержит входы/выходы, чат, жалобы, покупки/валюту, инвентарь, кланы, прогресс и действия администрации. Убийства, смерти, выстрелы, движение, спавны и итоги боевой статистики исключены из административной выдачи, истории, статистики панели и CSV. Старые записи не удаляются. Игровые счётчики, награды и служебные таблицы боя сохранены.
+
+Связанные версии: battle v362, API v152, public assets v45. При обновлении нужны `battle-server/server.js`, `railway-api/server.js`, `railway-api/admin-logs/admin-api.js` и три файла `log-panel/public`. После деплоя проверить чат, жалобу и выход из комнаты через «Обновить». При отказах доставки battle пишет `[battle-audit] failed=...` без содержимого сообщений и секретов. Очередь по-прежнему ограничена и не гарантирует доставку при падении процесса/переполнении; автоматические повторы не добавлены, поскольку `/battle/event` также начисляет игровые награды.
