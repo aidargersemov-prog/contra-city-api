@@ -26,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-04-audit-integrity-v154";
+const API_BUILD_ID = "railway-api-2026-10-06-modgames-config-v155";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -15337,6 +15337,20 @@ async function handleHttpRequest(req, res) {
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
     }
+    return;
+  }
+
+  if (url.pathname === "/battle/runtime-config") {
+    if (req.method !== "GET") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    if (!hasValidBattleServiceToken(req)) {
+      sendJson(res, { ok: false, error: "invalid_token" }, 403);
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    sendJson(res, { ok: true, version: 1, modGamesEnabled: process.env.MODGAMES_ENABLED === "1" });
     return;
   }
 
