@@ -5,6 +5,8 @@ const { TextDecoder } = require("util");
 const { monitorEventLoopDelay } = require("perf_hooks");
 const { createClanWarsBattle, MAPS: CLAN_WAR_MAPS } = require("./clan-wars-battle.cjs");
 let clanWarsBattle = null;
+let modGames = null;
+const MODGAMES_EVENT = 158;
 
 function boundedEnvInt(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = Number(process.env[name]);
@@ -26,7 +28,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-03-magazine-timing-v363";
+const BUILD_ID = "battle-server-2026-10-05-modgames-v364";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -5897,7 +5899,7 @@ function zombieMaxHealthForType(zombieType) {
   return 0;
 }
 
-function sessionMaxHealth(session, stats = null) {
+function sessionBaseMaxHealth(session, stats = null) {
   const resolvedStats = stats || sessionRuntimeStats(session);
   if (isZombiePlayerSession(session)) {
     const zombieBaseHealth = zombieMaxHealthForType(session.zombieType);
@@ -5906,6 +5908,10 @@ function sessionMaxHealth(session, stats = null) {
       : resolvedStats.maxHealth;
   }
   return resolvedStats.maxHealth;
+}
+
+function sessionMaxHealth(session, stats = null) {
+  return modGames?.isActive(session?.room) ? modGames.healthCap(session) : sessionBaseMaxHealth(session, stats);
 }
 
 function randomIntInclusive(min, max) {
@@ -7260,6 +7266,7 @@ function makeScoreUpdateEvent(session) {
 }
 
 function buildSpawnEvent(session, requestedTeam, reason) {
+  modGames?.reset(session);
   const team = normalizeTeamForRoom(session, requestedTeam);
   const stats = sessionRuntimeStats(session);
   const wasDead = Boolean(session.dead);
@@ -7778,6 +7785,7 @@ function clearZombieRestartTimer(room) {
 }
 
 function resetZombiePlayerForNextRound(playerSession) {
+  modGames?.reset(playerSession);
   beginSessionMatchStats(playerSession);
   resetZombieRoundScore(playerSession);
   resetZombieInfectionProgress(playerSession);
@@ -7838,6 +7846,7 @@ function scheduleZombieRestart(room, channel = 0) {
 function finishZombieRound(room, winnerTeam, reason = "unknown", channel = 0, currentSession = null, currentResponses = null) {
   if (!isZombieRoom(room)) return 0;
   if (zombieModeForRoom(room) === ZOMBIE_MODE.PAUSE) return 0;
+  modGames?.resetRound(room);
   const normalizedWinner = Number(winnerTeam) === HUMAN_TEAM ? HUMAN_TEAM : ZOMBIE_TEAM;
   clearZombieBossTimer(room);
   clearZombieRoundTimer(room);
@@ -7969,6 +7978,7 @@ function beginZombieMain(room, roundSeq, channel = 0) {
   const stats = sessionRuntimeStats(bossSession);
   bossSession.team = ZOMBIE_TEAM;
   bossSession.zombieType = ZOMBIE_TYPE.BOSS;
+  modGames?.reset(bossSession);
   resetZombieInfectionProgress(bossSession);
   bossSession.spawned = true;
   bossSession.dead = false;
@@ -8150,6 +8160,7 @@ function weaponStateBySlot(session, slot) {
     session.weaponStates = makeWeaponRuntimeState(session.loadedProfile || null);
     console.log(`[workshop] expired runtime actor=${session.actorId || 0} player=${session.playerId || 0}`);
   }
+  if (modGames?.isActive(session.room)) applyModGameWeaponModifiers(session, modGames.modifiers(session));
   return session.weaponStates.get(Number(slot)) || null;
 }
 
@@ -8562,6 +8573,11 @@ function isComplexReloadWeaponState(state) {
 }
 
 function reloadSingleDurationMs(state) {
+  if (state?.modGameTiming) {
+    const normal = state.modGameTiming.reload;
+    const rate = normal / Math.max(1,state.reloadDurationMs);
+    return (isComplexReloadWeaponState(state) ? Math.floor(normal / Math.max(1,numberOr(state.maxLoadedAmmo,1)))+10 : normal)/rate;
+  }
   const fullReloadMs = numberOr(state?.reloadDurationMs, reloadDurationMsFromRaw(state?.reloadTimeMs));
   if (!isComplexReloadWeaponState(state)) return fullReloadMs;
   return Math.floor(fullReloadMs / Math.max(1, numberOr(state.maxLoadedAmmo, 1))) + 10;
@@ -8928,7 +8944,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
   if (isWeaponControlShot(state, launchMode)) {
     const mode = Number(launchMode ?? 0);
     if (isGatlingWeaponType(state.type) && mode === LAUNCH_MODE.LAUNCH) {
-      if (state.loadedAmmo <= 0) {
+      if (state.loadedAmmo <= 0 && !modGames?.modifiers(session).infiniteMagazine) {
         return { ok: false, reason: "empty", intervalMs };
       }
       if (weaponMode !== WEAPON_MODE.READY) {
@@ -8974,7 +8990,7 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
     return { ok: true, reason: "no-ammo-event", intervalMs };
   }
 
-  if (state.loadedAmmo <= 0) {
+  if (state.loadedAmmo <= 0 && !modGames?.modifiers(session).infiniteMagazine) {
     return { ok: false, reason: "empty", intervalMs };
   }
 
@@ -8996,7 +9012,7 @@ function noteWeaponShot(session, parsed) {
   }
   if (!shotConsumesAmmo(state.type, launchMode)) return;
   if (isReloadWeaponMode(refreshWeaponMode(state, now))) cancelWeaponReload(state, "interrupted-by-shot", now);
-  state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
+  if (!modGames?.modifiers(session).infiniteMagazine) state.loadedAmmo = Math.max(0, state.loadedAmmo - 1);
   startWeaponShooting(state, now);
   if (isProjectileLaunchShot(state, launchMode)) rememberProjectileLaunch(state, data, now);
 }
@@ -9824,6 +9840,7 @@ function isZombieInfectionHit(shooter, targetSession, weaponType) {
 }
 
 function applyZombieInfectionHit(shooter, targetSession, context = {}) {
+  modGames?.reset(targetSession);
   let expAwarded = 0;
   let exp2clanAwarded = 0;
   let fragInfo = null;
@@ -10062,9 +10079,10 @@ function applyImpactDotDamage(effect, targetSession) {
     (1 - training.reduction / 100)
   ));
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
-  const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
+  let healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
+  if (targetSession.health <= 0 && modGames?.preventLethal(targetSession)) healthDamage = Math.max(0, targetCurrent.health - 1);
   if (targetSession.energy <= targetCurrent.stats.maxEnergy) clearArmorOverflowDecay(targetSession);
   recordDamageContribution(targetSession, effect.shooter, healthDamage + energyDamage);
   recordContractDamage(effect.shooter, targetSession, healthDamage);
@@ -10422,7 +10440,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const enhancerReduction = directEnhancerReductionForTarget(targetSession, shooter, weaponType);
   const enhancerDamagePercent = outgoingEnhancerDamagePercent(shooter, targetSession, hitZone);
   const training = zombieTrainingDamagePercents(shooter, targetSession, weaponType, shooterStats.modifiers, targetCurrent.stats.modifiers);
-  const totalDamage = Math.max(0, Math.round(
+  let totalDamage = Math.max(0, Math.round(
     baseDamage *
     explosionCoefficient *
     (tableBalance ? 1 : hitZoneMultiplier(hitZone)) *
@@ -10436,10 +10454,18 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     (1 - training.reduction / 100)
   ));
 
+  const modDamage = modGames?.beforeDamage(shooter, targetSession, totalDamage, {
+    infectionHit: isZombieInfectionHit(shooter, targetSession, weaponType),
+    shotId: shotTimestampKey(data) || shooter.modGameShotId,
+  });
+  if (modDamage) totalDamage = modDamage.forceInfection ? targetCurrent.health + targetCurrent.energy : modDamage.damage;
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
-  const healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
+  let healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
   targetSession.health = targetCurrent.health - healthDamage;
+  if (targetSession.health <= 0 && modGames?.preventLethal(targetSession, { infectionBypass: !!modDamage?.forceInfection }))
+    healthDamage = Math.max(0, targetCurrent.health - 1);
+  modGames?.afterDamage(shooter, targetSession, healthDamage + energyDamage);
   if (targetSession.energy <= targetCurrent.stats.maxEnergy) clearArmorOverflowDecay(targetSession);
   recordDamageContribution(targetSession, shooter, healthDamage + energyDamage);
   recordContractDamage(shooter, targetSession, healthDamage);
@@ -10675,6 +10701,7 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
 }
 
 function buildShotEvent(session, parsed) {
+  if (modGames?.modifiers(session).frozen || session?.room?.modGameClosed) return null;
   const data = parsed?.params?.get(245);
   const hitregTraceId = session?.hitregTraceShotId;
   if (!data?.raw) {
@@ -10712,6 +10739,7 @@ function buildShotEvent(session, parsed) {
     return null;
   }
 
+  session.modGameShotId = modGames?.shot(session) || "";
   noteWeaponShot(session, parsed);
   if (state && shotConsumesAmmo(state.type, launchMode)) session.currentWeaponSlot = state.slot;
   const ammo = state
@@ -10749,6 +10777,7 @@ function buildShotEvent(session, parsed) {
 function gateKilledSessionsAfterDelivery(response) {
   for (const targetSession of response?.killedSessions || []) {
     if (!targetSession) continue;
+    modGames?.reset(targetSession);
     dropCtfFlagsForSession(targetSession);
     targetSession.moveSeen = false;
     targetSession.waitingSelfSpawnMove = false;
@@ -11021,6 +11050,8 @@ function roomListData(room) {
     String(shortRoomValue(room?.maxUsers, 8, Math.max(1, users), 64)),
     String(boolOr(room?.friendlyFire, false)),
     String(Boolean(room?.password)),
+    room.modGameId && !room.modGameClosed ? String(room.modGameId) : "",
+    room.modGameId ? String(room.modGameName || "ModGames") : "",
   ];
 }
 
@@ -11029,7 +11060,8 @@ function makeRoomListRaw() {
   for (const room of rooms.values()) {
     if (!room?.name) continue;
     if (room.clanWar) continue;
-    if (roomPlayableOccupancy(room) <= 0) continue;
+    if (room.modGameClosed) continue;
+    if (roomPlayableOccupancy(room) <= 0 && !modGames?.retain(room)) continue;
     entries.push({
       key: rawString(room.name),
       value: rawStringArray(roomListData(room)),
@@ -11159,7 +11191,7 @@ function ensureRoom(settings) {
     });
   } else {
     const room = rooms.get(name);
-    if (room.players.size === 0 && settings.hasFullSettings !== false) {
+    if (room.players.size === 0 && settings.hasFullSettings !== false && !room.modGameId) {
       clearZombieTimers(room);
       room.map = settings.map || room.map || DEFAULT_MAP;
       room.mode = normalizeModeForMap(room.map, mode);
@@ -11564,6 +11596,7 @@ function postZombieRoundBattleSummaries(room, winnerTeam, reason = "zombie-round
 }
 
 function resetSessionRoomProgress(session) {
+  modGames?.reset(session);
   if (!session) return;
   session.developerEffects = { spawnEffect: 0, deathEffect: 0 };
   session.developerEffectsGeneration = (session.developerEffectsGeneration || 0) + 1;
@@ -11613,6 +11646,7 @@ function resetSessionRoomProgress(session) {
 function deleteEmptyRoom(room, reason = "empty") {
   if (!room?.name || (room.players?.size || 0) > 0) return false;
   if (clanWarsBattle?.retain(room)) return false;
+  if (modGames?.retain(room)) return false;
   if (rooms.get(room.name) !== room) return false;
   clearZombieTimers(room);
   if (room.expeditionReservationTimer) {
@@ -12925,6 +12959,135 @@ function newExpeditionRunId() {
 function expeditionPayloadValue(data, key, fallback = null) {
   const item = data ? htGet(data, key) : null;
   return item ? item.value : fallback;
+}
+
+function modGamePacket(payload) {
+  const json = JSON.stringify({ v: 1, serverNow: Date.now(), ...payload });
+  if (Buffer.byteLength(json, "utf8") > 60000) throw new Error("modgame-payload-limit");
+  return rawEvent(MODGAMES_EVENT, [
+    { key: 254, value: rawInt(0) },
+    { key: 245, value: rawHashtable([{ key: rawByte(1), value: rawString(json) }]) },
+  ]);
+}
+
+function emitModGame(room, payload, target) {
+  const packet = modGamePacket(payload);
+  if (target) return sendReliableToSession(target, packet, 0);
+  for (const member of room.players.values()) {
+    if (member.gameStateRequested && !member.transportDisconnected) sendReliableToSession(member, packet, 0);
+  }
+}
+
+// Apply factors to the recovered runtime intervals, never the last modified
+// result. Profile refresh creates new states and therefore new baselines.
+function applyModGameWeaponModifiers(session, modifiers) {
+  for (const state of session?.weaponStates?.values?.() || []) {
+    if (!state.modGameTiming) state.modGameTiming = {
+      shot: state.shotIntervalMs, reload: state.reloadDurationMs,
+    };
+    state.shotIntervalMs = Math.max(1, state.modGameTiming.shot / modifiers.fireRate);
+    // A reload already in progress retains the rate it started with on both
+    // peers; newly acquired/expired buffs affect the next reload.
+    if (!state.reloading) state.reloadDurationMs = Math.max(1, state.modGameTiming.reload / modifiers.reloadRate);
+  }
+}
+
+async function handleModGameRequest(session, parsed, channel) {
+  let request;
+  try {
+    const json = htGet(eventDataHash(parsed), 1)?.value;
+    if (typeof json !== "string" || Buffer.byteLength(json, "utf8") > 60000) return [];
+    request = JSON.parse(json);
+    if (!request || request.v !== 1 || typeof request.command !== "string" ||
+        typeof request.requestId !== "string" || request.requestId.length > 80) return [];
+    if (!modGames) throw new Error("ModGames недоступен на этом сервере");
+    const time = Date.now();
+    if (time - (session.modGameRequestAt || 0) < 100) return [];
+    session.modGameRequestAt = time;
+    if (request.command === "sync" || request.command === "ability") {
+      if (!session.room?.players || session.room.players.get(session.actorId) !== session) return [];
+      if (request.command === "sync") modGames.sync(session);
+      else if (request.id === session.room.modGameId) modGames.ability(session, request.ability);
+      return [];
+    }
+    if (!["list", "create", "remove", "testAll", "next"].includes(request.command)) return [];
+    if (session.modGameAdminPending) return [];
+    session.modGameAdminPending = true;
+    try {
+      // Both lobby and in-battle requests use the canonical credentials; a
+      // forged CEF/Photon staff flag is never authority.
+      const actor = session.lobbyActor || { value: { kind: "hashtable", entries: [
+        { key: { value: 241 }, value: { value: Number(session.playerId) } },
+        { key: { value: 240 }, value: { value: String(session.playerAuthKey || "") } },
+      ] } };
+      if (!htGet(actor,241)?.value || !htGet(actor,240)?.value) throw new Error("Нет авторизованной игровой сессии");
+      const { profile, source } = await profileForJoin(actor, { forceRefresh: true });
+      if (source !== "fresh" || !profile || profile.accessDenied || isFallbackBattleProfile(profile) ||
+          normalizeStaffRole(profile.staffRole) !== "developer") throw new Error("Требуется подтверждённая роль Developer");
+      if (session.transportDisconnected || sessions.get(session.sessionId) !== session) return [];
+      if (!session.listLobby && Number(profile.authId) !== Number(session.playerId)) throw new Error("Игровая сессия изменилась");
+      if (request.command === "create") modGames.create(request.config, `${profile.authId}:${request.requestId}`);
+      if (request.command === "remove") modGames.remove(request.id);
+      if (request.command === "testAll" || request.command === "next") {
+        const entry = modGames.list().events.find(e => e.id === request.id);
+        const room = entry && rooms.get(entry.roomName);
+        if (!room) throw new Error("Бой уже завершён");
+        if (request.command === "testAll") modGames.testAll(room, request.buff || "");
+        else modGames.next(room, request.delaySeconds, request.count);
+      }
+      const listing = modGames.list();
+      listing.events = listing.events.map(entry => ({ ...entry, config: { ...entry.config, buffs: undefined } }));
+      return [modGamePacket({ type: "admin", requestId: request.requestId, ok: true,
+        server: SERVER_NAME, ...listing })];
+    } finally { session.modGameAdminPending = false; }
+  } catch (error) {
+    return [modGamePacket({ type: "admin", requestId: request?.requestId || "", ok: false,
+      error: String(error.message || "Ошибка ModGames").slice(0, 240) })];
+  }
+}
+
+function initializeModGames() {
+  // Disabled until both server and the upgraded client have been deployed.
+  if (process.env.MODGAMES_ENABLED !== "1") return;
+  const path = require("node:path");
+  const { createModGames } = require("./modgames.cjs");
+  modGames = createModGames({
+    now: () => Date.now(),
+    directory: path.resolve(process.env.MODGAMES_DATA_DIR || path.join(__dirname, "modgame-data")),
+    pointsDirectory: path.resolve(process.env.MODGAMES_POINTS_DIR || path.join(__dirname, "modgame-points")),
+    findRoom: name => rooms.get(name),
+    createRoom: settings => {
+      const room = ensureRoom({ name: settings.name, map: settings.map, mode: 64,
+        maxUsers: settings.slots, timeLimit: 10, lvlMin: 10, lvlMax: 99 });
+      room.mode = 64; room.maxUsers = settings.slots; room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
+      room.modGameName = settings.displayName;
+      return room;
+    },
+    removeRoom: room => {
+      room.modGameClosed = true;
+      clearZombieTimers(room);
+      room.zombieMode = ZOMBIE_MODE.PAUSE;
+      for (const member of room.players.values()) {
+        clearSessionWeaponReloadTimers(member); clearSessionImpactTimers(member);
+      }
+      sendZombiePayloadToReadyRoom(room, makeZombieTimeOverEvent(room), 0);
+      deleteEmptyRoom(room, "modgame-ended");
+    },
+    onChanged: () => scheduleRoomListPush("modgames"),
+    emit: emitModGame, isZombie: isZombiePlayerSession,
+    baseMaxHealth: sessionBaseMaxHealth,
+    syncHealth: session => sendReliableToSession(session, makePlayerHealthEnergyEvent(session), 0),
+    onModifiers: applyModGameWeaponModifiers,
+    canAct: session => Boolean(session?.spawned && !session.dead && !session.isGuest &&
+      !session.transportDisconnected && !session.room?.modGameClosed && !isRoundPausedSession(session)),
+    log: message => console.log(message),
+  });
+  modGames.initialize();
+  const timer = setInterval(() => {
+    try { modGames.tick(); }
+    catch (error) { console.error(`[modgames] tick-failed ${error.message}`); }
+  }, 100);
+  timer.unref?.();
 }
 
 function makeExpeditionReply(session, command, runId, message, ok, replyToCommand = 0) {
@@ -14934,11 +15097,16 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const settings = roomSettingsFrom(roomPropsParam);
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
+    const modGameRoom = rooms.get(settings.name);
+    if (modGameRoom?.modGameClosed || (modGameRoom?.modGameId && settings.hasFullSettings !== false))
+      return [rawOperationResponse(255, [], -17, "modgame-room-reserved")];
+    if (modGameRoom?.modGameId && Number(htGet(roomPropsParam,"modgames_v")?.value) !== 1)
+      return [rawOperationResponse(255, [], -17, "modgames-client-update-required")];
     const warPreflightError = clanWarsBattle?.admission(settings, Number(htGet(actorParam, 241)?.value || 0), null, port);
     if (warPreflightError) return [rawOperationResponse(255, [], -17, warPreflightError)];
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar)) {
+      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar && !modGames?.retain(joinRoom))) {
         if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar) deleteEmptyRoom(joinRoom, "stale-name-join");
         console.log(`[state] room join rejected reason=missing-room name=${settings.name} requested=${requestedName}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
@@ -14987,7 +15155,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (warAdmissionError) return [rawOperationResponse(255, [], -17, warAdmissionError)];
     if (settings.hasFullSettings === false) {
       const joinRoom = rooms.get(settings.name);
-      if (!joinRoom || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar)) {
+      if (!joinRoom || joinRoom.modGameClosed || ((joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar && !modGames?.retain(joinRoom))) {
         if (joinRoom && (joinRoom.players?.size || 0) <= 0 && !joinRoom.expeditionReserved && !joinRoom.clanWar) deleteEmptyRoom(joinRoom, "stale-name-join-after-profile");
         console.log(`[state] room join rejected reason=missing-room-after-profile name=${settings.name}`);
         return [rawOperationResponse(255, [], -17, "room-not-found")];
@@ -15162,6 +15330,8 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     return handleExpeditionRequest(session, parsed, channel);
   }
 
+  if (eventCode === MODGAMES_EVENT) return handleModGameRequest(session, parsed, channel);
+
   if (eventCode === VOICE_CAPABILITY_EVENT) {
     return handleVoiceCapability(session, parsed);
   }
@@ -15301,6 +15471,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       }
       return [];
     }
+    if (modGames?.modifiers(session).frozen || session.room?.modGameClosed) return [];
     const firstMoveAfterSpawn = !session.moveSeen;
     session.spawned = true;
     if (!session.contractParticipatedAt && session.matchStartedAt) session.contractParticipatedAt = Date.now();
@@ -15338,6 +15509,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     if (firstMoveAfterSpawn) {
       queuePostSpawnPickupSync(session, "second-move-after-spawn");
     }
+    if (!firstMoveAfterSpawn) modGames?.move(session, point);
     const pickup = firstMoveAfterSpawn ? null : buildProximityPickItemEvent(session, point);
     if (pickup?.pickEvent) {
       broadcastReliableToRoom(session, pickup.pickEvent, channel, "item-pick", {
@@ -15784,6 +15956,7 @@ if (process.env.CLAN_WARS_ENABLED === "1") {
   }
 }
 
+initializeModGames();
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
