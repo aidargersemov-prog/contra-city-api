@@ -6,6 +6,10 @@ const { monitorEventLoopDelay } = require("perf_hooks");
 const { createClanWarsBattle, MAPS: CLAN_WAR_MAPS } = require("./clan-wars-battle.cjs");
 let clanWarsBattle = null;
 let modGames = null;
+let modGamesCentralEnabled = false;
+let modGamesConfigCheckedAt = 0;
+let modGamesConfigPending = false;
+let modGamesConfigLastErrorAt = 0;
 const MODGAMES_EVENT = 158;
 
 function boundedEnvInt(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
@@ -28,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-05-modgames-v364";
+const BUILD_ID = "battle-server-2026-10-06-modgames-central-v365";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -13000,7 +13004,9 @@ async function handleModGameRequest(session, parsed, channel) {
     request = JSON.parse(json);
     if (!request || request.v !== 1 || typeof request.command !== "string" ||
         typeof request.requestId !== "string" || request.requestId.length > 80) return [];
-    if (!modGames) throw new Error("ModGames недоступен на этом сервере");
+    if (!modGames) throw new Error(modGamesConfigCheckedAt
+      ? "ModGames выключен в Railway: MODGAMES_ENABLED=1"
+      : "Ожидаем настройки ModGames от Railway. Нажмите Обновить через 15 секунд.");
     const time = Date.now();
     if (time - (session.modGameRequestAt || 0) < 100) return [];
     session.modGameRequestAt = time;
@@ -13026,6 +13032,9 @@ async function handleModGameRequest(session, parsed, channel) {
           normalizeStaffRole(profile.staffRole) !== "developer") throw new Error("Требуется подтверждённая роль Developer");
       if (session.transportDisconnected || sessions.get(session.sessionId) !== session) return [];
       if (!session.listLobby && Number(profile.authId) !== Number(session.playerId)) throw new Error("Игровая сессия изменилась");
+      if (["create", "testAll", "next"].includes(request.command) &&
+          (!modGamesCentralEnabled || Date.now() - modGamesConfigCheckedAt > 60000))
+        throw new Error("Создание и запуск дропов отключены в Railway или настройки недоступны. Текущие бои продолжаются.");
       if (request.command === "create") modGames.create(request.config, `${profile.authId}:${request.requestId}`);
       if (request.command === "remove") modGames.remove(request.id);
       if (request.command === "testAll" || request.command === "next") {
@@ -13046,12 +13055,36 @@ async function handleModGameRequest(session, parsed, channel) {
   }
 }
 
+async function refreshModGamesConfig() {
+  if (modGamesConfigPending) return;
+  modGamesConfigPending = true;
+  try {
+    if (!API_TOKEN) throw new Error("battle API token not configured");
+    const response = await fetchWithTimeout(`${API_BASE_URL}/battle/runtime-config`, {
+      headers: { accept: "application/json", "x-battle-token": API_TOKEN },
+    }, Math.min(API_REQUEST_TIMEOUT_MS, 5000));
+    if (!response?.ok) throw new Error(`HTTP ${response?.status || 0}`);
+    const config = await response.json();
+    if (config?.ok !== true || config.version !== 1 || typeof config.modGamesEnabled !== "boolean")
+      throw new Error("invalid runtime config");
+    if (config.modGamesEnabled && !modGames) initializeModGames();
+    const changed = !modGamesConfigCheckedAt || modGamesCentralEnabled !== config.modGamesEnabled;
+    modGamesCentralEnabled = config.modGamesEnabled;
+    modGamesConfigCheckedAt = Date.now();
+    if (changed) console.log(`[modgames] central-config enabled=${modGamesCentralEnabled} source=railway existing-games=drain`);
+  } catch (error) {
+    if (!modGamesConfigLastErrorAt || Date.now() - modGamesConfigLastErrorAt >= 60000) {
+      console.error(`[modgames] central-config unavailable: ${error.message}`);
+      modGamesConfigLastErrorAt = Date.now();
+    }
+  } finally { modGamesConfigPending = false; }
+}
+
 function initializeModGames() {
-  // Disabled until both server and the upgraded client have been deployed.
-  if (process.env.MODGAMES_ENABLED !== "1") return;
+  if (modGames) return;
   const path = require("node:path");
   const { createModGames } = require("./modgames.cjs");
-  modGames = createModGames({
+  const engine = createModGames({
     now: () => Date.now(),
     directory: path.resolve(process.env.MODGAMES_DATA_DIR || path.join(__dirname, "modgame-data")),
     pointsDirectory: path.resolve(process.env.MODGAMES_POINTS_DIR || path.join(__dirname, "modgame-points")),
@@ -13082,7 +13115,8 @@ function initializeModGames() {
       !session.transportDisconnected && !session.room?.modGameClosed && !isRoundPausedSession(session)),
     log: message => console.log(message),
   });
-  modGames.initialize();
+  engine.initialize();
+  modGames = engine;
   const timer = setInterval(() => {
     try { modGames.tick(); }
     catch (error) { console.error(`[modgames] tick-failed ${error.message}`); }
@@ -15956,7 +15990,8 @@ if (process.env.CLAN_WARS_ENABLED === "1") {
   }
 }
 
-initializeModGames();
+void refreshModGamesConfig();
+setInterval(() => { void refreshModGamesConfig(); }, 15000).unref?.();
 const zombieRegenInterval = setInterval(runZombieRegenerationTick, ZOMBIE_REGEN_TICK_MS);
 if (typeof zombieRegenInterval.unref === "function") zombieRegenInterval.unref();
 const outboundReliableRetryInterval = setInterval(runOutboundReliableRetries, OUTBOUND_RELIABLE_SWEEP_MS);
