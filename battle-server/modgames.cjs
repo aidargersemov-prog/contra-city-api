@@ -11,7 +11,7 @@ const MAX_EVENTS = 24;
 const MAX_POINTS = 1000;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const PICKUP_RADIUS = 2.25;
-const CANOPY_MARGIN = 3.5;
+const MIN_FALL_HEIGHT = 60;
 const DECAY_SECONDS = 5;
 const EMPTY = Object.freeze({ speed: 1, jump: 1, gravity: 1, fireRate: 1, reloadRate: 1,
   damage: 1, vampirism: 0, frozen: false, infiniteMagazine: false, invisible: false,
@@ -81,7 +81,7 @@ const DEFINITIONS = new Map(CATALOG.map(b => [b.id, b]));
 const copy = value => JSON.parse(JSON.stringify(value));
 const DEFAULT_CONFIG = Object.freeze({ name: "Заражение · ModGames", map: "Zombi", durationSeconds: 3600, slots: 20,
   firstDropSeconds: 60, intervalSeconds: 180, dropCount: 4, dropLifetimeSeconds: 120,
-  fallSeconds: 4, fallHeight: 25, warningSeconds: 50,
+  fallSeconds: 4, fallHeight: MIN_FALL_HEIGHT, warningSeconds: 50,
   buffs: CATALOG.map(({ id, weight, duration, params }) => ({ id, weight, duration, params })) });
 
 function fail(message) { throw new Error(message); }
@@ -106,7 +106,7 @@ function readJson(filename) {
 function createModGames(options) {
   object(options, "options");
   const o = options;
-  for (const callback of ["createRoom", "findRoom", "removeRoom", "onChanged", "emit", "isZombie", "baseMaxHealth", "syncHealth", "onModifiers", "canAct"])
+  for (const callback of ["createRoom", "findRoom", "removeRoom", "onChanged", "emit", "isZombie", "baseMaxHealth", "syncHealth", "onModifiers", "canAct", "onRoundExpired"])
     if (typeof o[callback] !== "function") fail(`ModGames: отсутствует callback ${callback}`);
   if (!path.isAbsolute(o.directory || "") || !path.isAbsolute(o.pointsDirectory || "")) fail("ModGames directories must be absolute");
   const now = o.now || Date.now;
@@ -131,7 +131,7 @@ function createModGames(options) {
   const notice = (event, text, icon = "", target, seconds = 4) => send(event,
     { type: "notice", actor: target ? target.actorId : 0, text, icon, seconds }, target);
   const roomPacket = event => ({ type: "room", name: event.config.name, roomName: event.roomName, map: event.config.map,
-    endsAt: event.endsAt, nextDropAt: event.nextDropAt, nextCount: event.nextCount, config: copy(event.config) });
+    endsAt: event.endsAt, durationSeconds: event.config.durationSeconds, nextDropAt: event.nextDropAt, nextCount: event.nextCount, config: copy(event.config) });
   const metadata = event => ({ id: event.id, name: event.config.name, map: event.config.map, roomName: event.roomName,
     createdAt: event.createdAt, endsAt: event.endsAt, nextDropAt: event.nextDropAt, nextCount: event.nextCount, config: copy(event.config) });
   const persistRecord = event => ({ ...metadata(event), requestKey: event.requestKey || "" });
@@ -198,7 +198,8 @@ function createModGames(options) {
     number(c.fallSeconds, "Длительность спуска", 0.5, 30);
     number(c.fallHeight, "Высота спуска", 1, 100);
     number(c.warningSeconds, "Предупреждение", 0, 3600);
-    if (!map.points.some(p => Math.min(c.fallHeight, p.clearance - CANOPY_MARGIN) >= 1)) fail("Недостаточно просвета для дропов");
+    // Legacy clearance scanned only 30m, including invisible colliders. It is not a flight ceiling.
+    c.fallHeight = Math.max(MIN_FALL_HEIGHT, c.fallHeight);
     if (!Array.isArray(c.buffs) || !c.buffs.length || c.buffs.length > CATALOG.length) fail("Нужен хотя бы один бафф");
     const ids = new Set();
     c.buffs = c.buffs.map(inputBuff => {
@@ -216,7 +217,10 @@ function createModGames(options) {
     return c;
   }
   function runtime(record) {
-    return { ...record, closed: false, drops: new Map(), globals: new Map(), warned: new Set(), room: null, lastTick: now() };
+    // Persist the room configuration, never resume a round without its players.
+    return { ...record, endsAt: 0, nextDropAt: 0, nextCount: record.config.dropCount,
+      nextDelaySeconds: record.config.firstDropSeconds, closed: false,
+      drops: new Map(), globals: new Map(), warned: new Set(), room: null, lastTick: now() };
   }
   function makeRoom(event) {
     if (o.findRoom(event.roomName)) fail("Имя боя уже занято");
@@ -240,8 +244,9 @@ function createModGames(options) {
         for (const k of ["createdAt", "endsAt", "nextDropAt"]) number(r[k], k, 0, Number.MAX_SAFE_INTEGER);
         number(r.nextCount, "Следующая волна", 1, MAX_POINTS, true);
         if (r.requestKey && (typeof r.requestKey !== "string" || r.requestKey.length > 160)) fail("Повреждён ключ запроса");
-        // Expired events do not require a map that may have since been retired.
-        return r.endsAt <= now() ? null : runtime({ ...r, config: validateConfig(r.config) });
+        // v1 timestamps used to expire the room. Rooms are now persistent;
+        // even old elapsed records restart in WAIT_FOR_PLAYERS.
+        return runtime({ ...r, config: validateConfig(r.config) });
       }).filter(Boolean);
     }
     const created = [];
@@ -270,7 +275,7 @@ function createModGames(options) {
     const id = crypto.randomBytes(12).toString("hex");
     const time = now();
     const event = runtime({ id, roomName: `modgame-${id}`, requestKey, config, createdAt: time,
-      endsAt: time + config.durationSeconds * 1000, nextDropAt: time + config.firstDropSeconds * 1000, nextCount: config.dropCount });
+      endsAt: 0, nextDropAt: 0, nextCount: config.dropCount });
     const previous = records();
     write([...previous, persistRecord(event)]);
     try { makeRoom(event); }
@@ -435,8 +440,7 @@ function createModGames(options) {
   function spawn(event, count, explicitBuff, all = false) {
     const c = event.config, time = now();
     const occupied = new Set([...event.drops.values()].map(d => d.pointId));
-    const points = maps.get(c.map.toLowerCase()).points.filter(p =>
-      (all || !occupied.has(p.id)) && Math.min(c.fallHeight, p.clearance - CANOPY_MARGIN) >= 1);
+    const points = maps.get(c.map.toLowerCase()).points.filter(p => all || !occupied.has(p.id));
     if (!all) for (let i = points.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [points[i], points[j]] = [points[j], points[i]]; }
     const explicit = explicitBuff && DEFINITIONS.get(explicitBuff);
     const explicitSetting = explicit && (c.buffs.find(b => b.id === explicit.id) || { id: explicit.id, duration: explicit.duration, params: copy(explicit.params), weight: explicit.weight });
@@ -451,7 +455,7 @@ function createModGames(options) {
       const drop = { id: `${event.id}-${++sequence}`, pointId: p.id, x: p.x, y: p.y, z: p.z,
         normalX: p.normalX, normalY: p.normalY, normalZ: p.normalZ, spawnAt: time,
         landAt: time + c.fallSeconds * 1000, expiresAt: time + (c.fallSeconds + c.dropLifetimeSeconds) * 1000,
-        height: Math.min(c.fallHeight, p.clearance - CANOPY_MARGIN), buff: representative.id,
+        height: Math.max(MIN_FALL_HEIGHT, c.fallHeight), buff: representative.id,
         team: h && z ? "any" : h ? "human" : "zombie", rarity: DEFINITIONS.get(representative.id).rarity,
         humanBuff: h ? h.id : "", zombieBuff: z ? z.id : "" };
       // Non-enumerable server settings never enter public protocol JSON.
@@ -467,7 +471,6 @@ function createModGames(options) {
     if (buff !== undefined && buff !== "" && !DEFINITIONS.has(buff)) fail("Неизвестный тестовый бафф");
     if (event.lastTestAt !== undefined && now() - event.lastTestAt < 1000) fail("Тест уже запущен. Подождите секунду");
     const map = maps.get(event.config.map.toLowerCase());
-    if (map.points.some(p => Math.min(event.config.fallHeight, p.clearance - CANOPY_MARGIN) < 1)) fail("Не все точки имеют достаточный просвет для теста");
     event.lastTestAt = now();
     event.drops.clear(); sendDrops(event, [], undefined, true);
     return spawn(event, map.points.length, buff, true);
@@ -476,11 +479,12 @@ function createModGames(options) {
     const event = requireEvent(room);
     number(delaySeconds, "Задержка", 0, 604800);
     number(count, "Количество", 1, maps.get(event.config.map.toLowerCase()).points.length, true);
-    const updated = { ...persistRecord(event), nextDropAt: now() + delaySeconds * 1000, nextCount: count };
+    const updated = { ...persistRecord(event), nextDropAt: event.endsAt > 0 ? now() + delaySeconds * 1000 : 0, nextCount: count };
     write(records().map(r => r.id === event.id ? updated : r));
-    event.nextDropAt = updated.nextDropAt; event.nextCount = count; event.warned.clear();
+    event.nextDropAt = updated.nextDropAt; event.nextDelaySeconds = delaySeconds; event.nextCount = count; event.warned.clear();
     send(event, roomPacket(event));
-    notice(event, `Следующая волна: ${count} дропов через ${delaySeconds} сек.`, "drop");
+    notice(event, event.endsAt > 0 ? `Следующая волна: ${count} дропов через ${delaySeconds} сек.`
+      : `После старта раунда: ${count} дропов через ${delaySeconds} сек.`, "drop");
     o.onChanged();
     return metadata(event);
   }
@@ -627,8 +631,24 @@ function createModGames(options) {
   }
   function resetRound(room) {
     const event=eventFor(room);if(!event)return;
+    event.endsAt=0;event.nextDropAt=0;event.nextCount=event.config.dropCount;
+    event.nextDelaySeconds=event.config.firstDropSeconds;event.warned.clear();event.lastTick=now();
     event.globals.clear();event.drops.clear();sendDrops(event,[],undefined,true);
     for(const player of room.players.values())reset(player);
+    send(event, roomPacket(event));
+    notice(event, "", "", undefined, 1);
+    o.onChanged();
+  }
+  function startRound(room) {
+    const event=eventFor(room);if(!event || event.endsAt>0)return false;
+    const time=now();
+    event.endsAt=time+event.config.durationSeconds*1000;
+    event.nextDropAt=time+event.nextDelaySeconds*1000;
+    event.warned.clear();event.lastTick=time;
+    send(event, roomPacket(event));
+    o.onChanged();
+    log(`[modgames] round-start id=${event.id} duration=${event.config.durationSeconds}s firstDrop=${event.nextDelaySeconds}s`);
+    return true;
   }
   function sync(session) {
     const event = eventFor(roomOf(session));
@@ -661,8 +681,9 @@ function createModGames(options) {
   function tick() {
     const time = now();
     for (const event of [...events.values()]) {
-      if (time >= event.endsAt) {
-        try { close(event, "expired"); } catch (error) { log(`[modgames] expiry persistence failed: ${error.message}`); }
+      if (event.endsAt > 0 && time >= event.endsAt) {
+        // The zombie lifecycle owns results/restart. Do not delete its room.
+        o.onRoundExpired(event.room);
         continue;
       }
       let globalsChanged = false;
@@ -670,7 +691,7 @@ function createModGames(options) {
       const removed = [];
       for (const [id, d] of event.drops) if (d.expiresAt <= time) { event.drops.delete(id); removed.push(id); }
       for (let i = 0; i < removed.length; i += 128) send(event, { type: "removeDrops", ids: removed.slice(i, i + 128) });
-      if (time >= event.nextDropAt) {
+      if (event.endsAt > 0 && event.nextDropAt > 0 && time >= event.nextDropAt) {
         const nextAt = time + event.config.intervalSeconds * 1000;
         const updated = { ...persistRecord(event), nextDropAt: nextAt, nextCount: event.config.dropCount };
         try {
@@ -683,7 +704,7 @@ function createModGames(options) {
         } catch (error) {
           if (!event.lastIoErrorAt || time - event.lastIoErrorAt > 5000) { log(`[modgames] wave persistence failed: ${error.message}`); event.lastIoErrorAt = time; }
         }
-      } else {
+      } else if (event.endsAt > 0 && event.nextDropAt > 0) {
         const remaining = Math.ceil((event.nextDropAt - time) / 1000);
         for (const threshold of [event.config.warningSeconds, 3, 2, 1]) {
           if (threshold > 0 && remaining <= threshold && !event.warned.has(threshold)) {
@@ -718,7 +739,7 @@ function createModGames(options) {
     for (const [session, state] of states) if (eventFor(roomOf(session)) !== state.event || ![...state.event.room.players.values()].includes(session)) reset(session);
   }
   return { initialize, list, create, remove, testAll, next, sync, tick, move, beforeDamage, afterDamage,
-    preventLethal, shot, reset, resetRound, ability, modifiers, healthCap,
+    preventLethal, shot, reset, resetRound, startRound, ability, modifiers, healthCap,
     isActive: room => !!eventFor(room), retain: room => !!eventFor(room) };
 }
 

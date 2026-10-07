@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-06-modgames-central-v365";
+const BUILD_ID = "battle-server-2026-10-06-modgames-shield-v368";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -7822,6 +7822,7 @@ function beginNextZombieRound(room, roundSeq, channel = 0) {
   if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== Number(roundSeq)) return;
 
   clearZombieRestartTimer(room);
+  modGames?.resetRound(room);
   room.startedAt = photonNow();
   room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
   room.zombieBossActorId = 0;
@@ -7963,6 +7964,10 @@ function beginZombieMain(room, roundSeq, channel = 0) {
   if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== Number(roundSeq)) return;
   const players = zombieReadyPlayers(room);
   if (players.length < ZOMBIE_MIN_PLAYERS) {
+    if (room.modGameId) {
+      clearZombieRoundTimer(room);
+      modGames?.resetRound(room);
+    }
     room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
     room.zombieBossActorId = 0;
     room.zombieBossTimer = null;
@@ -8014,12 +8019,15 @@ function scheduleZombieMain(room, channel = 0) {
 
 function scheduleZombieRoundLimit(room, channel = 0) {
   clearZombieRoundTimer(room);
-  const timeLimitMs = Math.max(0, numberOr(room?.timeLimit, 0) * 60 * 1000);
+  const timeLimitMs = room?.modGameId
+    ? Math.max(0, numberOr(room.modGameDurationSeconds, 0) * 1000)
+    : Math.max(0, numberOr(room?.timeLimit, 0) * 60 * 1000);
   if (!timeLimitMs) return;
   const roundSeq = Number(room.zombieRoundSeq || 0);
   room.zombieRoundTimer = setTimeout(() => {
     if (!room || rooms.get(room.name) !== room) return;
     if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== roundSeq) return;
+    if (room.modGameId && ![ZOMBIE_MODE.BOSS_INFECTION, ZOMBIE_MODE.MAIN].includes(zombieModeForRoom(room))) return;
     const winner = zombieAlivePlayers(room, HUMAN_TEAM).length > 0 ? HUMAN_TEAM : ZOMBIE_TEAM;
     finishZombieRound(room, winner, "time-limit", channel);
   }, timeLimitMs);
@@ -8052,6 +8060,7 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
   sent += sendZombiePayloadToReadyRoom(room, makeZombieModeEvent(room.zombieMode), channel, currentSession, currentResponses);
 
   scheduleZombieMain(room, channel);
+  modGames?.startRound(room);
   scheduleZombieRoundLimit(room, channel);
   const repairTargets = queueZombiePeerActorRepairForReadyRoom(room, channel, "zombie-round-start");
   console.log(`[zombie] start room=${room.name} map=${room.map} reason=${reason} ready=${players.length}/${ZOMBIE_MIN_PLAYERS} actorSnapshots=${actorSnapshots} boss=random-after-spawn infectionMs=${ZOMBIE_BOSS_INFECTION_MS} infection=lethal-claw sent=${sent} repairTargets=${repairTargets}`);
@@ -10463,6 +10472,8 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     shotId: shotTimestampKey(data) || shooter.modGameShotId,
   });
   if (modDamage) totalDamage = modDamage.forceInfection ? targetCurrent.health + targetCurrent.energy : modDamage.damage;
+  result.shielded = !!modDamage?.shielded;
+  if (result.shielded) { result.impactType = IMPACT_TYPE.NONE; result.slow = null; }
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
   let healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
@@ -10647,7 +10658,9 @@ function buildShotDamagePayload(session, data, state, weaponType, launchMode) {
         // PlayerShot triggers red-screen feedback even for hp=en=0. A rejected
         // player must not be echoed as a hit. Preserve environment/item targets
         // and accepted zero-damage hits.
-        if ((damage.descriptor & 7) === SHOT_TARGET_PLAYER && !damage.hit) return null;
+        // Shield absorbs the hit, not just its HP delta. PlayerShot runs hit feedback
+        // even for zero damage, so do not echo this target to any recipient.
+        if ((damage.descriptor & 7) === SHOT_TARGET_PLAYER && (!damage.hit || damage.shielded)) return null;
         return hashtableBodyWithReplacements(target, new Map([
           [92, rawDamageShort(damage.healthDamage)],
           [93, rawDamageShort(damage.energyDamage)],
@@ -11729,6 +11742,18 @@ function removeRoomPlayer(room, actorId, playerSession, reason = "leave", option
     { requireGameState: false },
   );
   room.players.delete(actorId);
+  // Leaving during the infection prelude must cancel both ModGames clocks.
+  // Ordinary zombie rooms retain their original behaviour.
+  if (room.modGameId && zombieModeForRoom(room) === ZOMBIE_MODE.BOSS_INFECTION &&
+      zombieReadyPlayers(room).length < ZOMBIE_MIN_PLAYERS) {
+    clearZombieBossTimer(room);
+    clearZombieRoundTimer(room);
+    room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
+    room.zombieBossActorId = 0;
+    modGames?.resetRound(room);
+    sendZombiePayloadToReadyRoom(room, makeZombieModeEvent(room.zombieMode), options.channel || 0);
+    console.log(`[modgames] round-cancelled room=${room.name} reason=insufficient-players`);
+  }
   resetCtfFlagsForInsufficientPlayers(room, options.channel || 0, `leave-${reason}`);
   resetControlPointsForInsufficientPlayers(room, options.channel || 0, `leave-${reason}`);
   // The Unity AI host may leave mid-wave. Transfer authority only after the
@@ -13091,9 +13116,10 @@ function initializeModGames() {
     findRoom: name => rooms.get(name),
     createRoom: settings => {
       const room = ensureRoom({ name: settings.name, map: settings.map, mode: 64,
-        maxUsers: settings.slots, timeLimit: 10, lvlMin: 10, lvlMax: 99 });
+        maxUsers: settings.slots, timeLimit: Math.ceil(settings.timeLimit / 60), lvlMin: 10, lvlMax: 99 });
       room.mode = 64; room.maxUsers = settings.slots; room.zombieMode = ZOMBIE_MODE.WAIT_FOR_PLAYERS;
       room.modGameName = settings.displayName;
+      room.modGameDurationSeconds = settings.timeLimit;
       return room;
     },
     removeRoom: room => {
@@ -13107,6 +13133,11 @@ function initializeModGames() {
       deleteEmptyRoom(room, "modgame-ended");
     },
     onChanged: () => scheduleRoomListPush("modgames"),
+    onRoundExpired: room => {
+      if (![ZOMBIE_MODE.BOSS_INFECTION, ZOMBIE_MODE.MAIN].includes(zombieModeForRoom(room))) return;
+      const winner = zombieAlivePlayers(room, HUMAN_TEAM).length > 0 ? HUMAN_TEAM : ZOMBIE_TEAM;
+      finishZombieRound(room, winner, "modgame-time-limit", 0);
+    },
     emit: emitModGame, isZombie: isZombiePlayerSession,
     baseMaxHealth: sessionBaseMaxHealth,
     syncHealth: session => sendReliableToSession(session, makePlayerHealthEnergyEvent(session), 0),
