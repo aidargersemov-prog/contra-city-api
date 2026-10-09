@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-06-modgames-shield-v368";
+const BUILD_ID = "battle-server-2026-10-07-zombie-hands-v374";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -7362,7 +7362,7 @@ function makeZombiePlayerUpdateEvent(session, killerActorId = 0) {
   ]);
 }
 
-function makePlayerHealthEnergyEvent(session) {
+function makePlayerHealthEnergyEvent(session, reason) {
   const stats = sessionRuntimeStats(session);
   const maxHealth = sessionMaxHealth(session, stats);
   return rawEvent(85, [
@@ -7370,6 +7370,8 @@ function makePlayerHealthEnergyEvent(session) {
     { key: 245, value: rawHashtable([
       { key: rawByte(100), value: rawInt(Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth))) },
       { key: rawByte(99), value: rawInt(Math.round(clampNumber(session.energy ?? stats.maxEnergy, 0, ARMOR_PICKUP_CAP))) },
+      ...(reason === "modgame-health-decay" && session.room?.modGameId
+        ? [{ key: rawString("modgameHealthDecay"), value: rawBool(true) }] : []),
     ]) },
   ]);
 }
@@ -7436,6 +7438,13 @@ function zombieAlivePlayers(room, team = 0) {
     if (!playerSession.spawned || playerSession.dead) return false;
     return !team || Number(playerSession.team) === Number(team);
   });
+}
+
+function zombieTimeLimitWinner(room) {
+  const aliveHumans = zombieAlivePlayers(room, HUMAN_TEAM).length;
+  const aliveZombies = zombieAlivePlayers(room, ZOMBIE_TEAM).length;
+  // At the time limit, equal survivor counts favor the humans.
+  return aliveZombies > aliveHumans ? ZOMBIE_TEAM : HUMAN_TEAM;
 }
 
 function sendZombiePayloadToReadyRoom(room, payload, channel = 0, currentSession = null, currentResponses = null) {
@@ -7835,7 +7844,9 @@ function beginNextZombieRound(room, roundSeq, channel = 0) {
   const ready = zombieReadyPlayers(room);
   const newGame = makeZombieNewGameEvent(room);
   const waitMode = makeZombieModeEvent(room.zombieMode);
-  const newGameSent = sendZombiePayloadToReadyRoom(room, newGame, channel);
+  // An immediate start sends its own clock before spawning the players.
+  const newGameSent = ready.length < ZOMBIE_MIN_PLAYERS
+    ? sendZombiePayloadToReadyRoom(room, newGame, channel) : 0;
   const waitSent = sendZombiePayloadToReadyRoom(room, waitMode, channel);
   const startSent = maybeStartZombieRound(room, channel, "round-restart");
   console.log(`[zombie] restart room=${room.name} ready=${ready.length}/${ZOMBIE_MIN_PLAYERS} newGamePeers=${newGameSent} waitPeers=${waitSent} startSent=${startSent}`);
@@ -8028,7 +8039,7 @@ function scheduleZombieRoundLimit(room, channel = 0) {
     if (!room || rooms.get(room.name) !== room) return;
     if (!isZombieRoom(room) || Number(room.zombieRoundSeq || 0) !== roundSeq) return;
     if (room.modGameId && ![ZOMBIE_MODE.BOSS_INFECTION, ZOMBIE_MODE.MAIN].includes(zombieModeForRoom(room))) return;
-    const winner = zombieAlivePlayers(room, HUMAN_TEAM).length > 0 ? HUMAN_TEAM : ZOMBIE_TEAM;
+    const winner = zombieTimeLimitWinner(room);
     finishZombieRound(room, winner, "time-limit", channel);
   }, timeLimitMs);
   if (typeof room.zombieRoundTimer.unref === "function") room.zombieRoundTimer.unref();
@@ -8051,7 +8062,9 @@ function maybeStartZombieRound(room, channel = 0, reason = "sync", currentSessio
   const actorSnapshots = reason === "post-gamestate"
     ? announceZombieRoundActors(players, channel, currentSession, currentResponses)
     : 0;
-  let sent = 0;
+  // GameState may contain the clock from before the wait for enough players.
+  // Event91 updates RoomSettings.StartTime using the original client contract.
+  let sent = sendZombiePayloadToReadyRoom(room, makeZombieNewGameEvent(room), channel, currentSession, currentResponses);
   for (const playerSession of players) {
     resetZombieParticipantForHumanStart(playerSession);
     const spawnEvent = buildSpawnEvent(playerSession, HUMAN_TEAM, "zombie-round-start");
@@ -8211,7 +8224,8 @@ function buildWeaponChangeEventFromState(session, state) {
 }
 
 function buildShotWeaponConfirm(session, state) {
-  if (!state) return null;
+  // Event73 selects zombie hands. Event98 would restore the human loadout slot.
+  if (!state || isZombiePlayerSession(session)) return null;
   const key = weaponStateConfirmKey(state);
   if (!key) return null;
   const event = buildWeaponChangeEventFromState(session, state);
@@ -10469,9 +10483,16 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
 
   const modDamage = modGames?.beforeDamage(shooter, targetSession, totalDamage, {
     infectionHit: isZombieInfectionHit(shooter, targetSession, weaponType),
+    bossInfectionHit: Number(shooter.zombieType) === ZOMBIE_TYPE.BOSS,
     shotId: shotTimestampKey(data) || shooter.modGameShotId,
   });
-  if (modDamage) totalDamage = modDamage.forceInfection ? targetCurrent.health + targetCurrent.energy : modDamage.damage;
+  if (modDamage) totalDamage = (modDamage.forceInfection || modDamage.lethalInfection)
+    ? targetCurrent.health + targetCurrent.energy : modDamage.damage;
+  // Ordinary infection has no ModGames buffs; a valid boss claw hit infects immediately.
+  if (!shooter.room?.modGameId && Number(shooter.zombieType) === ZOMBIE_TYPE.BOSS &&
+      isZombieInfectionHit(shooter, targetSession, weaponType)) {
+    totalDamage = targetCurrent.health + targetCurrent.energy;
+  }
   result.shielded = !!modDamage?.shielded;
   if (result.shielded) { result.impactType = IMPACT_TYPE.NONE; result.slow = null; }
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
@@ -13135,12 +13156,12 @@ function initializeModGames() {
     onChanged: () => scheduleRoomListPush("modgames"),
     onRoundExpired: room => {
       if (![ZOMBIE_MODE.BOSS_INFECTION, ZOMBIE_MODE.MAIN].includes(zombieModeForRoom(room))) return;
-      const winner = zombieAlivePlayers(room, HUMAN_TEAM).length > 0 ? HUMAN_TEAM : ZOMBIE_TEAM;
+      const winner = zombieTimeLimitWinner(room);
       finishZombieRound(room, winner, "modgame-time-limit", 0);
     },
     emit: emitModGame, isZombie: isZombiePlayerSession,
     baseMaxHealth: sessionBaseMaxHealth,
-    syncHealth: session => sendReliableToSession(session, makePlayerHealthEnergyEvent(session), 0),
+    syncHealth: (session, reason) => sendReliableToSession(session, makePlayerHealthEnergyEvent(session, reason), 0),
     onModifiers: applyModGameWeaponModifiers,
     canAct: session => Boolean(session?.spawned && !session.dead && !session.isGuest &&
       !session.transportDisconnected && !session.room?.modGameClosed && !isRoundPausedSession(session)),

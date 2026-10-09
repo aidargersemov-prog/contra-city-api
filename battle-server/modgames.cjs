@@ -11,7 +11,7 @@ const MAX_EVENTS = 24;
 const MAX_POINTS = 1000;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const PICKUP_RADIUS = 2.25;
-const MIN_FALL_HEIGHT = 60;
+const MIN_FALL_HEIGHT = 100;
 const DECAY_SECONDS = 5;
 const EMPTY = Object.freeze({ speed: 1, jump: 1, gravity: 1, fireRate: 1, reloadRate: 1,
   damage: 1, vampirism: 0, frozen: false, infiniteMagazine: false, invisible: false,
@@ -386,9 +386,12 @@ function createModGames(options) {
         baseHealth: base(state.session), healthCap: healthCap(state.session) }, target);
     state.lastModifiers = ms; state.lastBuffs = bs;
   }
-  function clampHealth(session) {
+  function clampHealth(session, healthDecay = false) {
     const cap = healthCap(session);
-    if (session.health > cap) { session.health = cap; o.syncHealth(session); }
+    if (session.health > cap) {
+      session.health = cap;
+      o.syncHealth(session, healthDecay ? "modgame-health-decay" : undefined);
+    }
   }
   function heal(state, amount) {
     if (!o.canAct(state.session) || amount <= 0) return;
@@ -493,11 +496,16 @@ function createModGames(options) {
     if (!event || !o.canAct(session) || !point || ![point.x, point.y, point.z].every(Number.isFinite)) return false;
     const state = getState(session, true);
     if (modifiers(session).frozen) return false;
+    const time = now();
     let nearest, distance = Infinity;
     for (const drop of event.drops.values()) {
-      if (now() < drop.landAt || now() >= drop.expiresAt) continue;
+      if (time < drop.spawnAt || time >= drop.expiresAt) continue;
       const setting = drop.settings[state.zombie ? "zombie" : "human"];
-      if (!setting || point.y < drop.y - 0.75 || point.y > drop.y + 3) continue;
+      // Match ModGameDropVisual.Tick's SmoothStep descent. Keep the original
+      // pickup window relative to the crate's base (visual center is base + 1).
+      const progress = Math.max(0, Math.min(1, (time - drop.spawnAt) / Math.max(1, drop.landAt - drop.spawnAt)));
+      const dropY = drop.y + drop.height * (1 - progress * progress * (3 - 2 * progress));
+      if (!setting || point.y < dropY - 0.75 || point.y > dropY + 3) continue;
       const d = (point.x - drop.x) ** 2 + (point.z - drop.z) ** 2;
       if (d <= PICKUP_RADIUS ** 2 && d < distance) { nearest = drop; distance = d; }
     }
@@ -506,7 +514,7 @@ function createModGames(options) {
     event.drops.delete(nearest.id);
     send(event, { type: "removeDrops", ids: [nearest.id] });
     grant(session, nearest.settings[state.zombie ? "zombie" : "human"]);
-    log(`[modgames] pickup id=${event.id} actor=${session.actorId} point=${nearest.pointId} buff=${nearest.settings[state.zombie ? "zombie" : "human"].id}`);
+    log(`[modgames] pickup id=${event.id} actor=${session.actorId} point=${nearest.pointId} buff=${nearest.settings[state.zombie ? "zombie" : "human"].id} phase=${time < nearest.landAt ? "air" : "ground"}`);
     return true;
   }
   function shot(session) {
@@ -540,6 +548,11 @@ function createModGames(options) {
         publish(defender);
         result.damage = 0; result.shielded = true;
         notice(event, `Щит поглотил удар. Зарядов: ${Math.max(0, shield.charges)}`, "shield", target);
+        return result;
+      }
+      if (context.bossInfectionHit) {
+        // Boss claws are lethal, but only the Infection buff bypasses Second Life.
+        result.lethalInfection = true;
         return result;
       }
     }
@@ -722,13 +735,16 @@ function createModGames(options) {
         const state = getState(player, true); if (!state) continue;
         if (!o.canAct(player)) { if (state.buffs.size || state.decay.length) reset(player); continue; }
         const elapsed = Math.max(0, (time - state.lastTick) / 1000); state.lastTick = time;
+        // Capture the final decay tick before expired entries are removed below.
+        const healthDecay = !suppressed(state) && (state.decay.length > 0 ||
+          [...state.buffs.values()].some(b => b.params.health && b.expiresAt <= time));
         for (const [id, b] of state.buffs) if (b.expiresAt <= time) {
           state.buffs.delete(id);
           if (b.params.health) state.decay.push({ health: b.params.health, start: b.expiresAt });
         }
         state.decay = state.decay.filter(d => time - d.start < DECAY_SECONDS * 1000);
         for (const [key, shotBudget] of state.shots) if (time - shotBudget.at > 30000) state.shots.delete(key);
-        clampHealth(player);
+        clampHealth(player, healthDecay);
         const regen = activeBuff(state, "regeneration");
         if (regen) heal(state, Math.min(elapsed, 1) * regen.params.healthPerSecond);
         publish(state, undefined, globalsChanged);
