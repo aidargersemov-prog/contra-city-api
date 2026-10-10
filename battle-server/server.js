@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-07-zombie-hands-v374";
+const BUILD_ID = "battle-server-2026-10-10-zombie-boss-rejoin-v376";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -155,8 +155,8 @@ const ZOMBIE_ROUND_RESTART_MS = 10500;
 // It is intentionally shared with zombie rounds so all modes have one round cadence.
 const STANDARD_ROUND_RESTART_MS = Math.max(1000, Number(process.env.STANDARD_ROUND_RESTART_MS || ZOMBIE_ROUND_RESTART_MS));
 const ZOMBIE_REGULAR_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_REGULAR_MAX_HEALTH || 1500) || 1500);
-const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 5000) || 5000);
-const ZOMBIE_REGEN_TICK_MS = Math.max(250, Number(process.env.ZOMBIE_REGEN_TICK_MS || 4000) || 4000);
+const ZOMBIE_BOSS_MAX_HEALTH = Math.max(1, Number(process.env.ZOMBIE_BOSS_MAX_HEALTH || 3500) || 3500);
+const ZOMBIE_REGEN_TICK_MS = Math.max(250, Number(process.env.ZOMBIE_REGEN_TICK_MS || 8000) || 8000);
 const ZOMBIE_REGULAR_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_REGULAR_REGEN_MIN || 20) || 20);
 const ZOMBIE_REGULAR_REGEN_MAX = Math.max(ZOMBIE_REGULAR_REGEN_MIN, Number(process.env.ZOMBIE_REGULAR_REGEN_MAX || 35) || 35);
 const ZOMBIE_BOSS_REGEN_MIN = Math.max(0, Number(process.env.ZOMBIE_BOSS_REGEN_MIN || 50) || 50);
@@ -7187,6 +7187,9 @@ function makeScorePlayerRaw(session, team, options = {}) {
       { key: rawByte(100), value: rawInt(Math.round(clampNumber(session.health ?? maxHealth, 0, maxHealth))) },
       { key: rawByte(99), value: rawInt(session.energy ?? stats.maxEnergy) },
     );
+    if (isZombieRoom(session.room) && team === ZOMBIE_TEAM) {
+      entries.push({ key: rawByte(10), value: rawByte(clampNumber(session.zombieType ?? ZOMBIE_TYPE.REGULAR, ZOMBIE_TYPE.REGULAR, ZOMBIE_TYPE.BOSS)) });
+    }
   }
 
   return rawHashtable(entries);
@@ -8723,8 +8726,14 @@ function refreshWeaponMode(state, now = Date.now()) {
 function startWeaponChange(state, reason = "interrupted-by-change", now = Date.now()) {
   if (!state) return WEAPON_MODE.READY;
   cancelWeaponReload(state, reason, now);
+  // ShotController.DelayedShot still sends the ray 200 ms after a melee launch,
+  // even when the player switches weapons in between.
+  const pendingMeleeShotUntil = isColdArmsWeaponType(state.type) &&
+    !state.meleeDelayedShotUsed && numberOr(state.meleeDelayedShotUntil, 0) > now
+    ? state.meleeDelayedShotUntil : 0;
   // A sniper's per-shot interval survives a switch away and back.
   resetWeaponActionState(state, Number(state.type) === 10);
+  if (pendingMeleeShotUntil) state.meleeDelayedShotUntil = pendingMeleeShotUntil;
   state.changeUntil = now + numberOr(state.changeDurationMs, WEAPON_CHANGE_DURATION_MS);
   return setWeaponMode(state, WEAPON_MODE.CHANGING, now);
 }
@@ -8920,6 +8929,12 @@ function allowWeaponShot(session, state, weaponType, launchMode, data) {
       return { ok: true, reason: "projectile-impact-untracked", intervalMs };
     }
     return { ok: false, reason: impact.reason, intervalMs };
+  }
+
+  if (isColdArmsWeaponType(state.type) && Number(launchMode ?? 0) === LAUNCH_MODE.SHOT &&
+      numberOr(state.meleeDelayedShotUntil, 0) > 0 && !state.meleeDelayedShotUsed &&
+      now <= state.meleeDelayedShotUntil) {
+    return { ok: true, reason: "melee-delayed", intervalMs };
   }
 
   if (weaponMode === WEAPON_MODE.CHANGING) {
