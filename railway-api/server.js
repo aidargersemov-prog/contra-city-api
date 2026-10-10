@@ -1624,7 +1624,10 @@ const temporaryBalanceWeaponKeys = new Set([
 ]);
 // Update firing intervals for these existing purchases without rebasing other stats.
 const correctedWeaponRapidityKeys = new Set(["sr_vintorez","hg_usp","sg_remington","hg_desert","hg_desertb01","sg_spas","sg_winchester1887","hg_taurus","hg_glockb01_s","hg_makarov","hg_tt","hg_walther_r","hg_waltherp99","hg_sigsauerp226_b","hg_glock_s","sr_sniperrifle03","sr_arctic","sr_arcticb01","sr_wildcat1","sr_wildcat2"]);
-const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
+// GG_M134B01 reuses Вьюга's text (w_47) while displaying a Maximych-style
+// gatling model. Keep its canonical ID for already owned items, but do not
+// offer this mismatched duplicate in the shop.
+const hiddenShopWeaponIds = new Set([10, 47]); // ГОСТ Бита, GG_M134B01
 const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
   .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
 
