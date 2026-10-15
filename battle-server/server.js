@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-10-zombie-boss-rejoin-v376";
+const BUILD_ID = "battle-server-2026-10-15-arena-dm-all-spawns-v377";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -1111,7 +1111,7 @@ function preferredDmSpawnPoints(session, team, points) {
   if (roomMode(session) === MAP_MODE_ZOMBIE) return points;
   if (team !== 0) return points;
   const map = mapKey(session.room?.map);
-  if (map === "arena_3lvl") {
+  if (map === "arena_3lvl" && roomMode(session) !== MAP_MODE_DEATHMATCH) {
     return points.filter((point) => Number(point.y) <= -60);
   }
   if (map === "zombi_2") {
