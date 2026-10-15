@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-15-arena-dm-all-spawns-v377";
+const BUILD_ID = "battle-server-2026-10-15-dm-spawn-cycle-v378";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
@@ -1123,6 +1123,35 @@ function preferredDmSpawnPoints(session, team, points) {
   return points;
 }
 
+// Per-player shuffled cycles keep every eligible DM location in rotation.
+// This is the requested restore policy, not a recovered original server algorithm.
+function nextDeathmatchSpawnPoint(session, candidates) {
+  const pointKey = point => [point.x, point.y, point.z].join(",");
+  const unique = Array.from(new Map(candidates.map(point => [pointKey(point), point])).values());
+  const signature = JSON.stringify([mapKey(session.room?.map), unique.map(pointKey)]);
+  let state = session.dmSpawnCycle;
+  if (!state || state.room !== session.room || state.signature !== signature) {
+    state = session.dmSpawnCycle = { room: session.room, signature, remaining: [], recent: [] };
+  }
+  if (!state.remaining.length) {
+    state.remaining = unique.slice();
+    for (let i = state.remaining.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [state.remaining[i], state.remaining[j]] = [state.remaining[j], state.remaining[i]];
+    }
+  }
+  // Relax oldest history first for maps with only one or two eligible locations.
+  let avoid = state.recent.slice();
+  let index = state.remaining.findIndex(point => !avoid.includes(pointKey(point)));
+  while (index < 0 && avoid.length) {
+    avoid.shift();
+    index = state.remaining.findIndex(point => !avoid.includes(pointKey(point)));
+  }
+  const point = state.remaining.splice(index, 1)[0];
+  state.recent = [...state.recent, pointKey(point)].slice(-2);
+  return point;
+}
+
 function spawnPointFor(session, team) {
   if (hasEnvSpawnOverride()) return envSpawnPoint();
 
@@ -1141,10 +1170,12 @@ function spawnPointFor(session, team) {
   const preferredPoints = preferredDmSpawnPoints(session, team, points);
   const candidates = preferredPoints.length ? preferredPoints : points;
   const mode = roomMode(session);
-  const baseIndex = mode === MAP_MODE_DEATHMATCH || mode === MAP_MODE_ZOMBIE || mode === MAP_MODE_ROGUELIKE
+  const baseIndex = mode === MAP_MODE_ZOMBIE || mode === MAP_MODE_ROGUELIKE
     ? Math.floor(Math.random() * candidates.length)
     : (Number(session.actorId) || 1) - 1;
-  const point = candidates[Math.abs(baseIndex) % candidates.length];
+  const point = mode === MAP_MODE_DEATHMATCH
+    ? nextDeathmatchSpawnPoint(session, candidates)
+    : candidates[Math.abs(baseIndex) % candidates.length];
   return {
     ...point,
     y: point.y + (Number.isFinite(SPAWN_Y_OFFSET) ? SPAWN_Y_OFFSET : 0),
