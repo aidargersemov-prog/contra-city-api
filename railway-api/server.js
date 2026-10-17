@@ -26,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-06-modgames-config-v155";
+const API_BUILD_ID = "railway-api-2026-10-17-achievement-crossing-v188";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -1921,6 +1921,7 @@ function loadTextAssetTranslations() {
     path.join(process.cwd(), "resources_textures_export", "TextAsset", "default.txt"),
     path.join(process.cwd(), "..", "resources_textures_export", "TextAsset", "default.txt"),
     path.join(API_DIR, "..", "resources_textures_export", "TextAsset", "default.txt"),
+    path.join(API_DIR, "wear-default.txt"),
     path.join(API_DIR, "data", "default.txt")
   ].filter(Boolean);
 
@@ -2000,6 +2001,8 @@ function appendWearBonusText(text, bonus) {
   return current ? `${current}\n${bonus}` : bonus;
 }
 
+const BALANCED_SET_BOOT_NAMES = new Set(["sneak02", "boot01", "sneakV202", "sneakV203", "mummy", "sneakV2B02", "tactical01", "tactical02", "sneakV2B06", "sneakV2B04", "sneakV2B10", "sneakV2B08", "zadira", "sneakV2B05", "prizrak", "tacticalB01", "stalker", "avenger"]);
+
 function wearTextFor(slot, sname) {
   const key = `${slot || ""}:${String(sname || "")}`;
   const prefix = `wear_${slot}_${sname}`;
@@ -2009,7 +2012,7 @@ function wearTextFor(slot, sname) {
     if (typeof value === "string") localized[field] = value;
   }
   const result = { ...(wearTextOverrides[key] || {}), ...localized };
-  if (slot === "Boots") {
+  if (slot === "Boots" && !BALANCED_SET_BOOT_NAMES.has(sname)) {
     const otherBonuses = String(result.desca || "").split(/\r?\n/)
       .filter((line) => !/скорост[ьи]|прыж|немного меньше, чем у ботинок/iu.test(line))
       .filter((line) => line.trim());
@@ -2020,14 +2023,14 @@ function wearTextFor(slot, sname) {
 }
 
 const shopWearCatalog = {
-  Hats: ["hat01", "hat02", "hat03", "cap01", "cap02", "vietnam", "indiana02", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag"],
+  Hats: ["hat01", "hat02", "hat03", "cap01", "cap02", "vietnam", "indiana02", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag", "helm01"],
   Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos", "gavaibandana"],
-  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022", "gavaigloves"],
+  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022", "gavaigloves", "wristwrapB02"],
   Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2", "gavaihoodie"],
-  Pants: ["sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai"],
-  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag"],
+  Pants: ["sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai", "jeans01", "pant01"],
+  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag", "sneakV2B08"],
   Backpacks: ["parr01", "back01", "back02", "guit01", "guit02", "turt01", "octopus", "arrows", "darts", "rocket01", "rocket02", "rec", "shield", "extinguisher", "sarcophagus", "tomb", "Morte", "Raven", "Scarecrow", "santa", "santa2", "Snowboard", "VampireBat", "infernalRaven", "frankyOctopus", "snake01", "thanos", "rec2", "popugagavai"],
-  Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka"],
+  Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka", "voron", "acidampoule", "reconpouch", "raybanana", "barkhanflask", "stalkerbio", "ecograss", "stormwhiskers", "wanderercap", "cyborgprocessor", "ghostbat", "snakevenom"],
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
 const wearPrices = {
@@ -2131,6 +2134,7 @@ const wearPrices = {
   "Pants:sportB04": { price: 400, nlvl: 27, iS: 0 },
   "Hats:capB07": { price: 575, nlvl: 27, iS: 0 },
   "Backpacks:snake01": { price: 400, nlvl: 27, iS: 0 },
+  "Boots:sneakV2B08": { price: 400, nlvl: 27, iS: 0 },
   //prizrak
   "Masks:klavaB01": { price: 600, nlvl: 21, iS: 0 },
   "Shirts:prizrak": { price: 700, nlvl: 21, iS: 0 },
@@ -2142,6 +2146,7 @@ const wearPrices = {
   "Shirts:anarch": { price: 850, nlvl: 34, iS: 0 },
   "Pants:jeansB03": { price: 600, nlvl: 34, iS: 0 },
   "Gloves:wristwrapB03": { price: 600, nlvl: 34, iS: 0 },
+  "Gloves:wristwrapB02": { price: 150, nlvl: 1, iS: 0 },
   "Boots:anarch": { price: 450, nlvl: 34, iS: 0 },
   "Others:spinyellow": { price: 750, nlvl: 34, iS: 0 },
   //zadira
@@ -2315,37 +2320,39 @@ function assemblageTextFor(id) {
 
 const restoredAssemblageDefinitions = [
   { id: 1, code: "peak_reaper", items: [["Hats", "tophat"], ["Masks", "skeleton_H"], ["Shirts", "skeleton"], ["Backpacks", "tomb"], ["Gloves", "skeleton"], ["Pants", "skeleton"], ["Boots", "skeleton"], ["Others", "coins"]] },
-  { id: 2, code: "raven", items: [["Masks", "gasmask01"], ["Hats", "tactichelm01"], ["Shirts", "tactic01"], ["Gloves", "tactical01"], ["Pants", "tactic01"], ["Boots", "tactical01"]] },
+  { id: 2, code: "raven", items: [["Hats", "tactichelm01"], ["Masks", "gasmask01"], ["Gloves", "tactical01"], ["Shirts", "tactic01"], ["Pants", "tactic01"], ["Boots", "tactical01"], ["Heads", "spec01"], ["Others", "voron"]] },
   { id: 3, code: "vandal", items: [["Hats", "cap02"], ["Masks", "band01"], ["Gloves", "bint02"], ["Shirts", "hood04"], ["Pants", "sport03"], ["Boots", "sneak02"], ["Backpacks", "darts"], ["Others", "maz"]] },
-  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Backpacks", "rocket02"], ["Others", "cola01"], ["Heads", "brown04"]] },
+  { id: 4, code: "stormtrooper", items: [["Hats", "helm01"], ["Masks", "klava01"], ["Gloves", "glov01"], ["Shirts", "armor02"], ["Pants", "jeans01"], ["Boots", "boot01"], ["Backpacks", "back02"], ["Others", "stormwhiskers"]] },
+  { id: 5, code: "ecoterror", items: [["Hats", "hat03"], ["Masks", "goog03"], ["Gloves", "clock01"], ["Shirts", "hood01"], ["Pants", "pant01"], ["Boots", "sneakV202"], ["Backpacks", "turt01"], ["Others", "ecograss"]] },
+  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Boots", "sneakV203"], ["Backpacks", "rocket02"], ["Others", "cola01"], ["Heads", "brown04"]] },
   { id: 7, code: "mummy", items: [["Hats", "pharaoh"], ["Shirts", "mummy"], ["Backpacks", "sarcophagus"], ["Gloves", "mummy"], ["Pants", "mummy"], ["Boots", "mummy"], ["Masks", "mummy_H"], ["Others", "skrab"]] },
-  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Gloves", "clock02"]] },
+  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Gloves", "clock02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Heads", "brown03"], ["Others", "reconpouch"]] },
   { id: 9, code: "dead_moroz", items: [["Hats", "santa"], ["Masks", "santa"], ["Shirts", "santa"], ["Backpacks", "santa"], ["Gloves", "santa"], ["Pants", "santa"], ["Boots", "santa"], ["Others", "santa"]] },
   { id: 10, code: "vdv", items: [["Hats", "beret03"], ["Shirts", "trooper"], ["Masks", "aviaglass"], ["Pants", "trooper"]] },
-  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Shirts", "tactic04"], ["Gloves", "tactical02"], ["Pants", "tactic04"]] },
+  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Gloves", "tactical02"], ["Shirts", "tactic04"], ["Pants", "tactic04"], ["Heads", "black01"], ["Others", "barkhanflask"]] },
   { id: 12, code: "invader", items: [["Shirts", "tactic03"], ["Pants", "tactic03"], ["Boots", "boot02"], ["Masks", "googB02"], ["Hats", "beret01"]] },
   { id: 14, code: "olympian", items: [["Hats", "Olympic"], ["Masks", "SnowGoggles"], ["Shirts", "hoodOlimpic"], ["Backpacks", "Snowboard"], ["Gloves", "Olympic"], ["Pants", "Olympic"], ["Boots", "sneakOlimpic"], ["Others", "medal"]] },
   { id: 15, code: "vkks_gold_2014", items: [["Hats", "capVKKS01"], ["Pants", "sportVKKS01"], ["Others", "medalgold"], ["Shirts", "chood01"]] },
   { id: 16, code: "vkks_silver_2014", items: [["Hats", "capVKKS02"], ["Shirts", "chood02"], ["Pants", "sportVKKS02"], ["Others", "medalsilver"]] },
   { id: 17, code: "vkks_bronze_2014", items: [["Hats", "capVKKS03"], ["Shirts", "chood03"], ["Pants", "sportVKKS03"], ["Others", "medalbronze"]] },
   { id: 18, code: "delta", items: [["Hats", "tacticalB01"], ["Shirts", "tacticB01"], ["Pants", "tacticB01"], ["Gloves", "tacticalB01"], ["Boots", "tacticalB01"], ["Others", "smertik"]] },
-  { id: 19, code: "ray", items: [["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Hats", "capB08"], ["Masks", "bandB07"]] },
+  { id: 19, code: "ray", items: [["Hats", "capB08"], ["Masks", "bandB07"], ["Gloves", "glov02"], ["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Backpacks", "arrows"], ["Heads", "spec02"], ["Others", "raybanana"]] },
   { id: 20, code: "badboy", items: [["Shirts", "hoodB03"], ["Pants", "sportB03"], ["Others", "badboy"], ["Boots", "sneakV2B05"], ["Masks", "maskB01"], ["Hats", "capB04"]] },
-  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Masks", "bandB03"]] },
+  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Masks", "bandB03"], ["Gloves", "wristwrapB02"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Heads", "spec03"], ["Others", "acidampoule"]] },
   { id: 22, code: "stuzha", items: [["Hats", "santa2"], ["Masks", "santa2"], ["Shirts", "santa2"], ["Backpacks", "santa2"], ["Gloves", "santa2"], ["Pants", "santa2"], ["Boots", "santa2"], ["Others", "santa2"]] },
   { id: 23, code: "red_heat", items: [["Hats", "capB06"], ["Shirts", "shirtB09"], ["Pants", "shortB12"], ["Masks", "googB01"], ["Boots", "sneakV2B07"]] },
   { id: 24, code: "cool_breeze", items: [["Hats", "capB05"], ["Shirts", "shirtB04"], ["Pants", "shortB14"], ["Masks", "googB03"], ["Boots", "sneakV2B03"]] },
   { id: 25, code: "necrowarrior", items: [["Heads", "franky"], ["Masks", "franky"], ["Shirts", "franky"], ["Pants", "franky"], ["Boots", "franky"], ["Gloves", "franky"], ["Others", "franky"], ["Backpacks", "frankyOctopus"]] },
   { id: 26, code: "infernal", items: [["Hats", "infernal"], ["Shirts", "infernal"], ["Pants", "infernal"], ["Boots", "infernal"], ["Gloves", "infernal"], ["Masks", "infernal_H"], ["Others", "infernal"], ["Backpacks", "infernalRaven"]] },
-  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"]] },
-  { id: 28, code: "wanderer", items: [["Hats", "hatB01"], ["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"]] },
-  { id: 29, code: "snakecatcher", items: [["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Hats", "capB07"], ["Backpacks", "snake01"]] },
-  { id: 30, code: "ghost", items: [["Masks", "klavaB01"], ["Shirts", "prizrak"], ["Pants", "prizrak"], ["Gloves", "prizrak"], ["Boots", "prizrak"]] },
+  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"], ["Heads", "brown02"], ["Others", "cyborgprocessor"]] },
+  { id: 28, code: "wanderer", items: [["Hats", "hatB01"], ["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"], ["Backpacks", "parr01"], ["Heads", "black04"], ["Others", "wanderercap"]] },
+  { id: 29, code: "snakecatcher", items: [["Hats", "capB07"], ["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Boots", "sneakV2B08"], ["Backpacks", "snake01"], ["Heads", "spec04"], ["Others", "snakevenom"]] },
+  { id: 30, code: "ghost", items: [["Masks", "klavaB01"], ["Shirts", "prizrak"], ["Pants", "prizrak"], ["Gloves", "prizrak"], ["Boots", "prizrak"], ["Others", "ghostbat"]] },
   { id: 31, code: "anarchist", items: [["Hats", "capB01"], ["Shirts", "anarch"], ["Pants", "jeansB03"], ["Gloves", "wristwrapB03"], ["Boots", "anarch"], ["Others", "spinyellow"]] },
   { id: 32, code: "biker", items: [["Hats", "biker"], ["Shirts", "biker"], ["Pants", "jeansB02"], ["Gloves", "biker"], ["Boots", "sneakV201"]] },
   { id: 33, code: "scrapper", items: [["Hats", "hatB06"], ["Masks", "bandB04"], ["Shirts", "hoodB06"], ["Pants", "sportB06"], ["Boots", "zadira"], ["Others", "burger"]] },
   { id: 34, code: "avenger", items: [["Hats", "avenger"], ["Masks", "avenger"], ["Shirts", "avenger"], ["Pants", "avenger"], ["Gloves", "avenger"], ["Boots", "avenger"], ["Others", "spinblue"]] },
-  { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"]] },
+  { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"], ["Others", "stalkerbio"]] },
   { id: 36, code: "spy", items: [["Hats", "business"], ["Masks", "businessgoogles"], ["Shirts", "business"], ["Pants", "business"], ["Gloves", "business"], ["Boots", "business"]] },
   { id: 37, code: "contranos", items: [["Heads", "thanos"], ["Masks", "thanos"], ["Shirts", "thanos"], ["Pants", "thanos"], ["Gloves", "thanos"], ["Boots", "thanos"], ["Backpacks", "thanos"]] },
   { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] },
@@ -2411,16 +2418,10 @@ function donateWearSetItems(setIdValue) {
   });
 }
 
-// Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
-// Keep them out of the shop response instead of exposing sets the battle server cannot complete.
-// The other IDs below are intentionally retired from the live shop; their item
-// definitions stay canonical so already owned/equipped pieces remain valid.
+// Incomplete original set lists were reconstructed from client item names and user corrections.
+// The remaining retired sets retain their canonical items for already owned equipment.
 const removedAssemblageIds = new Set([
   1,  // ПИКОВЫЙ ЖНЕЦ
-  2,  // ВОРОН
-  4,  // ШТУРМОВИК: исходный состав не восстановлен
-  5,  // ЭКОТЕРРОР: исходный состав не восстановлен
-  8,  // РАЗВЕД
   10, // ВДВ
   14, // Олимпиец
   23, // Красная жара
@@ -8571,7 +8572,6 @@ function loadAchievementCatalog() {
 const achievementCatalog = loadAchievementCatalog();
 const achievementBase = achievementCatalog.map(({ parts, ...achievement }) => achievement);
 const achievementCatalogIds = new Set(achievementCatalog.map((achievement) => Number(achievement.id)));
-const ACHIEVEMENT_POP_HISTORICAL = process.env.ACHIEVEMENT_POP_HISTORICAL === "1";
 
 function achievementWeaponStats(account) {
   return (account.weaponStats || []).map((item) => ({
@@ -8688,7 +8688,7 @@ async function loadAchievementAccountFromPostgres(client, playerId) {
   };
 }
 
-async function syncPostgresAchievements(client, playerId) {
+async function syncPostgresAchievements(client, playerId, progressBeforeEvent) {
   if (!achievementCatalog.length) return [];
   const account = await loadAchievementAccountFromPostgres(client, playerId);
   if (!account) return [];
@@ -8698,7 +8698,7 @@ async function syncPostgresAchievements(client, playerId) {
     [account.id]
   );
   const hasCatalogProgress = existing.rows.some((row) => achievementCatalogIds.has(Number(row.achievement_id)));
-  const baselineOnly = !ACHIEVEMENT_POP_HISTORICAL && !hasCatalogProgress;
+  const baselineOnly = !hasCatalogProgress;
   const completedBefore = new Set(
     existing.rows
       .filter((row) => Number(row.claimed_value || 0) > 0)
@@ -8714,7 +8714,11 @@ async function syncPostgresAchievements(client, playerId) {
     const complete = Number(itemProgress.c || 0) > 0 ? 1 : 0;
     if (complete) completedCount += 1;
 
-    if (!baselineOnly && complete && !completedBefore.has(Number(achievement.id))) {
+    // Catalog rows may be absent for historical progress; only this event's
+    // threshold crossing may produce an Event76 notification.
+    const previousValue = Number(progressBeforeEvent?.[String(achievement.id)]?.v ?? currentValue);
+    const crossedByEvent = previousValue < Number(achievement.v || 0) && complete;
+    if (crossedByEvent && !completedBefore.has(Number(achievement.id))) {
       newlyCompleted.push({
         id: Number(achievement.id),
         i: Number(achievement.i),
@@ -8738,7 +8742,8 @@ async function syncPostgresAchievements(client, playerId) {
 
   if (baselineOnly) {
     console.log(`[achievements] baseline player=${account.id} completed=${completedCount} catalog=${achievementCatalog.length}`);
-  } else if (newlyCompleted.length) {
+  }
+  if (newlyCompleted.length) {
     console.log(`[achievements] unlock player=${account.id} count=${newlyCompleted.length} ids=${newlyCompleted.map((item) => item.i).join(",")}`);
   }
   for (const achievement of newlyCompleted) {
@@ -14521,8 +14526,6 @@ async function recordBattleEvent(event) {
       );
     }
 
-    await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
-    const achievements = [];
     const achievementPlayerIds = new Set();
     if (type === "death" || type === "score") {
       const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
@@ -14531,8 +14534,20 @@ async function recordBattleEvent(event) {
     } else if (type === "summary") {
       achievementPlayerIds.add(playerId);
     }
+    const achievementProgressBeforeEvent = new Map();
     for (const achievementPlayerId of achievementPlayerIds) {
-      const newlyCompleted = await syncPostgresAchievements(client, achievementPlayerId);
+      const beforeAccount = await loadAchievementAccountFromPostgres(client, achievementPlayerId);
+      if (beforeAccount) {
+        achievementProgressBeforeEvent.set(achievementPlayerId, achievementProgressFor(beforeAccount));
+      }
+    }
+
+    await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
+    const achievements = [];
+    for (const achievementPlayerId of achievementPlayerIds) {
+      const newlyCompleted = await syncPostgresAchievements(
+        client, achievementPlayerId, achievementProgressBeforeEvent.get(achievementPlayerId)
+      );
       achievements.push(...newlyCompleted);
     }
 
