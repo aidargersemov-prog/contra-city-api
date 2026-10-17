@@ -32,9 +32,10 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-15-dm-spawn-cycle-v378";
+const BUILD_ID = "battle-server-2026-10-17-inbound-parse-recovery-v411";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
+const EXPEDITION_PUBLIC_ENABLED = false;
 // Keep deterministic damage rolls unchanged when only the build label changes.
 const DAMAGE_RANDOM_SEED = "battle-server-2026-09-26-hitreg-trace-v333";
 // Cosmetic state has its own outer Photon event. Expedition's inner command
@@ -3731,37 +3732,39 @@ const SET_BONUS_DEFINITIONS = [
 
 const ASSEMBLAGE_BONUS_TEXTS = {
   1: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
-  2: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
-  3: "+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\nР СњР ВµР В±Р С•Р В»РЎРЉРЎв‚¬Р С•Р в„– Р В±Р С•Р Р…РЎС“РЎРѓ Р С” Р С—РЎР‚РЎвЂ№Р В¶Р С”РЎС“ Р С—Р С•РЎРѓР В»Р Вµ Р Р†РЎвЂ№РЎРѓРЎвЂљРЎР‚Р ВµР В»Р В° Р С‘Р В· Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р В°",
-  6: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р С” Р вЂРЎР‚Р С•Р Р…Р Вµ",
-  7: "+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+2% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†",
-  8: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+2% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+2% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
+  2: "+8% защита от автоматов\n+8% защита от снайперок\n+8% защита от пистолетов\n+8% защита от дробовиков\nУрон автомата Наводка +1",
+  3: "+7% защита от автоматов\n+5% защита от пистолетов\n+5% защита от дробовиков\nУрон автомата Кладенец +1",
+  4: "+5% защита от автоматов\n+7% защита от снайперок\n+5% защита от пистолетов\n+5% защита от дробовиков\nУрон снайперки Серп +7",
+  5: "+6% защита от автоматов\n+5% защита от снайперок\n+5% защита от пистолетов\n+5% защита от дробовиков\nУрон автомата МММ-16 +2",
+  6: "+8% защита от автоматов\n+8% защита от снайперок\n+6% защита от пистолетов\n+6% защита от дробовиков\nУрон снайперки Дальнобойщик +5",
+  7: "+9% защита от автоматов\n+7% защита от снайперок\n+6% защита от пистолетов\n+6% защита от дробовиков\nУрон гранатомета Гадюка +7",
+  8: "+10% защита от автоматов\n+7% защита от снайперок\n+8% защита от пистолетов\n+8% защита от дробовиков\nУрон дробовика Сибиряк +7",
   9: "+35% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В»Р ВµР Т‘Р С•Р СР ВµРЎвЂљР С•Р Р†\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n-20% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—Р С•Р Т‘Р В¶Р С‘Р С–Р В°РЎР‹РЎвЂ°Р ВµР С–Р С• Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ",
   10: "+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
-  11: "Р Р€РЎР‚Р С•Р Р… РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘. Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р† +5%\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” +15%\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
+  11: "+9% защита от автоматов\n+9% защита от снайперок\n+8% защита от пистолетов\n+8% защита от дробовиков\nУрон снайперки Писец +7",
   12: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р†\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+7% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3\nРЎС“РЎР‚Р С•Р Р… РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2",
   14: "Р Р€РЎР‚Р С•Р Р… РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘. Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р† +10%\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” +10%\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
   15: "Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉР Вµ +7%\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ:\nРЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ  +15%\nР В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† +11%\nР Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р† +10%\nРЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” +15%\nР С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р† +7%\nР Р€РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +4",
   16: "Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉР Вµ +5%\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ:\nРЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ  +13%\nР В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† +10%\nР Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р† +9%\nРЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” +15%\nР С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р† +5%\nР Р€РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
   17: "Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉР Вµ +5%\nР вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ:\nРЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ  +11%\nР В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† +9%\nР Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р† +8%\nРЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” +15%\nР С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р† +3%\nР Р€РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2",
-  18: "+6% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+8% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
-  19: "+3% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+3% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+5% Р вЂ”Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р†\nРЎС“Р Р†Р ВµР В»Р С‘РЎвЂЎР С‘Р Р†Р В°Р ВµРЎвЂљ РЎРѓР С”Р С•РЎР‚Р С•РЎРѓРЎвЂљРЎРЉ Р С—Р ВµРЎР‚Р ВµР Т‘Р Р†Р С‘Р В¶Р ВµР Р…Р С‘РЎРЏ",
-  20: "+6% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+8% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
-  21: "+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+3% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ Р С–РЎР‚Р В°Р Р…Р В°РЎвЂљР С•Р СР ВµРЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљР В° Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р С” Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2",
+  18: "+10% защита от автоматов\n+10% защита от снайперок\n+12% защита от дробовиков\nУрон дробовика Кабан +10",
+  19: "+7% защита от автоматов\n+8% защита от снайперок\n+6% защита от пистолетов\n+6% защита от дробовиков\nУрон пистолета СверхДембель +3",
+  20: "+11% защита от автоматов\n+9% защита от снайперок\n+10% защита от дробовиков\nУрон автомата Смертобой +1",
+  21: "+9% защита от автоматов\n+8% защита от снайперок\n+8% защита от пистолетов\n+8% защита от дробовиков\nУрон автомата Ликвидатор +1",
   22: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+10% Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹",
   23: "+6% Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+12% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+3% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР В° Р СџРЎР‚Р С•Р Р†Р С•Р С”Р В°РЎвЂљР С•РЎР‚\n+3% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р†",
   24: "+5% Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р В° Р РЋР С‘Р В±Р С‘РЎР‚РЎРЏР С”",
   25: "+7% Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+12% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+7% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р† \n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
   26: "+6% Р вЂ”Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
-  27: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р†\n+12% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†",
-  28: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚РЎС“РЎвЂЎР Р…Р С•Р С–Р С•\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С”Р С‘ Р СџР С‘РЎРѓР ВµРЎвЂ \nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2",
-  29: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+7% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +4",
-  30: "+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С–РЎР‚Р В°Р Р…Р В°РЎвЂљР С•Р СР ВµРЎвЂљР С•Р Р†\n+4% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3\nРЎС“РЎР‚Р С•Р Р… Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
+  27: "+9% защита от автоматов\n+8% защита от снайперок\n+8% защита от пистолетов\n+8% защита от дробовиков\nУрон пулемета Максимыч +3",
+  28: "+9% защита от автоматов\n+9% защита от снайперок\n+8% защита от пистолетов\n+8% защита от дробовиков\nУрон снайперки Росомаха +7",
+  29: "+10% защита от автоматов\n+9% защита от снайперок\n+12% защита от пистолетов\n+8% защита от дробовиков\nУрон снайперки Шершень +7",
+  30: "+11% защита от автоматов\n+11% защита от снайперок\n+12% защита от пистолетов\n+10% защита от дробовиков\nУрон автомата Буран +1",
   31: "+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+12% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р†\n+8% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+6% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2\nРЎС“РЎР‚Р С•Р Р… Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р† Р Р…Р В° Р В±Р В»Р С‘Р В¶Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +5",
   32: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С–РЎР‚Р В°Р Р…Р В°РЎвЂљР С•Р СР ВµРЎвЂљР С•Р Р†\n+20% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+15% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+2% Р С” РЎРѓР С”Р С•РЎР‚Р С•РЎРѓРЎвЂљР С‘\nРЎС“РЎР‚Р С•Р Р… РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С” Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +4",
-  33: "+3% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+4% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +4\nРЎС“РЎР‚Р С•Р Р… Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +2",
-  34: "+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+4% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С–РЎР‚Р В°Р Р…Р В°РЎвЂљР С•Р СР ВµРЎвЂљР С•Р Р†\n+5% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3\nРЎС“РЎР‚Р С•Р Р… Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +5",
-  35: "+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+12% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +6\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +5",
+  33: "+11% защита от автоматов\n+9% защита от снайперок\n+10% защита от пистолетов\n+10% защита от дробовиков\nУрон автомата Звездочет +1",
+  34: "+10% защита от снайперок\n+11% защита от пистолетов\n+10% защита от дробовиков\nУрон автомата Повстанец +1",
+  35: "+10% защита от автоматов\n+9% защита от снайперок\n+11% защита от пистолетов\n+10% защита от дробовиков\nУрон снайперки Вымпел +8",
   36: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р†\n+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+9% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +7\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +6",
   37: "+10% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎРѓР Р…Р В°Р в„–Р С—Р ВµРЎР‚Р С•Р С”\n+4% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С—Р С‘РЎРѓРЎвЂљР С•Р В»Р ВµРЎвЂљР С•Р Р†\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•РЎР‚РЎС“Р В¶Р С‘РЎРЏ Р В±Р В»Р С‘Р В¶Р Р…Р ВµР С–Р С• Р В±Р С•РЎРЏ\n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ \n+15% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С–РЎР‚Р В°Р Р…Р В°РЎвЂљР С•Р СР ВµРЎвЂљР С•Р Р†\n+5% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+4% Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\nРЎС“РЎР‚Р С•Р Р… РЎР‚Р В°Р С”Р ВµРЎвЂљР Р…Р С‘РЎвЂ  Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +6\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3",
   38: "+50% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎР‚Р С•Р В±Р С•Р Р†Р С‘Р С”Р С•Р Р†\n+50% Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р С•Р С–Р Р…Р ВµР СР ВµРЎвЂљР С•Р Р†\n+150 Р С” Р В·Р Т‘Р С•РЎР‚Р С•Р Р†РЎРЉРЎР‹\n+20 Р С” Р В±РЎР‚Р С•Р Р…Р Вµ\nРЎС“РЎР‚Р С•Р Р… Р В°Р Р†РЎвЂљР С•Р СР В°РЎвЂљР С•Р Р† Р Р…Р В° Р Т‘Р В°Р В»РЎРЉР Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +3\nРЎС“РЎР‚Р С•Р Р… Р С—РЎС“Р В»Р ВµР СР ВµРЎвЂљР С•Р Р† Р Р…Р В° РЎРѓРЎР‚Р ВµР Т‘Р Р…Р ВµР в„– Р Т‘Р С‘РЎРѓРЎвЂљР В°Р Р…РЎвЂ Р С‘Р С‘ +5",
@@ -3770,32 +3773,34 @@ const ASSEMBLAGE_BONUS_TEXTS = {
 
 const RESTORED_SET_BONUS_DEFINITIONS = [
   { id: 1, code: "peak_reaper", required: ["1:tophat", "2:skeleton_h", "4:skeleton", "7:tomb", "3:skeleton", "5:skeleton", "6:skeleton", "8:coins"] },
-  { id: 2, code: "raven", required: ["2:gasmask01", "1:tactichelm01", "4:tactic01", "3:tactical01", "5:tactic01", "6:tactical01"] },
+  { id: 2, code: "raven", required: ["1:tactichelm01", "2:gasmask01", "3:tactical01", "4:tactic01", "5:tactic01", "6:tactical01", "9:spec01", "8:voron"] },
   { id: 3, code: "vandal", required: ["1:cap02", "2:band01", "3:bint02", "4:hood04", "5:sport03", "6:sneak02", "7:darts", "8:maz"] },
-  { id: 6, code: "belov", required: ["1:indiana02", "2:goog02", "3:bint01", "4:hood03", "5:sport02", "7:rocket02", "8:cola01", "9:brown04"] },
+  { id: 4, code: "stormtrooper", required: ["1:helm01", "2:klava01", "3:glov01", "4:armor02", "5:jeans01", "6:boot01", "7:back02", "8:stormwhiskers"] },
+  { id: 5, code: "ecoterror", required: ["1:hat03", "2:goog03", "3:clock01", "4:hood01", "5:pant01", "6:sneakv202", "7:turt01", "8:ecograss"] },
+  { id: 6, code: "belov", required: ["1:indiana02", "2:goog02", "3:bint01", "4:hood03", "5:sport02", "6:sneakv203", "7:rocket02", "8:cola01", "9:brown04"] },
   { id: 7, code: "mummy", required: ["1:pharaoh", "4:mummy", "7:sarcophagus", "3:mummy", "5:mummy", "6:mummy", "2:mummy_h", "8:skrab"] },
-  { id: 8, code: "recon", required: ["1:tactichelm02", "2:gasmask02", "4:tactic02", "5:tactic02", "6:tactical02", "3:clock02"] },
+  { id: 8, code: "recon", required: ["1:tactichelm02", "2:gasmask02", "3:clock02", "4:tactic02", "5:tactic02", "6:tactical02", "9:brown03", "8:reconpouch"] },
   { id: 9, code: "dead_moroz", required: ["1:santa", "2:santa", "4:santa", "7:santa", "3:santa", "5:santa", "6:santa", "8:santa"] },
   { id: 10, code: "vdv", required: ["1:beret03", "4:trooper", "2:aviaglass", "5:trooper"] },
-  { id: 11, code: "barkhan", required: ["1:milcap03", "4:tactic04", "3:tactical02", "5:tactic04"] },
+  { id: 11, code: "barkhan", required: ["1:milcap03", "3:tactical02", "4:tactic04", "5:tactic04", "9:black01", "8:barkhanflask"] },
   { id: 12, code: "invader", required: ["4:tactic03", "5:tactic03", "6:boot02", "2:googb02", "1:beret01"] },
   { id: 14, code: "olympian", required: ["1:olympic", "2:snowgoggles", "4:hoodolimpic", "7:snowboard", "3:olympic", "5:olympic", "6:sneakolimpic", "8:medal"] },
   { id: 15, code: "vkks_gold_2014", required: ["1:capvkks01", "5:sportvkks01", "8:medalgold", "4:chood01"] },
   { id: 16, code: "vkks_silver_2014", required: ["1:capvkks02", "4:chood02", "5:sportvkks02", "8:medalsilver"] },
   { id: 17, code: "vkks_bronze_2014", required: ["1:capvkks03", "4:chood03", "5:sportvkks03", "8:medalbronze"] },
   { id: 18, code: "delta", required: ["1:tacticalb01", "4:tacticb01", "5:tacticb01", "3:tacticalb01", "6:tacticalb01", "8:smertik"] },
-  { id: 19, code: "ray", required: ["4:hoodb08", "5:sportb08", "6:sneakv2b02", "1:capb08", "2:bandb07"], speedPercent: 1 },
+  { id: 19, code: "ray", required: ["1:capb08", "2:bandb07", "3:glov02", "4:hoodb08", "5:sportb08", "6:sneakv2b02", "7:arrows", "9:spec02", "8:raybanana"] },
   { id: 20, code: "badboy", required: ["4:hoodb03", "5:sportb03", "8:badboy", "6:sneakv2b05", "2:maskb01", "1:capb04"] },
-  { id: 21, code: "acid_warrior", required: ["1:hatb08", "4:hoodb10", "5:sportb10", "6:sneakv2b06", "2:bandb03"] },
+  { id: 21, code: "acid_warrior", required: ["1:hatb08", "2:bandb03", "3:wristwrapb02", "4:hoodb10", "5:sportb10", "6:sneakv2b06", "9:spec03", "8:acidampoule"] },
   { id: 22, code: "stuzha", required: ["1:santa2", "2:santa2", "4:santa2", "7:santa2", "3:santa2", "5:santa2", "6:santa2", "8:santa2"] },
   { id: 23, code: "red_heat", required: ["1:capb06", "4:shirtb09", "5:shortb12", "2:googb01", "6:sneakv2b07"] },
   { id: 24, code: "cool_breeze", required: ["1:capb05", "4:shirtb04", "5:shortb14", "2:googb03", "6:sneakv2b03"] },
   { id: 25, code: "necrowarrior", required: ["9:franky", "2:franky", "4:franky", "5:franky", "6:franky", "3:franky", "8:franky", "7:frankyoctopus"] },
   { id: 26, code: "infernal", required: ["1:infernal", "4:infernal", "5:infernal", "6:infernal", "3:infernal", "2:infernal_h", "8:infernal", "7:infernalraven"] },
-  { id: 27, code: "cyborg", required: ["2:maskb02", "4:hoodb05", "5:sportb05", "6:sneakv2b04"] },
-  { id: 28, code: "wanderer", required: ["1:hatb01", "2:bandb05", "4:hoodb01", "5:sportb01", "6:sneakv2b10"] },
-  { id: 29, code: "snakecatcher", required: ["2:bandb01", "4:hoodb04", "5:sportb04", "1:capb07", "7:snake01"] },
-  { id: 30, code: "ghost", required: ["2:klavab01", "4:prizrak", "5:prizrak", "3:prizrak", "6:prizrak"] },
+  { id: 27, code: "cyborg", required: ["2:maskb02", "4:hoodb05", "5:sportb05", "6:sneakv2b04", "9:brown02", "8:cyborgprocessor"] },
+  { id: 28, code: "wanderer", required: ["1:hatb01", "2:bandb05", "4:hoodb01", "5:sportb01", "6:sneakv2b10", "7:parr01", "9:black04", "8:wanderercap"] },
+  { id: 29, code: "snakecatcher", required: ["1:capb07", "2:bandb01", "4:hoodb04", "5:sportb04", "6:sneakv2b08", "7:snake01", "9:spec04", "8:snakevenom"] },
+  { id: 30, code: "ghost", required: ["2:klavab01", "4:prizrak", "5:prizrak", "3:prizrak", "6:prizrak", "8:ghostbat"] },
   { id: 31, code: "anarchist", required: ["1:capb01", "4:anarch", "5:jeansb03", "3:wristwrapb03", "6:anarch", "8:spinyellow"] },
   {
     id: 32,
@@ -3808,7 +3813,7 @@ const RESTORED_SET_BONUS_DEFINITIONS = [
   },
   { id: 33, code: "scrapper", required: ["1:hatb06", "2:bandb04", "4:hoodb06", "5:sportb06", "6:zadira", "8:burger"] },
   { id: 34, code: "avenger", required: ["1:avenger", "2:avenger", "4:avenger", "5:avenger", "3:avenger", "6:avenger", "8:spinblue"] },
-  { id: 35, code: "stalker", required: ["1:stalker", "2:stalkergasmask", "4:stalker", "5:stalker", "3:stalker", "6:stalker"] },
+  { id: 35, code: "stalker", required: ["1:stalker", "2:stalkergasmask", "4:stalker", "5:stalker", "3:stalker", "6:stalker", "8:stalkerbio"] },
   { id: 36, code: "spy", required: ["1:business", "2:businessgoogles", "4:business", "5:business", "3:business", "6:business"] },
   { id: 37, code: "contranos", required: ["9:thanos", "2:thanos", "4:thanos", "5:thanos", "3:thanos", "6:thanos", "7:thanos"] },
   { id: 38, code: "blue_soldier", required: ["9:spec99", "1:ushanka2", "4:trooper2", "5:pant032", "3:glov022", "6:slip99", "7:rec2", "8:vodka"] },
@@ -4387,11 +4392,35 @@ const CLIENT_WEAR_BONUS_TEXTS = require("./wear-bonus-texts.json");
   ...CLIENT_WEAR_BONUS_TEXTS,
 */
 const RESTORED_WEAR_BONUS_TEXTS = new Map(Object.entries(CLIENT_WEAR_BONUS_TEXTS));
+const BALANCED_WEAR_BONUS_KEYS = new Set([
+  "1:avenger", "2:avenger", "3:avenger", "4:avenger", "5:avenger", "6:avenger", "8:spinblue",
+  "1:stalker", "2:stalkergasmask", "3:stalker", "4:stalker", "5:stalker", "6:stalker", "8:stalkerbio",
+  "1:tacticalb01", "3:tacticalb01", "4:tacticb01", "5:tacticb01", "6:tacticalb01", "8:smertik",
+  "2:klavab01", "3:prizrak", "4:prizrak", "5:prizrak", "6:prizrak", "8:ghostbat",
+  "1:capb04", "2:maskb01", "4:hoodb03", "5:sportb03", "6:sneakv2b05", "8:badboy",
+  "1:hatb06", "2:bandb04", "4:hoodb06", "5:sportb06", "6:zadira", "8:burger",
+  "1:capb07", "2:bandb01", "4:hoodb04", "5:sportb04", "6:sneakv2b08", "7:snake01", "9:spec04", "8:snakevenom",
+  "2:bandb05", "4:hoodb01", "5:sportb01", "6:sneakv2b10", "7:parr01", "9:black04", "8:wanderercap",
+  "2:maskb02", "4:hoodb05", "5:sportb05", "6:sneakv2b04", "9:brown02", "8:cyborgprocessor",
+  "1:hatb08", "2:bandb03", "4:hoodb10", "5:sportb10", "6:sneakv2b06", "9:spec03", "8:acidampoule",
+  "1:milcap03", "3:tactical02", "4:tactic04", "5:tactic04", "9:black01", "8:barkhanflask",
+  "1:tactichelm02", "2:gasmask02", "3:clock02", "4:tactic02", "5:tactic02", "6:tactical02", "9:brown03", "8:reconpouch",
+  "1:tactichelm01", "2:gasmask01", "3:tactical01", "4:tactic01", "5:tactic01", "6:tactical01", "9:spec01", "8:voron",
+  "1:cap02", "2:band01", "3:bint02", "4:hood04", "5:sport03", "6:sneak02", "7:darts", "8:maz",
+  "1:helm01", "2:klava01", "3:glov01", "4:armor02", "5:jeans01", "6:boot01", "7:back02", "8:stormwhiskers",
+  "2:mask01", "4:armor01", "5:sport01", // Restore bonuses cached by the previous incorrect set catalog.
+  "1:hat03", "2:goog03", "3:clock01", "4:hood01", "5:pant01", "6:sneakv202", "7:turt01", "8:ecograss",
+  "5:pant03", // Restore the original bonus if the old Eco Terror build cached its description.
+  "1:pharaoh", "2:mummy_h", "3:mummy", "4:mummy", "5:mummy", "6:mummy", "7:sarcophagus", "8:skrab",
+  "1:indiana02", "2:goog02", "3:bint01", "4:hood03", "5:sport02", "6:sneakv203", "7:rocket02", "8:cola01", "9:brown04",
+  "1:capb08", "2:bandb07", "3:glov02", "3:wristwrapb02", "4:hoodb08", "5:sportb08", "6:sneakv2b02", "7:arrows", "9:spec02", "8:raybanana",
+]);
 
 const SHOTGUN_JUMP_PERCENT_BY_BOOT = new Map(Object.entries({
   "6:sneak02": 5,      // Р В¤Р С•РЎР‚Р ВµРЎРѓРЎвЂљ
   "6:slip01": 5,       // Р СћР В°РЎР‚Р В°Р С”Р В°Р Р…РЎРЉРЎРЏ РЎРѓР СР ВµРЎР‚РЎвЂљРЎРЉ
   "6:boot01": 5,       // Р вЂР ВµРЎР‚РЎвЂ РЎвЂ№
+  "6:sneakv2b08": 10, // Змееступы: тот же стандартный бонус к прыжку.
   "6:sneakv202": 10,   // Р РЃР Р…РЎС“РЎР‚
   "6:sneakv203": 10,   // Р СџРЎР‚РЎвЂ№Р С–РЎС“Р Р…
   "6:sneakolimpic": 15, // Р вЂєР ВµР С–Р С”Р С•РЎРѓРЎвЂљРЎС“Р С—
@@ -4428,6 +4457,12 @@ function restoredWearBonusText(selectedWear) {
 }
 
 function wearWithRestoredBonusText(selectedWear) {
+  // Inventory rows may still carry pre-balance descriptions from an older API build.
+  // Rebalanced items use the current server text even for an existing inventory.
+  if (BALANCED_WEAR_BONUS_KEYS.has(wearBonusKey(selectedWear))) {
+    const desca = RESTORED_WEAR_BONUS_TEXTS.get(wearBonusKey(selectedWear));
+    return { ...(selectedWear?.item || {}), desca, descAdditional: desca };
+  }
   const fallback = restoredWearBonusText(selectedWear);
   if (!fallback) return selectedWear?.item || {};
   return { ...(selectedWear?.item || {}), desca: fallback, descAdditional: fallback };
@@ -4609,6 +4644,7 @@ function applyWearDamageBonuses(modifiers, text) {
       continue;
     }
     if (/защит/.test(line)) continue;
+    if (/тяж[её]лых\s+пистолетов/.test(line)) continue;
     if (protectionList && !/урон/.test(line)) continue;
     if (/урон/.test(line)) protectionList = false;
 
@@ -4731,6 +4767,8 @@ function gameplayModifiersForProfile(profile = null) {
     weaponRapidityPercent: 0,
     weaponCritPercent: 0,
     weaponHeadDamagePercent: 0,
+    headshotDamageFlat: 0,
+    heavyPistolDamageFlat: 0,
     weaponAccuracyFlat: 0,
     weaponAmmoPercent: 0,
     weaponMinDamageFlat: 0,
@@ -4799,6 +4837,11 @@ function gameplayModifiersForProfile(profile = null) {
 
   const selectedWearList = selectedWears(profile);
   for (const selectedWear of selectedWearList) {
+    if (wearBonusKey(selectedWear) === "8:maz" || wearBonusKey(selectedWear) === "8:smertik" || wearBonusKey(selectedWear) === "8:raybanana") modifiers.headshotDamageFlat += 1;
+    if (wearBonusKey(selectedWear) === "8:badboy") modifiers.heavyPistolDamageFlat += 10;
+    if (wearBonusKey(selectedWear) === "8:reconpouch" || wearBonusKey(selectedWear) === "8:ecograss" || wearBonusKey(selectedWear) === "8:wanderercap") modifiers.weaponCritPercent += 5;
+    if (wearBonusKey(selectedWear) === "8:stormwhiskers") modifiers.weaponAccuracyFlat += 1;
+    if (wearBonusKey(selectedWear) === "8:cyborgprocessor") addProtectionBonus(modifiers.weaponProtections, "59", 20);
     if (numberOr(selectedWear.item?.wt, selectedWear.wearType) === 6) {
       // All footwear now uses Chopcrosses movement. Keep each item's other bonuses
       // and let completed sets/training continue to add their separate modifiers.
@@ -4823,7 +4866,48 @@ function gameplayModifiersForProfile(profile = null) {
   for (const definition of RESTORED_SET_BONUS_DEFINITIONS) {
     if (!definition.required.every((key) => selectedWearKeys.has(key))) continue;
     modifiers.completedSets.push(definition.id);
-    if (definition.bonusText) applyWearTextBonuses(modifiers, { desca: definition.bonusText });
+    if (definition.bonusText) {
+      const bonusText = definition.id === 34
+        ? definition.bonusText.replace(/\nУрон автомата Повстанец \+1$/, "")
+        : definition.id === 35
+        ? definition.bonusText.replace(/\nУрон снайперки Вымпел \+8$/, "")
+        : definition.id === 18
+        ? definition.bonusText.replace(/\nУрон дробовика Кабан \+10$/, "")
+        : definition.id === 30
+        ? definition.bonusText.replace(/\nУрон автомата Буран \+1$/, "")
+        : definition.id === 20
+        ? definition.bonusText.replace(/\nУрон автомата Смертобой \+1$/, "")
+        : definition.id === 33
+        ? definition.bonusText.replace(/\nУрон автомата Звездочет \+1$/, "")
+        : definition.id === 29
+        ? definition.bonusText.replace(/\nУрон снайперки Шершень \+7$/, "")
+        : definition.id === 28
+        ? definition.bonusText.replace(/\nУрон снайперки Росомаха \+7$/, "")
+        : definition.id === 27
+        ? definition.bonusText.replace(/\nУрон пулемета Максимыч \+3$/, "")
+        : definition.id === 21
+        ? definition.bonusText.replace(/\nУрон автомата Ликвидатор \+1$/, "")
+        : definition.id === 11
+        ? definition.bonusText.replace(/\nУрон снайперки Писец \+7$/, "")
+        : definition.id === 8
+        ? definition.bonusText.replace(/\nУрон дробовика Сибиряк \+7$/, "")
+        : definition.id === 2
+        ? definition.bonusText.replace(/\nУрон автомата Наводка \+1$/, "")
+        : definition.id === 3
+        ? definition.bonusText.replace(/\nУрон автомата Кладенец \+1$/, "")
+        : definition.id === 4
+          ? definition.bonusText.replace(/\nУрон снайперки Серп \+7$/, "")
+          : definition.id === 5
+            ? definition.bonusText.replace(/\nУрон автомата МММ-16 \+2$/, "")
+            : definition.id === 6
+              ? definition.bonusText.replace(/\nУрон снайперки Дальнобойщик \+5$/, "")
+              : definition.id === 7
+                ? definition.bonusText.replace(/\nУрон гранатомета Гадюка \+7$/, "")
+                : definition.id === 19
+                  ? definition.bonusText.replace(/\nУрон пистолета СверхДембель \+3$/, "")
+                  : definition.bonusText;
+      applyWearTextBonuses(modifiers, { desca: bonusText });
+    }
     modifiers.healthFlat += numberOr(definition.healthFlat, 0);
     modifiers.healthPercent += numberOr(definition.healthPercent, 0);
     modifiers.healthFloor = Math.max(modifiers.healthFloor, numberOr(definition.healthFloor, 0));
@@ -4890,6 +4974,53 @@ function applyWeaponGameplayBonuses(item, profile = null) {
     } else if (bonus.range === "long") {
       result.lmindam = numberOr(result.lmindam, 0) + amount;
       result.lmaxdam = numberOr(result.lmaxdam, 0) + amount;
+    }
+  }
+
+  const setWeaponDamageFlat = modifiers.completedSets.includes(34) && weaponCanonicalKey(result) === "mg_aug5_o"
+    ? 1
+    : modifiers.completedSets.includes(35) && weaponCanonicalKey(result) === "sr_vintorez"
+    ? 8
+    : modifiers.completedSets.includes(18) && weaponCanonicalKey(result) === "sg_spas"
+    ? 10
+    : modifiers.completedSets.includes(30) && weaponCanonicalKey(result) === "mg_aug3_o"
+    ? 1
+    : modifiers.completedSets.includes(20) && weaponCanonicalKey(result) === "mg_ak47b07"
+    ? 1
+    : modifiers.completedSets.includes(33) && weaponCanonicalKey(result) === "mg_ak47b08"
+    ? 1
+    : modifiers.completedSets.includes(29) && weaponCanonicalKey(result) === "sr_wildcat2"
+    ? 7
+    : modifiers.completedSets.includes(28) && weaponCanonicalKey(result) === "sr_wildcat1"
+    ? 7
+    : modifiers.completedSets.includes(27) && weaponCanonicalKey(result) === "gg_m134b02"
+    ? 3
+    : modifiers.completedSets.includes(21) && weaponCanonicalKey(result) === "mg_ump45d2_o"
+    ? 1
+    : modifiers.completedSets.includes(11) && weaponCanonicalKey(result) === "sr_arctic"
+    ? 7
+    : modifiers.completedSets.includes(8) && weaponCanonicalKey(result) === "sg_novapump"
+    ? 7
+    : modifiers.completedSets.includes(2) && weaponCanonicalKey(result) === "mg_m4d_o"
+    ? 1
+    : modifiers.completedSets.includes(3) && weaponCanonicalKey(result) === "mg_ak103"
+    ? 1
+    : modifiers.completedSets.includes(4) && weaponCanonicalKey(result) === "sr_steyr" ? 7
+    : modifiers.completedSets.includes(5) && weaponCanonicalKey(result) === "mg_m16" ? 2
+    : modifiers.completedSets.includes(7) && weaponCanonicalKey(result) === "gl_milkor_a" ? 7
+    : modifiers.completedSets.includes(6) && weaponCanonicalKey(result) === "sr_hk417_d" ? 5
+    : modifiers.completedSets.includes(19) && weaponCanonicalKey(result) === "hg_waltherp99" ? 3 : 0;
+  if (setWeaponDamageFlat > 0) {
+    for (const stat of ["smindam", "smaxdam", "mmindam", "mmaxdam", "lmindam", "lmaxdam"]) {
+      result[stat] = numberOr(result[stat], 0) + setWeaponDamageFlat;
+    }
+  }
+
+  const heavyPistolDamageFlat = (weaponCanonicalKey(result) === "hg_desert" || weaponCanonicalKey(result) === "hg_desertb01")
+    ? numberOr(modifiers.heavyPistolDamageFlat, 0) : 0;
+  if (heavyPistolDamageFlat > 0) {
+    for (const stat of ["smindam", "smaxdam", "mmindam", "mmaxdam", "lmindam", "lmaxdam"]) {
+      result[stat] = numberOr(result[stat], 0) + heavyPistolDamageFlat;
     }
   }
 
@@ -9343,6 +9474,10 @@ function shotDamageState(session, weaponType, state) {
   return state || fallbackWeaponStateByType(weaponType);
 }
 
+function mummyPrimusReceivedDamageFlat(targetModifiers, weaponId) {
+  return Number(weaponId) === 25 && targetModifiers?.completedSets?.includes(7) ? 10 : 0;
+}
+
 function weaponProtectionKey(weaponType) {
   switch (Number(weaponType)) {
     case 1:
@@ -10040,7 +10175,8 @@ function applyMilkorSlow(shooter, targetSession, definition) {
   if (existing?.timer) clearTimeout(existing.timer);
 
   const speedDelta = existing?.speedDelta || milkorSlowSpeedDelta(targetSession, definition);
-  const durationMs = Math.max(1, numberOr(definition.durationMs, WEAPON_DAMAGE_BALANCE.gl_milkor.slowMs));
+  const slowResistanceMs = selectedWears(targetSession.loadedProfile).some((wear) => wearBonusKey(wear) === "8:barkhanflask") ? 1000 : 0;
+  const durationMs = Math.max(1, numberOr(definition.durationMs, WEAPON_DAMAGE_BALANCE.gl_milkor.slowMs) - slowResistanceMs);
   const state = {
     room: targetSession.room,
     spawnSeq: Number(targetSession.spawnSeq || 0),
@@ -10143,6 +10279,9 @@ function applyImpactDotDamage(effect, targetSession) {
   const { damageReduction, enhancerReduction } = impactDamageReductionForTarget(targetSession, effect.type);
   const enhancerDamagePercent = outgoingEnhancerDamagePercent(effect.shooter, targetSession, 0);
   const training = zombieTrainingDamagePercents(effect.shooter, targetSession, effect.weaponType, null, targetCurrent.stats.modifiers);
+  const mummyDotTickBonus = Math.max(0, numberOr(effect.mummyDotTickBonus, 0));
+  const poisonDotTickBonus = effect.type === IMPACT_TYPE.POISON ? Math.max(0, numberOr(effect.poisonDotTickBonus, 0)) : 0;
+  const primusReceivedDamageFlat = mummyPrimusReceivedDamageFlat(targetCurrent.stats.modifiers, effect.weaponId);
   const totalDamage = Math.max(0, Math.round(
     requestedDamage *
     (1 + enhancerDamagePercent / 100) *
@@ -10150,7 +10289,7 @@ function applyImpactDotDamage(effect, targetSession) {
     (1 - damageReduction / 100) *
     (1 - enhancerReduction / 100) *
     (1 - training.reduction / 100)
-  ));
+  ) + mummyDotTickBonus + poisonDotTickBonus + primusReceivedDamageFlat);
   const energyDamage = Math.min(targetCurrent.energy, totalDamage);
   let healthDamage = Math.min(targetCurrent.health, Math.max(0, totalDamage - energyDamage));
   targetSession.energy = targetCurrent.energy - energyDamage;
@@ -10162,6 +10301,8 @@ function applyImpactDotDamage(effect, targetSession) {
   return {
     targetCurrent,
     requestedDamage,
+    mummyDotTickBonus,
+    primusReceivedDamageFlat,
     totalDamage,
     healthDamage,
     energyDamage,
@@ -10290,7 +10431,8 @@ function applyImpactDotTick(effect, targetSession) {
   if (!timers || timers.get(Number(effect.type)) !== effect) return;
   effect.timer = null;
 
-  if (!impactDotSourceStillValid(effect, targetSession)) {
+  if (!impactDotSourceStillValid(effect, targetSession) ||
+      selectedWears(targetSession.loadedProfile).some((wear) => (effect.type !== IMPACT_TYPE.STUNNING && wearBonusKey(wear) === "8:cyborgprocessor") || (effect.type === IMPACT_TYPE.POISON && wearBonusKey(wear) === "2:stalkergasmask"))) {
     clearImpactDotState(targetSession, effect.type);
     return;
   }
@@ -10308,7 +10450,7 @@ function applyImpactDotTick(effect, targetSession) {
     damage.energyDamage
   );
   const sent = sendImpactDotPayload(effect, impactEvent, "impact-dot", { requireMoveSeen: true });
-  console.log(`[event] impact-dot actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} tick=${effect.tick + 1}/${effect.ticks} dmg=${damage.healthDamage}/${damage.energyDamage} roll=${damage.requestedDamage}/${effect.min}-${effect.max} hp=${targetSession.health}/${damage.targetCurrent.maxHealth} en=${targetSession.energy}/${damage.targetCurrent.stats.maxEnergy} dmgRed=${damage.damageReduction} enhRed=${damage.enhancerReduction} enhDmg=${damage.enhancerDamagePercent} sent=${sent}`);
+  console.log(`[event] impact-dot actor=${effect.shooter.actorId} target=${targetSession.actorId} type=${impactTypeName(effect.type)} tick=${effect.tick + 1}/${effect.ticks} dmg=${damage.healthDamage}/${damage.energyDamage} roll=${damage.requestedDamage}/${effect.min}-${effect.max} mummyDotFlat=${damage.mummyDotTickBonus} primusFlat=${damage.primusReceivedDamageFlat} hp=${targetSession.health}/${damage.targetCurrent.maxHealth} en=${targetSession.energy}/${damage.targetCurrent.stats.maxEnergy} dmgRed=${damage.damageReduction} enhRed=${damage.enhancerReduction} enhDmg=${damage.enhancerDamagePercent} sent=${sent}`);
 
   if (damage.targetCurrent.health > 0 && targetSession.health <= 0) {
     const killEvent = applyImpactDotKill(effect, targetSession, damage);
@@ -10344,17 +10486,26 @@ function startImpactDot(shooter, targetSession, damageState, data, targetIndex) 
   const definition = damageState?.impact;
   if (!definition || definition.type === IMPACT_TYPE.NONE) return "";
   if (!targetSession || targetSession.dead || !targetSession.spawned) return "";
+  if (selectedWears(targetSession.loadedProfile).some((wear) => (definition.type !== IMPACT_TYPE.STUNNING && wearBonusKey(wear) === "8:cyborgprocessor") || (definition.type === IMPACT_TYPE.POISON && wearBonusKey(wear) === "2:stalkergasmask"))) {
+    clearImpactDotState(targetSession, definition.type);
+    return "";
+  }
 
   clearImpactDotState(targetSession, definition.type);
   const timers = ensureSessionImpactTimers(targetSession);
   if (!timers) return "";
 
   const baseTicks = Math.max(1, numberOr(definition.ticks, IMPACT_DOT_DEFAULT_TICKS));
+  const mummyDotTickBonus = selectedWears(shooter.loadedProfile).some((wear) => wearBonusKey(wear) === "8:skrab") ? 2 : 0;
+  const poisonDotTickBonus = definition.type === IMPACT_TYPE.POISON && selectedWears(shooter.loadedProfile).some((wear) => wearBonusKey(wear) === "8:snakevenom") ? 3 : 0;
+  const acidDotTickBonus = definition.type !== IMPACT_TYPE.STUNNING && selectedWears(shooter.loadedProfile).some((wear) => wearBonusKey(wear) === "8:acidampoule") ? 2 : 0;
   const effect = {
     type: definition.type,
     min: numberOr(definition.min, 0),
     max: numberOr(definition.max, definition.min),
-    ticks: baseTicks,
+    mummyDotTickBonus,
+    poisonDotTickBonus,
+    ticks: baseTicks + acidDotTickBonus,
     tick: 0,
     shooter,
     targetActorId: targetSession.actorId,
@@ -10486,6 +10637,9 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     ? minDamage + Math.min(maxDamage - minDamage, Math.floor((maxDamage - minDamage + 1) * roll))
     : minDamage + Math.round((maxDamage - minDamage) * roll);
   const shooterStats = sessionRuntimeStats(shooter);
+  const headshotDamageFlat = hitZone === HIT_ZONE_CABIN
+    ? numberOr(shooterStats.modifiers.headshotDamageFlat, 0)
+    : 0;
   const headDamageBonus = (hitZone === HIT_ZONE_CABIN || (tableBalance && hitZone === HIT_ZONE_ENGINE))
     && tableBalance?.kind !== "launcher"
     ? clampNumber(shooterStats.modifiers.weaponHeadDamagePercent ?? 0, 0, DAMAGE_MAX_HEAD_BONUS_PERCENT)
@@ -10514,7 +10668,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   const enhancerDamagePercent = outgoingEnhancerDamagePercent(shooter, targetSession, hitZone);
   const training = zombieTrainingDamagePercents(shooter, targetSession, weaponType, shooterStats.modifiers, targetCurrent.stats.modifiers);
   let totalDamage = Math.max(0, Math.round(
-    baseDamage *
+    (baseDamage + headshotDamageFlat) *
     explosionCoefficient *
     (tableBalance ? 1 : hitZoneMultiplier(hitZone)) *
     (1 + headDamageBonus / 100) *
@@ -10526,6 +10680,8 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
     (1 - enhancerReduction / 100) *
     (1 - training.reduction / 100)
   ));
+  const primusReceivedDamageFlat = mummyPrimusReceivedDamageFlat(targetCurrent.stats.modifiers, damageState?.weaponId);
+  totalDamage += primusReceivedDamageFlat;
 
   const modDamage = modGames?.beforeDamage(shooter, targetSession, totalDamage, {
     infectionHit: isZombieInfectionHit(shooter, targetSession, weaponType),
@@ -10555,7 +10711,7 @@ function applyShotDamageToTarget(shooter, data, damageState, weaponType, launchM
   result.energyDamage = energyDamage;
   result.healthDamage = healthDamage;
   result.crit = crit && totalDamage > 0;
-  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:zone=${hitZone}:balance=${tableBalance ? "table-v1" : "legacy"}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:training=${training.outgoing}/${training.reduction}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:weaponProt=${weaponId}:${weaponProtection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:crit=${result.crit ? 1 : 0}:${critChance}`;
+  result.summary = `${targetActorId}:dmg=${healthDamage}/${energyDamage}:hp=${targetSession.health}/${targetCurrent.maxHealth}:en=${targetSession.energy}/${targetCurrent.stats.maxEnergy}:range=${range}:zone=${hitZone}:balance=${tableBalance ? "table-v1" : "legacy"}:dist=${formatCaptureDistance(damageDistance)}:roll=${baseDamage}/${minDamage}-${maxDamage}:headFlat=${headshotDamageFlat}:headDmg=${headDamageBonus}:enhDmg=${enhancerDamagePercent}:training=${training.outgoing}/${training.reduction}:radius=${explosionRadiusMultiplier}:prot=${protectionKey}:${protection}:weaponProt=${weaponId}:${weaponProtection}:rangeProt=${rangeProtection}:dmgRed=${damageReduction}:enhRed=${enhancerReduction}:primusFlat=${primusReceivedDamageFlat}:crit=${result.crit ? 1 : 0}:${critChance}`;
   result.summary += positionDetail;
 
   if (targetCurrent.health > 0 && targetSession.health <= 0) {
@@ -14156,6 +14312,18 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "wrong_room", false)];
   }
   const command = Number(expeditionPayloadValue(data, 1, 0));
+  // Keep active runs able to finish, but reject every new lobby entry from
+  // older clients that still expose the PvE screen.
+  if (!EXPEDITION_PUBLIC_ENABLED && session?.listLobby) {
+    if ([EXPEDITION_COMMAND.SOLO_QUEUE_JOIN, EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL, EXPEDITION_COMMAND.DEVELOPER_SOLO_LAUNCH].includes(command)) {
+      return [makeExpeditionSoloQueueRejected(session, "mode_unavailable")];
+    }
+    if ([EXPEDITION_COMMAND.PARTY_CREATE, EXPEDITION_COMMAND.PARTY_LEAVE, EXPEDITION_COMMAND.PARTY_INVITE,
+      EXPEDITION_COMMAND.PARTY_INVITE_RESPONSE, EXPEDITION_COMMAND.PARTY_READY, EXPEDITION_COMMAND.PARTY_REFRESH].includes(command)) {
+      return [makeExpeditionPartyRejected(session, "Режим не доступен")];
+    }
+    return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, "", "mode_unavailable", false, command)];
+  }
   if (session?.listLobby && command === EXPEDITION_COMMAND.DEVELOPER_SOLO_LAUNCH) {
     return handleDeveloperExpeditionSoloLaunch(session, channel);
   }
@@ -15229,6 +15397,11 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const settings = roomSettingsFrom(roomPropsParam);
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
+    if (!EXPEDITION_PUBLIC_ENABLED &&
+        (Number(settings.mode) === MAP_MODE_ROGUELIKE || Number(rooms.get(settings.name)?.mode) === MAP_MODE_ROGUELIKE)) {
+      console.log(`[expedition] closed room entry rejected name=${settings.name} player=${session.playerId || "unknown"}`);
+      return [rawOperationResponse(255, [], -17, "expedition-unavailable")];
+    }
     const modGameRoom = rooms.get(settings.name);
     if (modGameRoom?.modGameClosed || (modGameRoom?.modGameId && settings.hasFullSettings !== false))
       return [rawOperationResponse(255, [], -17, "modgame-room-reserved")];
@@ -15996,6 +16169,23 @@ async function handleUdp(port, socket, msg, rinfo) {
       } catch (error) {
         console.log(`[parse] ${error.message}`);
         console.log(payload.toString("hex").match(/.{1,32}/g)?.join("\n") || "");
+        // The ENet command was already ACKed. Consume its sequence even when
+        // the Photon payload is invalid, or every later reliable request on
+        // this channel will remain buffered until the player reconnects.
+        if (reliableCommand) {
+          const startSeq = Number(commandType === 0x08 ? fragment.startSeq : reliableSeq) >>> 0;
+          const endSeq = commandType === 0x08
+            ? ((startSeq + Math.max(1, Number(fragment.fragmentCount) || 1) - 1) >>> 0)
+            : startSeq;
+          const discarded = enqueueInboundReliableRequest(session, {
+            channel,
+            startSeq,
+            endSeq,
+            execute: async () => [],
+          });
+          discarded.completion.catch(() => {});
+          console.log(`[parse] reliable payload discarded actor=${session.actorId || 0} player=${session.playerId || 0} room=${session.room?.name || "none"} channel=${channel} seq=${startSeq}-${endSeq} queue=${discarded.status}`);
+        }
       }
     }
 
