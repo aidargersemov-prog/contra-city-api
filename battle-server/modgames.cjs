@@ -282,6 +282,8 @@ function createModGames(options) {
     catch (error) { write(previous); throw error; }
     events.set(id, event);
     o.onChanged();
+    Promise.resolve(o.onCreated({ map: event.config.map, room: event.roomName, name: event.config.name }))
+      .catch(error => log(`[modgames] create-notification failed: ${error.message}`));
     log(`[modgames] created id=${id} map=${config.map} points=${maps.get(config.map.toLowerCase()).points.length}`);
     return metadata(event);
   }

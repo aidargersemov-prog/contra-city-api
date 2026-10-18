@@ -13386,7 +13386,7 @@ function initializeModGames() {
       const winner = zombieTimeLimitWinner(room);
       finishZombieRound(room, winner, "modgame-time-limit", 0);
     },
-    onRoundStart: payload => publishTelegramGameNotification("modgames", payload),
+    onCreated: payload => publishTelegramGameNotification("modgames", payload),
     emit: emitModGame, isZombie: isZombiePlayerSession,
     baseMaxHealth: sessionBaseMaxHealth,
     syncHealth: (session, reason) => sendReliableToSession(session, makePlayerHealthEnergyEvent(session, reason), 0),
