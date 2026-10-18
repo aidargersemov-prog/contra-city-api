@@ -26,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-17-achievement-crossing-v188";
+const API_BUILD_ID = "railway-api-2026-10-18-telegram-game-notifications-v189";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -14260,6 +14260,32 @@ async function incrementWeaponStats(client, playerId, event, details, delta) {
   );
 }
 
+function gameLocalDay(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.TELEGRAM_DAILY_TIMEZONE || "Europe/Simferopol",
+    year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(date).reduce((out, part) => (out[part.type] = part.value, out), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+async function incrementDailyGameStats(client, playerId, delta) {
+  const id = Number(playerId || 0);
+  const allowed = ["kills", "experience", "disarms", "headshots", "nuts", "flags", "points", "assists"];
+  if (!Number.isSafeInteger(id) || id <= 0) return;
+  const changes = Object.fromEntries(allowed.map(key => [key, Math.max(0, Math.trunc(Number(delta?.[key] || 0)))]).filter(([, value]) => value > 0));
+  if (!Object.keys(changes).length) return;
+  const columns = Object.keys(changes);
+  const insertColumns = columns.map(column => `"${column}"`).join(", ");
+  const insertValues = columns.map((_, index) => `$${index + 3}`).join(", ");
+  const updates = columns.map(column => `"${column}" = player_daily_game_stats."${column}" + EXCLUDED."${column}"`).join(", ");
+  await client.query(
+    `INSERT INTO player_daily_game_stats (local_day, player_id, ${insertColumns})
+     VALUES ($1::date, $2, ${insertValues})
+     ON CONFLICT (local_day, player_id) DO UPDATE SET ${updates}, updated_at = now()`,
+    [gameLocalDay(), id, ...columns.map(column => changes[column])]
+  );
+}
+
 async function recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details) {
   if (type === "shot") {
     const shots = eventNumber(event, details, "shots", 0);
@@ -14271,6 +14297,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
 
   if (type === "exp") {
     const expAwarded = eventNumber(event, details, "expAwarded", 0);
+    if (expAwarded > 0) await incrementDailyGameStats(client, playerId, { experience: expAwarded });
     if (playerId > 0 && expAwarded > 0) {
       const expResult = await awardPlayerExperience(client, playerId, expAwarded, "battle_server_enhancer");
       if (expResult) {
@@ -14318,6 +14345,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
       });
     }
     if (!suicide && killerPlayerId > 0) {
+      await incrementDailyGameStats(client, killerPlayerId, { kills: 1, headshots: headshot, nuts });
       await incrementPlayerStats(client, killerPlayerId, {
         k: 1,
         hs: headshot,
@@ -14334,6 +14362,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
         nuts
       });
       if (expAwarded > 0) {
+        await incrementDailyGameStats(client, killerPlayerId, { experience: expAwarded });
         const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded, "battle_server");
         if (expResult) {
           details.expAwarded = expAwarded;
@@ -14352,11 +14381,29 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
       }
     }
 
+    const assistantPlayerId = Number(event.assistantPlayerId || details.assistantPlayerId || 0);
+    if (assistantPlayerId > 0 && assistantPlayerId !== killerPlayerId && assistantPlayerId !== victimPlayerId) {
+      await incrementDailyGameStats(client, assistantPlayerId, {
+        assists: 1,
+        experience: eventNumber(event, details, "assistExpAwarded", 0),
+      });
+    }
+
     await client.query(
       `INSERT INTO battle_score_events (room_id, killer_player_id, victim_player_id, weapon_id, hit_zone, event_data)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [roomId, killerPlayerId || playerId, victimPlayerId || playerId, Number(event.weaponId || details.weaponId || event.weaponType || details.weaponType || 0), hitZone, JSON.stringify(details)]
     );
+    return;
+  }
+
+  if (type === "metric") {
+    const metric = String(event.metric || details.metric || "");
+    if (["disarms", "flags", "points", "assists"].includes(metric)) {
+      await incrementDailyGameStats(client, playerId, {
+        [metric]: Math.max(1, Math.trunc(eventNumber(event, details, "amount", 1)))
+      });
+    }
     return;
   }
 
@@ -14608,6 +14655,67 @@ async function recordBattleEvent(event) {
   }
 }
 
+async function queueTelegramGameNotification(kind, payload = {}) {
+  if (!pgPool || !["online", "modgames", "daily"].includes(String(kind))) return false;
+  await pgPool.query(
+    "INSERT INTO telegram_game_notifications (kind, payload) VALUES ($1, $2::jsonb)",
+    [String(kind), JSON.stringify(asBattleJson(payload))]
+  );
+  return true;
+}
+
+async function telegramDailyLeaderboard(localDay) {
+  const specs = [
+    ["Больше всего убийств", "kills"], ["Набрано опыта", "experience"],
+    ["Разоруживаний", "disarms"], ["Убийств в голову", "headshots"],
+    ["Убийств в пах", "nuts"], ["Принёс флагов", "flags"],
+    ["Захватил точек", "points"], ["Помощь в убийстве", "assists"],
+  ];
+  return Promise.all(specs.map(async ([label, column]) => {
+    if (column === "disarms") {
+      return { label, value: "н/д", player: "событие не реализовано", available: false };
+    }
+    const result = await pgPool.query(
+      `SELECT p.name, d."${column}" AS value
+         FROM player_daily_game_stats d JOIN players p ON p.id = d.player_id
+        WHERE d.local_day = $1::date AND d."${column}" > 0
+        ORDER BY d."${column}" DESC, p.id ASC LIMIT 1`, [localDay]
+    );
+    const leader = result.rows[0];
+    return { label, value: Number(leader?.value || 0), player: String(leader?.name || "—"), available: true };
+  }));
+}
+
+async function maybeQueueTelegramDaily() {
+  if (!pgPool) return;
+  const timeZone = process.env.TELEGRAM_DAILY_TIMEZONE || "Europe/Simferopol";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+  }).formatToParts(new Date()).reduce((out, part) => (out[part.type] = part.value, out), {});
+  if (parts.hour !== "00" || parts.minute !== "00") return;
+  const today = `${parts.year}-${parts.month}-${parts.day}`;
+  const yesterday = new Date(`${today}T00:00:00Z`);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const reportDay = yesterday.toISOString().slice(0, 10);
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const inserted = await client.query(
+      "INSERT INTO telegram_game_daily_runs (local_day) VALUES ($1) ON CONFLICT DO NOTHING RETURNING local_day", [today]
+    );
+    if (!inserted.rowCount) { await client.query("ROLLBACK"); return; }
+    const categories = await telegramDailyLeaderboard(reportDay);
+    await client.query(
+      "INSERT INTO telegram_game_notifications (kind, payload) VALUES ('daily', $1::jsonb)",
+      [JSON.stringify({ date: reportDay, categories })]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("[telegram-notifications] daily report enqueue failed", error);
+  } finally { client.release(); }
+}
+
 ensureDesktopAccount();
 
 function acquireHttpRequestSlot(req, res) {
@@ -14793,7 +14901,8 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
-  if (url.pathname.startsWith("/bot/telegram")) {
+  if (url.pathname.startsWith("/bot/telegram") &&
+      !["/bot/telegram/notifications/next", "/bot/telegram/notifications/ack"].includes(url.pathname)) {
     if (!hasValidTelegramLinkApiToken(req)) {
       sendJson(res, { ok: false, error: "not_found" }, 404);
       return;
@@ -15524,6 +15633,65 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (url.pathname === "/battle/telegram/notifications") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+
+    try {
+      const body = await readJsonBody(req, 8 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      const kind = String(body.kind || "");
+      if (!["online", "modgames"].includes(kind)) {
+        sendJson(res, { ok: false, error: "invalid_notification_kind" }, 400);
+        return;
+      }
+      const payload = kind === "online"
+        ? { count: Math.max(0, Math.min(100000, Math.trunc(Number(body.payload?.count || 0)))) }
+        : {
+            map: String(body.payload?.map || "").slice(0, 80),
+            room: String(body.payload?.room || "").slice(0, 100),
+            name: String(body.payload?.name || "ModGames").slice(0, 100),
+          };
+      await queueTelegramGameNotification(kind, payload);
+      sendJson(res, { ok: true });
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "telegram_notification_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/bot/telegram/notifications/next") {
+    if (req.method !== "GET" || !hasValidBattleServiceToken(req, {})) {
+      sendJson(res, { ok: false, error: req.method === "GET" ? "invalid_token" : "method_not_allowed" }, req.method === "GET" ? 403 : 405);
+      return;
+    }
+    if (!pgPool) { sendJson(res, { ok: false, events: [] }, 503); return; }
+    const result = await pgPool.query(
+      `SELECT id, kind, payload FROM telegram_game_notifications
+        WHERE delivered_at IS NULL ORDER BY id ASC LIMIT 10`
+    );
+    sendJson(res, { ok: true, events: result.rows.map(row => ({ id: Number(row.id), kind: row.kind, payload: jsonValue(row.payload, {}) })) });
+    return;
+  }
+
+  if (url.pathname === "/bot/telegram/notifications/ack") {
+    if (req.method !== "POST") { sendJson(res, { ok: false, error: "method_not_allowed" }, 405); return; }
+    const body = await readJsonBody(req, 4 * 1024);
+    if (!hasValidBattleServiceToken(req, body)) { sendJson(res, { ok: false, error: "invalid_token" }, 403); return; }
+    const id = Number(body.id || 0);
+    if (!Number.isSafeInteger(id) || id < 1) { sendJson(res, { ok: false, error: "invalid_id" }, 400); return; }
+    const updated = await pgPool.query(
+      "UPDATE telegram_game_notifications SET delivered_at = now() WHERE id = $1 AND delivered_at IS NULL", [id]
+    );
+    sendJson(res, { ok: true, delivered: updated.rowCount > 0 });
+    return;
+  }
+
   if (url.pathname === "/db") {
     if (!hasValidAdminToken(req)) {
       sendJson(res, { ok: false, error: "not_found" }, 404);
@@ -15578,6 +15746,10 @@ server.listen(PORT, () => {
   if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
   if (DEFAULT_KEY === "contra-revive-key") console.warn("[security] DEFAULT_KEY still uses the public fallback; rotate it");
 });
+const telegramDailyTimer = setInterval(() => {
+  maybeQueueTelegramDaily().catch(error => console.error("[telegram-notifications] daily scheduler failed", error));
+}, 30 * 1000);
+telegramDailyTimer.unref?.();
 server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
 server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
 server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
