@@ -106,7 +106,7 @@ function readJson(filename) {
 function createModGames(options) {
   object(options, "options");
   const o = options;
-  for (const callback of ["createRoom", "findRoom", "removeRoom", "onChanged", "emit", "isZombie", "baseMaxHealth", "syncHealth", "onModifiers", "canAct", "onRoundExpired"])
+  for (const callback of ["createRoom", "findRoom", "removeRoom", "onChanged", "emit", "isZombie", "baseMaxHealth", "syncHealth", "onModifiers", "canAct", "onRoundExpired", "onRoundStart"])
     if (typeof o[callback] !== "function") fail(`ModGames: отсутствует callback ${callback}`);
   if (!path.isAbsolute(o.directory || "") || !path.isAbsolute(o.pointsDirectory || "")) fail("ModGames directories must be absolute");
   const now = o.now || Date.now;
@@ -660,6 +660,8 @@ function createModGames(options) {
     event.warned.clear();event.lastTick=time;
     send(event, roomPacket(event));
     o.onChanged();
+    Promise.resolve(o.onRoundStart({ map: event.config.map, room: event.roomName, name: event.config.name }))
+      .catch(error => log(`[modgames] start-notification failed: ${error.message}`));
     log(`[modgames] round-start id=${event.id} duration=${event.config.durationSeconds}s firstDrop=${event.nextDelaySeconds}s`);
     return true;
   }
