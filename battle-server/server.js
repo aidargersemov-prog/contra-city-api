@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-18-telegram-game-notifications-v412";
+const BUILD_ID = "battle-server-2026-10-18-frankfurt-modgames-telegram-v414";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -13323,6 +13323,7 @@ async function handleModGameRequest(session, parsed, channel) {
         server: SERVER_NAME, ...listing })];
     } finally { session.modGameAdminPending = false; }
   } catch (error) {
+    console.error(`[modgames] admin-request failed server=${SERVER_NAME} actor=${Number(session?.playerId) || 0} command=${String(request?.command || "unknown")} error=${String(error.message || error).slice(0, 240)}`);
     return [modGamePacket({ type: "admin", requestId: request?.requestId || "", ok: false,
       error: String(error.message || "Ошибка ModGames").slice(0, 240) })];
   }
