@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-17-inbound-parse-recovery-v411";
+const BUILD_ID = "battle-server-2026-10-18-telegram-game-notifications-v412";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -5696,6 +5696,29 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = API_REQUEST_TIMEO
   }
 }
 
+async function publishTelegramGameNotification(kind, payload) {
+  if (!API_BASE_URL || !API_TOKEN || typeof fetch !== "function") return false;
+  try {
+    const response = await fetchWithTimeout(`${API_BASE_URL}/battle/telegram/notifications`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-battle-token": API_TOKEN },
+      body: JSON.stringify({ kind, payload }),
+    }, Math.min(API_REQUEST_TIMEOUT_MS, 5000));
+    if (!response?.ok) throw new Error(`HTTP ${response?.status || 0}`);
+    return true;
+  } catch (error) {
+    console.error(`[telegram-notifications] enqueue failed kind=${kind} error=${error.message}`);
+    return false;
+  }
+}
+
+function publishOnlinePlayerCount() {
+  const count = Array.from(sessions.values()).filter(session =>
+    session && session.room && session.spawned && !session.transportDisconnected && !session.isGuest
+  ).length;
+  void publishTelegramGameNotification("online", { count });
+}
+
 function validDeveloperEffectId(value) {
   return Number.isInteger(value) && value >= 0 && value <= 8;
 }
@@ -6180,6 +6203,7 @@ function tryDeliverCtfFlag(session, channel, source = "move") {
 
   Object.assign(carried, carriedHome, { bearer: -1, state: 0 });
   recordContractFlag(session, "flagsCaptured");
+  postBattleEvent(session, "metric", { metric: "flags", amount: 1, eventData: { source: "ctf-delivery" } });
   session.points = numberOr(session.points, 0) + 1;
   const flagExp = awardBattleExp(session, BATTLE_EXP_PER_FLAG, "flag-deliver", {
     eventBonusPercent: hasSelectedEnhancer(session.loadedProfile, ENHANCER_TYPE.CLAN_FLAG_EXP) ? 100 : 0,
@@ -6350,6 +6374,7 @@ function updateControlPoint(room, point, channel) {
       const player = room.players.get(actorId);
       if (!player || player.team !== point.team) continue;
       player.points = numberOr(player.points, 0) + 1;
+      postBattleEvent(player, "metric", { metric: "points", amount: 1, eventData: { source: "control-point-capture", pointId: point.id } });
       awardBattleExp(player, BATTLE_EXP_PER_CONTROL_POINT, "control-capture", {
         eventBonusPercent: hasSelectedEnhancer(player.loadedProfile, ENHANCER_TYPE.CLAN_CONTROL_EXP) ? 100 : 0,
         persist: true,
@@ -13361,6 +13386,7 @@ function initializeModGames() {
       const winner = zombieTimeLimitWinner(room);
       finishZombieRound(room, winner, "modgame-time-limit", 0);
     },
+    onRoundStart: payload => publishTelegramGameNotification("modgames", payload),
     emit: emitModGame, isZombie: isZombiePlayerSession,
     baseMaxHealth: sessionBaseMaxHealth,
     syncHealth: (session, reason) => sendReliableToSession(session, makePlayerHealthEnergyEvent(session, reason), 0),
@@ -16292,6 +16318,8 @@ const battleMoveFlushInterval = setInterval(flushMoveTelemetry, BATTLE_MOVE_FLUS
 if (typeof battleMoveFlushInterval.unref === "function") battleMoveFlushInterval.unref();
 const runtimeMetricsInterval = setInterval(reportRuntimeMetrics, RUNTIME_METRICS_INTERVAL_MS);
 if (typeof runtimeMetricsInterval.unref === "function") runtimeMetricsInterval.unref();
+const telegramOnlineInterval = setInterval(publishOnlinePlayerCount, 15 * 60 * 1000);
+if (typeof telegramOnlineInterval.unref === "function") telegramOnlineInterval.unref();
 const clanTreasuryPollInterval = setInterval(runClanTreasuryLivePoll, CLAN_TREASURY_POLL_MS);
 if (typeof clanTreasuryPollInterval.unref === "function") clanTreasuryPollInterval.unref();
 const clanTreasuryInitialPoll = setTimeout(runClanTreasuryLivePoll, 0);
