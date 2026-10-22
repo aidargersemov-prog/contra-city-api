@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-18-frankfurt-modgames-telegram-v414";
+const BUILD_ID = "battle-server-2026-10-20-revert-inbound-parse-recovery-v415";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -16196,23 +16196,6 @@ async function handleUdp(port, socket, msg, rinfo) {
       } catch (error) {
         console.log(`[parse] ${error.message}`);
         console.log(payload.toString("hex").match(/.{1,32}/g)?.join("\n") || "");
-        // The ENet command was already ACKed. Consume its sequence even when
-        // the Photon payload is invalid, or every later reliable request on
-        // this channel will remain buffered until the player reconnects.
-        if (reliableCommand) {
-          const startSeq = Number(commandType === 0x08 ? fragment.startSeq : reliableSeq) >>> 0;
-          const endSeq = commandType === 0x08
-            ? ((startSeq + Math.max(1, Number(fragment.fragmentCount) || 1) - 1) >>> 0)
-            : startSeq;
-          const discarded = enqueueInboundReliableRequest(session, {
-            channel,
-            startSeq,
-            endSeq,
-            execute: async () => [],
-          });
-          discarded.completion.catch(() => {});
-          console.log(`[parse] reliable payload discarded actor=${session.actorId || 0} player=${session.playerId || 0} room=${session.room?.name || "none"} channel=${channel} seq=${startSeq}-${endSeq} queue=${discarded.status}`);
-        }
       }
     }
 
