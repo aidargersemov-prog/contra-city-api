@@ -26,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-18-telegram-game-notifications-v189";
+const API_BUILD_ID = "railway-api-2026-10-27-shipconteyner-map-v190";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -44,6 +44,7 @@ const ASSET_BUNDLE_NAMES = new Set([
   "bit_map.unity3d",
   "legoturnament.unity3d",
   "inferno.unity3d",
+  "shipconteyner.unity3d",
   "promzona.unity3d"
   //"dashguard.unity3d"
 ]);
@@ -2565,6 +2566,7 @@ const maps = [
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(19, "promzona", MAP_MODE_DEATHMATCH),
+  mapEntry(20, "ShipConteyner", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
