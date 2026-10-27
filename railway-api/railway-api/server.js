@@ -1,4 +1,5 @@
 import http from "node:http";
+import { claimGameVisit, auditClientAddress, auditNetworkInfo } from "./admin-logs/game-access.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-10-01-developer-mythic-set-v150";
+const API_BUILD_ID = "railway-api-2026-10-27-shipconteyner-map-v190";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -43,6 +44,7 @@ const ASSET_BUNDLE_NAMES = new Set([
   "bit_map.unity3d",
   "legoturnament.unity3d",
   "inferno.unity3d",
+  "shipconteyner.unity3d",
   "promzona.unity3d"
   //"dashguard.unity3d"
 ]);
@@ -156,8 +158,7 @@ const TELEGRAM_RESET_ADVISORY_LOCK = 741963522;
 const launcherSessions = new Map();
 const launcherDeviceChallenges = new Map();
 const revokedGameLinkKeys = new Map();
-const gameLoginSeen = new Map();
-const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 30 * 60 * 1000));
+const GAME_LOGIN_DEDUPE_TTL_MS = Math.max(60000, Number(process.env.GAME_LOGIN_DEDUPE_TTL_MS || 60 * 1000));
 const playerBanCache = new Map();
 const PLAYER_BAN_CACHE_TTL_MS = Math.max(1000, Number(process.env.PLAYER_BAN_CACHE_TTL_MS || 15000));
 const requestAuditContext = new AsyncLocalStorage();
@@ -178,10 +179,17 @@ async function auditGameEvent(db, event) {
   });
 }
 
+function auditRequestNetwork(req) {
+  const cloudFront = auditClientAddress(cloudFrontViewerIp(req));
+  return cloudFront ? { ip: cloudFront, source: "cloudfront" } : auditNetworkInfo(req,
+    Boolean(process.env.RAILWAY_ENVIRONMENT_ID), [WARSAW_BATTLE_HOST, BATTLE_HOST, "13.62.98.107"].filter(Boolean));
+}
+
 async function recordPlayerAccess(account, req, kind, source) {
   if (!pgPool || !account?.id) return;
-  const ipAddress = requestClientIp(req);
-  const geo = requestGeo(req);
+  const network = auditRequestNetwork(req);
+  const ipAddress = network.ip;
+  const geo = { ...requestGeo(req), ip: ipAddress, source: network.source };
   const device = String(req.headers["user-agent"] || "").slice(0, 300);
   try {
     const previousResult = await pgPool.query(
@@ -198,7 +206,7 @@ async function recordPlayerAccess(account, req, kind, source) {
     await touchPlayerActivity(pgPool, { playerId: account.id, kind, ipAddress, device, source, geo });
     await writeAuditEvent(pgPool, {
       playerId: account.id,
-      eventType: kind === "logout" ? "player_logout" : "player_login",
+      eventType: kind === "logout" ? "player_logout" : source === "game_api_login" ? "player_login" : "account_auth",
       category: "session",
       severity: kind !== "logout" && (countryChanged || deviceChanged) ? "notice" : "info",
       suspicious: kind !== "logout" && (countryChanged || deviceChanged),
@@ -234,18 +242,25 @@ function hasValidCloudFrontOrigin(req) {
     safeTokenEquals(req?.headers?.[CLOUDFRONT_ORIGIN_HEADER], CLOUDFRONT_ORIGIN_SECRET);
 }
 
-async function recordGameLoginOnce(account, req) {
-  if (!account?.id) return;
-  const now = Date.now();
-  const ip = requestClientIp(req);
+async function recordGameLoginOnce(account, req, url) {
+  if (!pgPool || !account?.id) return;
+  // Profile/catalog requests made by either battle server are not game logins.
+  if (safeTokenEquals(req.headers["x-battle-token"], BATTLE_EVENT_TOKEN)) return;
   const deviceKey = stableIdentityHash(req.headers["user-agent"] || "unknown");
-  const key = `${account.id}:${ip}:${deviceKey}`;
-  const previous = Number(gameLoginSeen.get(key) || 0);
-  if (now - previous < GAME_LOGIN_DEDUPE_TTL_MS) return;
-  if (gameLoginSeen.has(key)) gameLoginSeen.delete(key);
-  gameLoginSeen.set(key, now);
-  while (gameLoginSeen.size > 10000) gameLoginSeen.delete(gameLoginSeen.keys().next().value);
-  await recordPlayerAccess(account, req, "login", "game_api_login");
+  try {
+    const page = url.searchParams.get("page"), act = url.searchParams.get("act");
+    const authentication = (page === "auth" && act === "g") || (page === "account" && url.searchParams.get("action") === "login");
+    if (authentication && await claimGameVisit(pgPool, Number(account.id), deviceKey, GAME_LOGIN_DEDUPE_TTL_MS)) {
+      await recordPlayerAccess(account, req, "login", "game_api_login");
+    } else {
+      const network = auditRequestNetwork(req);
+      await touchPlayerActivity(pgPool, {playerId:account.id,kind:"seen",ipAddress:network.ip,
+        device:String(req.headers["user-agent"] || "").slice(0,300),source:"game_api_request",
+        geo:{...requestGeo(req),ip:network.ip,source:network.source}});
+    }
+  } catch (error) {
+    console.error(`[admin-logs] visit tracking failed player=${account.id}`, error.code || error.name);
+  }
 }
 
 function decodeCloudFrontHeader(value, maxLength = 160) {
@@ -1026,36 +1041,36 @@ const WEAPON_DAMAGE_BALANCE = Object.freeze({
   hg_makarov: { name: "Партизан / ГОСТ Партизан", near: 10, kind: "ranged" },
   hg_tt: { name: "Комиссар", near: 10, kind: "ranged" },
   hg_walther_r: { name: "Начальник", near: 12, kind: "ranged" },
-  hg_waltherp99: { name: "СверхДембель", near: 13, kind: "ranged" },
-  hg_sigsauerp226_b: { name: "Дружинник", near: 12, kind: "ranged", effect: 2 },
-  hg_glock_s: { name: "Политрук", near: 9, kind: "ranged" },
-  hg_glockb01_s: { name: "Спекулянт", near: 10, kind: "ranged", effect: 2 },
+  hg_waltherp99: { name: "СверхДембель", near: 22, kind: "ranged" },
+  hg_sigsauerp226_b: { name: "Дружинник", near: 19, kind: "ranged", effect: 2 },
+  hg_glock_s: { name: "Политрук", near: 10, kind: "ranged" },
+  hg_glockb01_s: { name: "Спекулянт", near: 11, kind: "ranged", effect: 2 },
   hg_desert: { name: "Сокол", near: 35, kind: "ranged" },
   hg_desertb01: { name: "Пустынный Орел", near: 38, kind: "ranged" },
   hg_usp: { name: "Скиф", near: 13, kind: "ranged", effect: 3 },
   hg_taurus: { name: "Палач", near: 42, kind: "ranged" },
-  mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 8, kind: "ranged" },
-  mg_m16: { name: "ММ 16", near: 9, kind: "ranged" },
-  mg_ak103: { name: "Кладенец", near: 10, kind: "ranged" },
-  mg_m4: { name: "Рык", near: 12, kind: "ranged" },
-  mg_ak103_o: { name: "Полкан", near: 13, kind: "ranged" },
-  mg_m4_o: { name: "Бюрократ", near: 12, kind: "ranged" },
-  mg_m4d_o: { name: "Наводка", near: 13, kind: "ranged" },
-  mg_ak103d_o: { name: "Побарабанщик", near: 13, kind: "ranged" },
-  mg_ump45: { name: "Убойник", near: 13, kind: "ranged" },
-  mg_ump45d_o: { name: "Провокатор", near: 14, kind: "ranged" },
-  mg_ump45d2_o: { name: "Ликвидатор", near: 14, kind: "ranged" },
-  mg_ak47b06: { name: "Засад", near: 15, kind: "ranged" },
-  mg_ak47b08: { name: "Звездочет", near: 15, kind: "ranged" },
-  mg_ak47b07: { name: "Смертобой", near: 15, kind: "ranged" },
-  mg_aug3_o: { name: "Буран", near: 15, kind: "ranged" },
-  mg_aug2_o: { name: "Вектор", near: 15, kind: "ranged" },
-  mg_aug4_o: { name: "Кобра", near: 16, kind: "ranged", effect: 2 },
-  mg_aug1_o: { name: "Большевик", near: 17, kind: "ranged", effect: 3 },
-  mg_aug5_o: { name: "Повстанец", near: 17, kind: "ranged", effect: 1 },
+  mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 9, kind: "ranged" },
+  mg_m16: { name: "ММ 16", near: 10, kind: "ranged" },
+  mg_ak103: { name: "Кладенец", near: 11, kind: "ranged" },
+  mg_m4: { name: "Рык", near: 13, kind: "ranged" },
+  mg_ak103_o: { name: "Полкан", near: 15, kind: "ranged" },
+  mg_m4_o: { name: "Бюрократ", near: 13, kind: "ranged" },
+  mg_m4d_o: { name: "Наводка", near: 16, kind: "ranged" },
+  mg_ak103d_o: { name: "Побарабанщик", near: 16, kind: "ranged" },
+  mg_ump45: { name: "Убойник", near: 14, kind: "ranged" },
+  mg_ump45d_o: { name: "Провокатор", near: 15, kind: "ranged" },
+  mg_ump45d2_o: { name: "Ликвидатор", near: 15, kind: "ranged" },
+  mg_ak47b06: { name: "Засад", near: 18, kind: "ranged" },
+  mg_ak47b08: { name: "Звездочет", near: 18, kind: "ranged" },
+  mg_ak47b07: { name: "Смертобой", near: 18, kind: "ranged" },
+  mg_aug3_o: { name: "Буран", near: 17, kind: "ranged" },
+  mg_aug2_o: { name: "Вектор", near: 17, kind: "ranged" },
+  mg_aug4_o: { name: "Кобра", near: 17, kind: "ranged", effect: 2 },
+  mg_aug1_o: { name: "Большевик", near: 18, kind: "ranged", effect: 3 },
+  mg_aug5_o: { name: "Повстанец", near: 18, kind: "ranged", effect: 1 },
   mg_assaultrifle03: { name: "Барс", near: 14, kind: "ranged" },
-  mg_assaultrifle02: { name: "Адвокат", near: 15, kind: "ranged" },
-  mg_ump45vkks_o: { name: "Вождь", near: 17, kind: "ranged" },
+  mg_assaultrifle02: { name: "Адвокат", near: 18, kind: "ranged" },
+  mg_ump45vkks_o: { name: "Вождь", near: 19, kind: "ranged" },
   gg_m134: { name: "Стаханов / ГОСТ Стаханов", near: 12, kind: "ranged" },
   gg_n2: { name: "Берия", near: 13, kind: "ranged" },
   gg_m249: { name: "Дон", near: 15, kind: "ranged" },
@@ -1086,13 +1101,13 @@ const WEAPON_DAMAGE_BALANCE = Object.freeze({
   sr_svd: { name: "Компостер / ГОСТ Компостер", near: 23, kind: "sniper" },
   sr_steyr: { name: "Серп", near: 64, kind: "sniper" },
   sr_steyrb01: { name: "Сторож", near: 64, kind: "sniper" },
-  sr_hk417_d: { name: "Дальнобойщик", near: 25, kind: "sniper" },
+  sr_hk417_d: { name: "Дальнобойщик", near: 40, kind: "sniper" },
   sr_arctic: { name: "Писец", near: 87, kind: "sniper" },
-  sr_arcticb01: { name: "Крик", near: 87, kind: "sniper" },
-  sr_m110_b: { name: "Клык", near: 25, kind: "sniper", effect: 2 },
+  sr_arcticb01: { name: "Крик", near: 89, kind: "sniper" },
+  sr_m110_b: { name: "Клык", near: 35, kind: "sniper", effect: 2 },
   sr_wildcat1: { name: "Росомаха", near: 110, kind: "sniper" },
   sr_wildcat2: { name: "Шершень", near: 108, kind: "sniper", effect: 3 },
-  sr_vintorez: { name: "Вымпел", near: 111, kind: "sniper" },
+  sr_vintorez: { name: "Вымпел", near: 115, kind: "sniper" },
   sr_sniperrifle03: { name: "Анаконда", near: 125, kind: "sniper" },
 });
 
@@ -1350,22 +1365,22 @@ const canonicalShopWeaponStats = {
   },
   mg_ak103d_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 31, id: 31, wt: 4, ws: 3, sn: "mg_ak103d_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_ak47b06: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 32, id: 32, wt: 4, ws: 3, sn: "mg_ak47b06", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_ak47b07: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
+    w_id: 33, id: 33, wt: 4, ws: 3, sn: "mg_ak47b07", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 10, dev: 6,
     smindam: 22, smaxdam: 34, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_ak47b08: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 109, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
+    w_id: 34, id: 34, wt: 4, ws: 3, sn: "mg_ak47b08", vel: 100, rad: 12, ang: 0, rap: 122, rt: 3000, ammo: 40, ammo_tot: 120, lt: 650, krit: 9, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 18, mmaxdam: 28, lmindam: 14, lmaxdam: 23
   },
   mg_assaultrifle03: {
@@ -1395,12 +1410,12 @@ const canonicalShopWeaponStats = {
   },
   mg_m4_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 1008, id: 1008, wt: 4, ws: 3, sn: "mg_m4_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 21, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23
   },
   mg_m4d_o: {
     wsp: 0, launch: 0, shake: 0,
-    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 112, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
+    w_id: 1009, id: 1009, wt: 4, ws: 3, sn: "mg_m4d_o", vel: 100, rad: 12, ang: 0, rap: 125, rt: 3200, ammo: 40, ammo_tot: 120, lt: 650, krit: 8, dev: 6,
     smindam: 22, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24
   },
   mg_ump45: {
@@ -1482,7 +1497,7 @@ const canonicalShopWeaponStats = {
 
   mg_assaultrifle02: { rap: 121, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 175, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_ump45vkks_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 35, ammo_tot: 210, smindam: 29, smaxdam: 34, mmindam: 21, mmaxdam: 27, lmindam: 26, lmaxdam: 31 },
-  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 6, ammo: 35, ammo_tot: 105, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
+  mg_aug1_o: { desc: "Революционные технологии победы.", desca: "- Наносит периодический урон типа \"яд\"", rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 9, krit: 8, ammo: 35, ammo_tot: 105, smindam: 18, smaxdam: 29, mmindam: 15, mmaxdam: 24, lmindam: 11, lmaxdam: 19 },
   mg_aug5_o: { rap: 103, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 8, krit: 8, ammo: 30, ammo_tot: 132, smindam: 21, smaxdam: 33, mmindam: 18, mmaxdam: 29, lmindam: 14, lmaxdam: 24 },
   mg_aug4_o: { rap: 112, rt: 3000, lt: 650, vel: 100, rad: 12, ang: 0, dev: 6, krit: 8, ammo: 30, ammo_tot: 168, smindam: 20, smaxdam: 32, mmindam: 17, mmaxdam: 28, lmindam: 13, lmaxdam: 23 },
 
@@ -1610,7 +1625,10 @@ const temporaryBalanceWeaponKeys = new Set([
 ]);
 // Update firing intervals for these existing purchases without rebasing other stats.
 const correctedWeaponRapidityKeys = new Set(["sr_vintorez","hg_usp","sg_remington","hg_desert","hg_desertb01","sg_spas","sg_winchester1887","hg_taurus","hg_glockb01_s","hg_makarov","hg_tt","hg_walther_r","hg_waltherp99","hg_sigsauerp226_b","hg_glock_s","sr_sniperrifle03","sr_arctic","sr_arcticb01","sr_wildcat1","sr_wildcat2"]);
-const hiddenShopWeaponIds = new Set([10]); // ГОСТ Бита
+// GG_M134B01 reuses Вьюга's text (w_47) while displaying a Maximych-style
+// gatling model. Keep its canonical ID for already owned items, but do not
+// offer this mismatched duplicate in the shop.
+const hiddenShopWeaponIds = new Set([10, 47]); // ГОСТ Бита, GG_M134B01
 const canonicalShopWeaponCatalog = [...rebuiltShopWeaponCatalog, ...additionalShopWeaponCatalog]
   .map((item) => withCanonicalShopWeaponStats({ ...item, price: 500, nlvl: 1 }));
 
@@ -1904,6 +1922,7 @@ function loadTextAssetTranslations() {
     path.join(process.cwd(), "resources_textures_export", "TextAsset", "default.txt"),
     path.join(process.cwd(), "..", "resources_textures_export", "TextAsset", "default.txt"),
     path.join(API_DIR, "..", "resources_textures_export", "TextAsset", "default.txt"),
+    path.join(API_DIR, "wear-default.txt"),
     path.join(API_DIR, "data", "default.txt")
   ].filter(Boolean);
 
@@ -1983,6 +2002,8 @@ function appendWearBonusText(text, bonus) {
   return current ? `${current}\n${bonus}` : bonus;
 }
 
+const BALANCED_SET_BOOT_NAMES = new Set(["sneak02", "boot01", "sneakV202", "sneakV203", "mummy", "sneakV2B02", "tactical01", "tactical02", "sneakV2B06", "sneakV2B04", "sneakV2B10", "sneakV2B08", "zadira", "sneakV2B05", "prizrak", "tacticalB01", "stalker", "avenger"]);
+
 function wearTextFor(slot, sname) {
   const key = `${slot || ""}:${String(sname || "")}`;
   const prefix = `wear_${slot}_${sname}`;
@@ -1992,7 +2013,7 @@ function wearTextFor(slot, sname) {
     if (typeof value === "string") localized[field] = value;
   }
   const result = { ...(wearTextOverrides[key] || {}), ...localized };
-  if (slot === "Boots") {
+  if (slot === "Boots" && !BALANCED_SET_BOOT_NAMES.has(sname)) {
     const otherBonuses = String(result.desca || "").split(/\r?\n/)
       .filter((line) => !/скорост[ьи]|прыж|немного меньше, чем у ботинок/iu.test(line))
       .filter((line) => line.trim());
@@ -2003,14 +2024,14 @@ function wearTextFor(slot, sname) {
 }
 
 const shopWearCatalog = {
-  Hats: ["hat01", "hat02", "hat03", "cap01", "cap02", "vietnam", "indiana02", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag"],
+  Hats: ["hat01", "hat02", "hat03", "cap01", "cap02", "vietnam", "indiana02", "pharaoh", "tophat", "beret01", "beret02", "beret03", "beret04", "tactichelm01", "tactichelm02", "milcap01", "milcap02", "milcap03", "Witchhat", "Jacklantern", "santa", "santa2", "Olympic", "capVKKS01", "capVKKS02", "capVKKS03", "tacticalB01", "capB04", "capB08", "hatB08", "capB06", "capB05", "infernal", "hatB01", "capB07", "capB01", "avenger", "hatB06", "biker", "business", "stalker", "ushanka2", "capgavaimag", "helm01"],
   Masks: ["goog01", "goog02", "goog03", "mask01", "band01", "band02", "band03", "klava01", "klava02", "klava03", "mummy_H", "bandB08", "skeleton_H", "gasmask01", "gasmask02", "aviaglass", "santa", "santa2", "SnowGoggles", "maskB01", "bandB03", "bandB07", "googB01", "googB03", "infernal_H", "franky", "maskB02", "bandB05", "bandB01", "googB02", "avenger", "bandB04", "klavaB01", "businessgoogles", "stalkergasmask", "thanos", "gavaibandana"],
-  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022", "gavaigloves"],
+  Gloves: ["glov01", "bint01", "bint02", "clock01", "clock02", "glov02", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "Olympic", "tacticalB01", "infernal", "franky", "wristwrapB03", "avenger", "prizrak", "biker", "business", "stalker", "thanos", "glov022", "gavaigloves", "wristwrapB02"],
   Shirts: ["armor01", "armor02", "armor03", "armor04", "hood01", "hood02", "hood03", "hood04", "hood05", "jack01", "singl05", "singl06", "jack02", "jack03", "shirt01", "shirt02", "shirt03", "shirt04", "singl01", "singl04", "shirtB08", "chood01", "chood02", "chood03", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "hoodOlimpic", "hoodZong", "tacticB01", "hoodB03", "hoodB08", "hoodB10", "shirtB09", "shirtB04", "infernal", "franky", "hoodB05", "hoodB01", "hoodB04", "anarch", "avenger", "hoodB06", "prizrak", "biker", "business", "stalker", "thanos", "trooper2", "gavaihoodie"],
-  Pants: ["sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai"],
-  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag"],
+  Pants: ["sport01", "sport02", "sport03", "sport04", "short01", "short02", "short03", "short04", "short05", "mummy", "skeleton", "trooper", "tactic01", "tactic02", "tactic03", "tactic04", "santa", "santa2", "Olympic", "sportVKKS01", "sportVKKS02", "sportVKKS03", "tacticB01", "sportB03", "sportB08", "sportB10", "shortB12", "shortB14", "infernal", "franky", "sportB05", "sportB01", "sportB04", "jeansB03", "avenger", "sportB06", "prizrak", "jeansB02", "business", "stalker", "thanos", "pant032", "shortigavai", "jeans01", "pant01"],
+  Boots: ["boot01", "bear", "boot02", "slip01", "sneak01", "sneak02", "sneakV201", "sneakV202", "sneakV203", "mummy", "skeleton", "tactical01", "tactical02", "santa", "santa2", "sneakOlimpic", "tacticalB01", "sneakV2B05", "sneakV2B02", "sneakV2B06", "sneakV2B07", "sneakV2B03", "infernal", "franky", "sneakV2B04", "sneakV2B10", "anarch", "avenger", "zadira", "prizrak", "business", "stalker", "thanos", "slip99", "gavaibootsmag", "sneakV2B08"],
   Backpacks: ["parr01", "back01", "back02", "guit01", "guit02", "turt01", "octopus", "arrows", "darts", "rocket01", "rocket02", "rec", "shield", "extinguisher", "sarcophagus", "tomb", "Morte", "Raven", "Scarecrow", "santa", "santa2", "Snowboard", "VampireBat", "infernalRaven", "frankyOctopus", "snake01", "thanos", "rec2", "popugagavai"],
-  Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka"],
+  Others: ["maz", "icecream01", "icecream02", "icecream03", "cola01", "cola02", "cola03", "skrab", "coins", "santa", "santa2", "medal", "medalgold", "medalsilver", "medalbronze", "smertik", "badboy", "infernal", "franky", "newyearball", "schelkunchik", "spingreen", "spinyellow", "spinblue", "burger", "teeth", "spider", "vodka", "voron", "acidampoule", "reconpouch", "raybanana", "barkhanflask", "stalkerbio", "ecograss", "stormwhiskers", "wanderercap", "cyborgprocessor", "ghostbat", "snakevenom"],
   Heads: ["bald01", "bald02", "black01", "black02", "black03", "black04", "blond01", "blond02", "blond03", "brown01", "brown02", "brown03", "brown04", "spec01", "spec02", "spec03", "spec04", "franky", "thanos", "spec99"]
 };
 const wearPrices = {
@@ -2114,6 +2135,7 @@ const wearPrices = {
   "Pants:sportB04": { price: 400, nlvl: 27, iS: 0 },
   "Hats:capB07": { price: 575, nlvl: 27, iS: 0 },
   "Backpacks:snake01": { price: 400, nlvl: 27, iS: 0 },
+  "Boots:sneakV2B08": { price: 400, nlvl: 27, iS: 0 },
   //prizrak
   "Masks:klavaB01": { price: 600, nlvl: 21, iS: 0 },
   "Shirts:prizrak": { price: 700, nlvl: 21, iS: 0 },
@@ -2125,6 +2147,7 @@ const wearPrices = {
   "Shirts:anarch": { price: 850, nlvl: 34, iS: 0 },
   "Pants:jeansB03": { price: 600, nlvl: 34, iS: 0 },
   "Gloves:wristwrapB03": { price: 600, nlvl: 34, iS: 0 },
+  "Gloves:wristwrapB02": { price: 150, nlvl: 1, iS: 0 },
   "Boots:anarch": { price: 450, nlvl: 34, iS: 0 },
   "Others:spinyellow": { price: 750, nlvl: 34, iS: 0 },
   //zadira
@@ -2298,37 +2321,39 @@ function assemblageTextFor(id) {
 
 const restoredAssemblageDefinitions = [
   { id: 1, code: "peak_reaper", items: [["Hats", "tophat"], ["Masks", "skeleton_H"], ["Shirts", "skeleton"], ["Backpacks", "tomb"], ["Gloves", "skeleton"], ["Pants", "skeleton"], ["Boots", "skeleton"], ["Others", "coins"]] },
-  { id: 2, code: "raven", items: [["Masks", "gasmask01"], ["Hats", "tactichelm01"], ["Shirts", "tactic01"], ["Gloves", "tactical01"], ["Pants", "tactic01"], ["Boots", "tactical01"]] },
+  { id: 2, code: "raven", items: [["Hats", "tactichelm01"], ["Masks", "gasmask01"], ["Gloves", "tactical01"], ["Shirts", "tactic01"], ["Pants", "tactic01"], ["Boots", "tactical01"], ["Heads", "spec01"], ["Others", "voron"]] },
   { id: 3, code: "vandal", items: [["Hats", "cap02"], ["Masks", "band01"], ["Gloves", "bint02"], ["Shirts", "hood04"], ["Pants", "sport03"], ["Boots", "sneak02"], ["Backpacks", "darts"], ["Others", "maz"]] },
-  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Backpacks", "rocket02"], ["Others", "cola01"], ["Heads", "brown04"]] },
+  { id: 4, code: "stormtrooper", items: [["Hats", "helm01"], ["Masks", "klava01"], ["Gloves", "glov01"], ["Shirts", "armor02"], ["Pants", "jeans01"], ["Boots", "boot01"], ["Backpacks", "back02"], ["Others", "stormwhiskers"]] },
+  { id: 5, code: "ecoterror", items: [["Hats", "hat03"], ["Masks", "goog03"], ["Gloves", "clock01"], ["Shirts", "hood01"], ["Pants", "pant01"], ["Boots", "sneakV202"], ["Backpacks", "turt01"], ["Others", "ecograss"]] },
+  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Boots", "sneakV203"], ["Backpacks", "rocket02"], ["Others", "cola01"], ["Heads", "brown04"]] },
   { id: 7, code: "mummy", items: [["Hats", "pharaoh"], ["Shirts", "mummy"], ["Backpacks", "sarcophagus"], ["Gloves", "mummy"], ["Pants", "mummy"], ["Boots", "mummy"], ["Masks", "mummy_H"], ["Others", "skrab"]] },
-  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Gloves", "clock02"]] },
+  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Gloves", "clock02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Heads", "brown03"], ["Others", "reconpouch"]] },
   { id: 9, code: "dead_moroz", items: [["Hats", "santa"], ["Masks", "santa"], ["Shirts", "santa"], ["Backpacks", "santa"], ["Gloves", "santa"], ["Pants", "santa"], ["Boots", "santa"], ["Others", "santa"]] },
   { id: 10, code: "vdv", items: [["Hats", "beret03"], ["Shirts", "trooper"], ["Masks", "aviaglass"], ["Pants", "trooper"]] },
-  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Shirts", "tactic04"], ["Gloves", "tactical02"], ["Pants", "tactic04"]] },
+  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Gloves", "tactical02"], ["Shirts", "tactic04"], ["Pants", "tactic04"], ["Heads", "black01"], ["Others", "barkhanflask"]] },
   { id: 12, code: "invader", items: [["Shirts", "tactic03"], ["Pants", "tactic03"], ["Boots", "boot02"], ["Masks", "googB02"], ["Hats", "beret01"]] },
   { id: 14, code: "olympian", items: [["Hats", "Olympic"], ["Masks", "SnowGoggles"], ["Shirts", "hoodOlimpic"], ["Backpacks", "Snowboard"], ["Gloves", "Olympic"], ["Pants", "Olympic"], ["Boots", "sneakOlimpic"], ["Others", "medal"]] },
   { id: 15, code: "vkks_gold_2014", items: [["Hats", "capVKKS01"], ["Pants", "sportVKKS01"], ["Others", "medalgold"], ["Shirts", "chood01"]] },
   { id: 16, code: "vkks_silver_2014", items: [["Hats", "capVKKS02"], ["Shirts", "chood02"], ["Pants", "sportVKKS02"], ["Others", "medalsilver"]] },
   { id: 17, code: "vkks_bronze_2014", items: [["Hats", "capVKKS03"], ["Shirts", "chood03"], ["Pants", "sportVKKS03"], ["Others", "medalbronze"]] },
   { id: 18, code: "delta", items: [["Hats", "tacticalB01"], ["Shirts", "tacticB01"], ["Pants", "tacticB01"], ["Gloves", "tacticalB01"], ["Boots", "tacticalB01"], ["Others", "smertik"]] },
-  { id: 19, code: "ray", items: [["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Hats", "capB08"], ["Masks", "bandB07"]] },
+  { id: 19, code: "ray", items: [["Hats", "capB08"], ["Masks", "bandB07"], ["Gloves", "glov02"], ["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Backpacks", "arrows"], ["Heads", "spec02"], ["Others", "raybanana"]] },
   { id: 20, code: "badboy", items: [["Shirts", "hoodB03"], ["Pants", "sportB03"], ["Others", "badboy"], ["Boots", "sneakV2B05"], ["Masks", "maskB01"], ["Hats", "capB04"]] },
-  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Masks", "bandB03"]] },
+  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Masks", "bandB03"], ["Gloves", "wristwrapB02"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Heads", "spec03"], ["Others", "acidampoule"]] },
   { id: 22, code: "stuzha", items: [["Hats", "santa2"], ["Masks", "santa2"], ["Shirts", "santa2"], ["Backpacks", "santa2"], ["Gloves", "santa2"], ["Pants", "santa2"], ["Boots", "santa2"], ["Others", "santa2"]] },
   { id: 23, code: "red_heat", items: [["Hats", "capB06"], ["Shirts", "shirtB09"], ["Pants", "shortB12"], ["Masks", "googB01"], ["Boots", "sneakV2B07"]] },
   { id: 24, code: "cool_breeze", items: [["Hats", "capB05"], ["Shirts", "shirtB04"], ["Pants", "shortB14"], ["Masks", "googB03"], ["Boots", "sneakV2B03"]] },
   { id: 25, code: "necrowarrior", items: [["Heads", "franky"], ["Masks", "franky"], ["Shirts", "franky"], ["Pants", "franky"], ["Boots", "franky"], ["Gloves", "franky"], ["Others", "franky"], ["Backpacks", "frankyOctopus"]] },
   { id: 26, code: "infernal", items: [["Hats", "infernal"], ["Shirts", "infernal"], ["Pants", "infernal"], ["Boots", "infernal"], ["Gloves", "infernal"], ["Masks", "infernal_H"], ["Others", "infernal"], ["Backpacks", "infernalRaven"]] },
-  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"]] },
-  { id: 28, code: "wanderer", items: [["Hats", "hatB01"], ["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"]] },
-  { id: 29, code: "snakecatcher", items: [["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Hats", "capB07"], ["Backpacks", "snake01"]] },
-  { id: 30, code: "ghost", items: [["Masks", "klavaB01"], ["Shirts", "prizrak"], ["Pants", "prizrak"], ["Gloves", "prizrak"], ["Boots", "prizrak"]] },
+  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"], ["Heads", "brown02"], ["Others", "cyborgprocessor"]] },
+  { id: 28, code: "wanderer", items: [["Hats", "hatB01"], ["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"], ["Backpacks", "parr01"], ["Heads", "black04"], ["Others", "wanderercap"]] },
+  { id: 29, code: "snakecatcher", items: [["Hats", "capB07"], ["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Boots", "sneakV2B08"], ["Backpacks", "snake01"], ["Heads", "spec04"], ["Others", "snakevenom"]] },
+  { id: 30, code: "ghost", items: [["Masks", "klavaB01"], ["Shirts", "prizrak"], ["Pants", "prizrak"], ["Gloves", "prizrak"], ["Boots", "prizrak"], ["Others", "ghostbat"]] },
   { id: 31, code: "anarchist", items: [["Hats", "capB01"], ["Shirts", "anarch"], ["Pants", "jeansB03"], ["Gloves", "wristwrapB03"], ["Boots", "anarch"], ["Others", "spinyellow"]] },
   { id: 32, code: "biker", items: [["Hats", "biker"], ["Shirts", "biker"], ["Pants", "jeansB02"], ["Gloves", "biker"], ["Boots", "sneakV201"]] },
   { id: 33, code: "scrapper", items: [["Hats", "hatB06"], ["Masks", "bandB04"], ["Shirts", "hoodB06"], ["Pants", "sportB06"], ["Boots", "zadira"], ["Others", "burger"]] },
   { id: 34, code: "avenger", items: [["Hats", "avenger"], ["Masks", "avenger"], ["Shirts", "avenger"], ["Pants", "avenger"], ["Gloves", "avenger"], ["Boots", "avenger"], ["Others", "spinblue"]] },
-  { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"]] },
+  { id: 35, code: "stalker", items: [["Hats", "stalker"], ["Masks", "stalkergasmask"], ["Shirts", "stalker"], ["Pants", "stalker"], ["Gloves", "stalker"], ["Boots", "stalker"], ["Others", "stalkerbio"]] },
   { id: 36, code: "spy", items: [["Hats", "business"], ["Masks", "businessgoogles"], ["Shirts", "business"], ["Pants", "business"], ["Gloves", "business"], ["Boots", "business"]] },
   { id: 37, code: "contranos", items: [["Heads", "thanos"], ["Masks", "thanos"], ["Shirts", "thanos"], ["Pants", "thanos"], ["Gloves", "thanos"], ["Boots", "thanos"], ["Backpacks", "thanos"]] },
   { id: 38, code: "blue_soldier", items: [["Heads", "spec99"], ["Hats", "ushanka2"], ["Shirts", "trooper2"], ["Pants", "pant032"], ["Gloves", "glov022"], ["Boots", "slip99"], ["Backpacks", "rec2"], ["Others", "vodka"]] },
@@ -2394,16 +2419,10 @@ function donateWearSetItems(setIdValue) {
   });
 }
 
-// Assemblages 4 (ШТУРМОВИК) and 5 (ЭКОТЕРРОР) have no recoverable original item lists.
-// Keep them out of the shop response instead of exposing sets the battle server cannot complete.
-// The other IDs below are intentionally retired from the live shop; their item
-// definitions stay canonical so already owned/equipped pieces remain valid.
+// Incomplete original set lists were reconstructed from client item names and user corrections.
+// The remaining retired sets retain their canonical items for already owned equipment.
 const removedAssemblageIds = new Set([
   1,  // ПИКОВЫЙ ЖНЕЦ
-  2,  // ВОРОН
-  4,  // ШТУРМОВИК: исходный состав не восстановлен
-  5,  // ЭКОТЕРРОР: исходный состав не восстановлен
-  8,  // РАЗВЕД
   10, // ВДВ
   14, // Олимпиец
   23, // Красная жара
@@ -2547,6 +2566,7 @@ const maps = [
   mapEntry(17, "LegoTurnament", MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(18, "Inferno", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   mapEntry(19, "promzona", MAP_MODE_DEATHMATCH),
+  mapEntry(20, "ShipConteyner", MAP_MODE_DEATHMATCH | MAP_MODE_TEAM_DEATHMATCH),
   //mapEntry(19, "Dashguard", MAP_MODE_DEATHMATCH | MAP_MODE_DASHGUARD_EVENT)
 ];
 
@@ -3167,7 +3187,10 @@ async function savePostgresStore(nextStore) {
         ]
       );
 
-      await client.query("DELETE FROM player_inventory WHERE player_id = $1", [account.id]);
+      // Delete only genuinely removed items. A full DELETE/INSERT produced fake
+      // removal/addition events for every unchanged item on every save.
+      await client.query("DELETE FROM player_inventory WHERE player_id = $1 AND NOT (item_key = ANY($2::text[]))",
+        [account.id, (account.inventory || []).map(inventoryItemKey)]);
       for (const item of account.inventory || []) {
         await client.query(
           `INSERT INTO player_inventory (player_id, item_key, item_type, item_data, updated_at)
@@ -3397,7 +3420,7 @@ if (pgPool && TELEGRAM_LINK_API_TOKEN) {
 const adminLogsApi = createAdminLogsApi({
   getPool: () => pgPool,
   readJsonBody,
-  requestIp: requestClientIp,
+  requestIp: (req) => auditRequestNetwork(req).ip,
   requestGeo,
   onPlayerChanged: async (playerId) => {
     if (!pgPool) return;
@@ -3446,6 +3469,8 @@ function normalizeInventoryItem(item) {
         const ammunition = upgradedWeaponItem(canonical);
         upgraded.ammo = ammunition.ammo;
         upgraded.ammo_tot = ammunition.ammo_tot;
+        // Rebase the critical chance while retaining the workshop bonus.
+        upgraded.krit = ammunition.krit;
       }
       // Rebase only damage fields of saved upgrades onto the new damage table.
       const damageUpgrade = upgradedWeaponItem(canonical);
@@ -8549,7 +8574,6 @@ function loadAchievementCatalog() {
 const achievementCatalog = loadAchievementCatalog();
 const achievementBase = achievementCatalog.map(({ parts, ...achievement }) => achievement);
 const achievementCatalogIds = new Set(achievementCatalog.map((achievement) => Number(achievement.id)));
-const ACHIEVEMENT_POP_HISTORICAL = process.env.ACHIEVEMENT_POP_HISTORICAL === "1";
 
 function achievementWeaponStats(account) {
   return (account.weaponStats || []).map((item) => ({
@@ -8666,7 +8690,7 @@ async function loadAchievementAccountFromPostgres(client, playerId) {
   };
 }
 
-async function syncPostgresAchievements(client, playerId) {
+async function syncPostgresAchievements(client, playerId, progressBeforeEvent) {
   if (!achievementCatalog.length) return [];
   const account = await loadAchievementAccountFromPostgres(client, playerId);
   if (!account) return [];
@@ -8676,7 +8700,7 @@ async function syncPostgresAchievements(client, playerId) {
     [account.id]
   );
   const hasCatalogProgress = existing.rows.some((row) => achievementCatalogIds.has(Number(row.achievement_id)));
-  const baselineOnly = !ACHIEVEMENT_POP_HISTORICAL && !hasCatalogProgress;
+  const baselineOnly = !hasCatalogProgress;
   const completedBefore = new Set(
     existing.rows
       .filter((row) => Number(row.claimed_value || 0) > 0)
@@ -8692,7 +8716,11 @@ async function syncPostgresAchievements(client, playerId) {
     const complete = Number(itemProgress.c || 0) > 0 ? 1 : 0;
     if (complete) completedCount += 1;
 
-    if (!baselineOnly && complete && !completedBefore.has(Number(achievement.id))) {
+    // Catalog rows may be absent for historical progress; only this event's
+    // threshold crossing may produce an Event76 notification.
+    const previousValue = Number(progressBeforeEvent?.[String(achievement.id)]?.v ?? currentValue);
+    const crossedByEvent = previousValue < Number(achievement.v || 0) && complete;
+    if (crossedByEvent && !completedBefore.has(Number(achievement.id))) {
       newlyCompleted.push({
         id: Number(achievement.id),
         i: Number(achievement.i),
@@ -8716,7 +8744,8 @@ async function syncPostgresAchievements(client, playerId) {
 
   if (baselineOnly) {
     console.log(`[achievements] baseline player=${account.id} completed=${completedCount} catalog=${achievementCatalog.length}`);
-  } else if (newlyCompleted.length) {
+  }
+  if (newlyCompleted.length) {
     console.log(`[achievements] unlock player=${account.id} count=${newlyCompleted.length} ids=${newlyCompleted.map((item) => item.i).join(",")}`);
   }
   for (const achievement of newlyCompleted) {
@@ -14233,6 +14262,32 @@ async function incrementWeaponStats(client, playerId, event, details, delta) {
   );
 }
 
+function gameLocalDay(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.TELEGRAM_DAILY_TIMEZONE || "Europe/Simferopol",
+    year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(date).reduce((out, part) => (out[part.type] = part.value, out), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+async function incrementDailyGameStats(client, playerId, delta) {
+  const id = Number(playerId || 0);
+  const allowed = ["kills", "experience", "disarms", "headshots", "nuts", "flags", "points", "assists"];
+  if (!Number.isSafeInteger(id) || id <= 0) return;
+  const changes = Object.fromEntries(allowed.map(key => [key, Math.max(0, Math.trunc(Number(delta?.[key] || 0)))]).filter(([, value]) => value > 0));
+  if (!Object.keys(changes).length) return;
+  const columns = Object.keys(changes);
+  const insertColumns = columns.map(column => `"${column}"`).join(", ");
+  const insertValues = columns.map((_, index) => `$${index + 3}`).join(", ");
+  const updates = columns.map(column => `"${column}" = player_daily_game_stats."${column}" + EXCLUDED."${column}"`).join(", ");
+  await client.query(
+    `INSERT INTO player_daily_game_stats (local_day, player_id, ${insertColumns})
+     VALUES ($1::date, $2, ${insertValues})
+     ON CONFLICT (local_day, player_id) DO UPDATE SET ${updates}, updated_at = now()`,
+    [gameLocalDay(), id, ...columns.map(column => changes[column])]
+  );
+}
+
 async function recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details) {
   if (type === "shot") {
     const shots = eventNumber(event, details, "shots", 0);
@@ -14244,6 +14299,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
 
   if (type === "exp") {
     const expAwarded = eventNumber(event, details, "expAwarded", 0);
+    if (expAwarded > 0) await incrementDailyGameStats(client, playerId, { experience: expAwarded });
     if (playerId > 0 && expAwarded > 0) {
       const expResult = await awardPlayerExperience(client, playerId, expAwarded, "battle_server_enhancer");
       if (expResult) {
@@ -14291,6 +14347,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
       });
     }
     if (!suicide && killerPlayerId > 0) {
+      await incrementDailyGameStats(client, killerPlayerId, { kills: 1, headshots: headshot, nuts });
       await incrementPlayerStats(client, killerPlayerId, {
         k: 1,
         hs: headshot,
@@ -14307,6 +14364,7 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
         nuts
       });
       if (expAwarded > 0) {
+        await incrementDailyGameStats(client, killerPlayerId, { experience: expAwarded });
         const expResult = await awardPlayerExperience(client, killerPlayerId, expAwarded, "battle_server");
         if (expResult) {
           details.expAwarded = expAwarded;
@@ -14325,11 +14383,29 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
       }
     }
 
+    const assistantPlayerId = Number(event.assistantPlayerId || details.assistantPlayerId || 0);
+    if (assistantPlayerId > 0 && assistantPlayerId !== killerPlayerId && assistantPlayerId !== victimPlayerId) {
+      await incrementDailyGameStats(client, assistantPlayerId, {
+        assists: 1,
+        experience: eventNumber(event, details, "assistExpAwarded", 0),
+      });
+    }
+
     await client.query(
       `INSERT INTO battle_score_events (room_id, killer_player_id, victim_player_id, weapon_id, hit_zone, event_data)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [roomId, killerPlayerId || playerId, victimPlayerId || playerId, Number(event.weaponId || details.weaponId || event.weaponType || details.weaponType || 0), hitZone, JSON.stringify(details)]
     );
+    return;
+  }
+
+  if (type === "metric") {
+    const metric = String(event.metric || details.metric || "");
+    if (["disarms", "flags", "points", "assists"].includes(metric)) {
+      await incrementDailyGameStats(client, playerId, {
+        [metric]: Math.max(1, Math.trunc(eventNumber(event, details, "amount", 1)))
+      });
+    }
     return;
   }
 
@@ -14346,9 +14422,9 @@ async function recordStatEvent(client, roomId, event, type, playerId, mapName, m
 
     if (playTimeMinutes > 0 || kills > 0 || deaths > 0 || headshots > 0 || hasWon) {
       await client.query(
-        `INSERT INTO player_match_stats (player_id, map_name, mode, kills, deaths, headshots, play_time, won)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false]
+        `INSERT INTO player_match_stats (player_id, map_name, mode, kills, deaths, headshots, play_time, won, server_host, server_port, match_instance_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [playerId, mapName, mode, kills, deaths, headshots, playTimeMinutes, hasWon ? won : false, String(event.serverHost || BATTLE_HOST || "").slice(0,128), Number(event.serverPort || 5055), String(event.matchInstanceId || "").slice(0,200)]
       );
     }
     // Contract accounting consumes only the authoritative per-session summary
@@ -14430,7 +14506,7 @@ async function recordBattleEvent(event) {
          server_host, server_port, room_settings, updated_at
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, now())
-       ON CONFLICT (room_name) DO UPDATE SET
+       ON CONFLICT (server_host, server_port, room_name) DO UPDATE SET
          map_name = EXCLUDED.map_name,
          mode = EXCLUDED.mode,
          max_players = EXCLUDED.max_players,
@@ -14442,7 +14518,7 @@ async function recordBattleEvent(event) {
          room_settings = EXCLUDED.room_settings,
          updated_at = now()
        RETURNING id`,
-      [roomName, mapName, mode, maxPlayers, Boolean(event.friendlyFire), type === "leave" ? "closed" : "running", playerId, serverHost, serverPort, roomSettings]
+      [roomName, mapName, mode, maxPlayers, Boolean(event.friendlyFire), type === "leave" && Number(details.remainingPlayers || 0) === 0 ? "closed" : "running", playerId, serverHost, serverPort, roomSettings]
     );
 
     const roomId = room.rows[0].id;
@@ -14473,7 +14549,7 @@ async function recordBattleEvent(event) {
       await client.query(
         `INSERT INTO battle_chat_events (room_id, player_id, actor_id, channel, message)
          VALUES ($1, $2, $3, $4, $5)`,
-        [roomId, playerId, actorId, Number(event.channel || 0), String(event.message).slice(0, 500)]
+        [roomId, playerId, actorId, Number(event.channel ?? details.type ?? 253), String(event.message).slice(0, 500)]
       );
     } else if (type === "player_report") {
       const targetPlayerId = Number(event.targetPlayerId || details.targetPlayerId || 0);
@@ -14499,8 +14575,6 @@ async function recordBattleEvent(event) {
       );
     }
 
-    await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
-    const achievements = [];
     const achievementPlayerIds = new Set();
     if (type === "death" || type === "score") {
       const killerPlayerId = Number(event.killerPlayerId || details.killerPlayerId || playerId || 0);
@@ -14509,8 +14583,20 @@ async function recordBattleEvent(event) {
     } else if (type === "summary") {
       achievementPlayerIds.add(playerId);
     }
+    const achievementProgressBeforeEvent = new Map();
     for (const achievementPlayerId of achievementPlayerIds) {
-      const newlyCompleted = await syncPostgresAchievements(client, achievementPlayerId);
+      const beforeAccount = await loadAchievementAccountFromPostgres(client, achievementPlayerId);
+      if (beforeAccount) {
+        achievementProgressBeforeEvent.set(achievementPlayerId, achievementProgressFor(beforeAccount));
+      }
+    }
+
+    await recordStatEvent(client, roomId, event, type, playerId, mapName, mode, details);
+    const achievements = [];
+    for (const achievementPlayerId of achievementPlayerIds) {
+      const newlyCompleted = await syncPostgresAchievements(
+        client, achievementPlayerId, achievementProgressBeforeEvent.get(achievementPlayerId)
+      );
       achievements.push(...newlyCompleted);
     }
 
@@ -14518,66 +14604,47 @@ async function recordBattleEvent(event) {
     if (type === "join" || type === "leave") {
       await touchPlayerActivity(client, {
         playerId,
-        kind: type === "join" ? "login" : "logout",
+        kind: "seen",
         ipAddress: remoteIp,
         source: "battle_server"
       });
       await writeAuditEvent(client, {
         playerId,
         playerName: event.playerName,
-        eventType: type === "join" ? "player_login" : "player_logout",
+        eventType: type === "join" ? "battle_join" : "battle_leave",
         category: "session",
         severity: "info",
         description: type === "join" ? `Игрок вошёл в бой ${roomName}` : `Игрок вышел из боя ${roomName}`,
         source: "battle_server",
         ipAddress: remoteIp,
-        metadata: { roomName, mapName, mode, actorId, serverPort }
+        metadata: { roomName, mapName, mode, actorId, serverHost, serverPort }
       });
     }
-    if (type === "summary") {
+    // Combat counters and rewards are persisted above by recordStatEvent.
+    // The administrative journal intentionally contains no per-kill/death,
+    // shot, movement, spawn or match-summary entries.
+    if (type === "chat" && event.message) {
       await writeAuditEvent(client, {
         playerId,
         playerName: event.playerName,
-        eventType: "statistics_change",
-        category: "battle",
-        description: `Обновлена статистика матча на карте ${mapName}`,
-        newValue: details,
+        eventType: "battle_chat",
+        category: "chat",
+        description: String(event.message).slice(0, 500),
         source: "battle_server",
-        metadata: { roomName, mapName, mode }
+        metadata: { roomName, mapName, mode, actorId, channel: Number(event.channel ?? details.type ?? 253), team, serverHost, serverPort }
       });
     }
-    if (type === "death" || type === "score") {
-      const killerId = Number(event.killerPlayerId || details.killerPlayerId || 0);
-      const victimId = Number(event.victimPlayerId || details.victimPlayerId || 0);
-      const combatValue = {
-        roomName,
-        mapName,
-        mode,
-        weaponId: Number(event.weaponId || details.weaponId || 0),
-        hitZone: Number(event.hitZone || details.hitZone || 0),
-        killerPlayerId: killerId,
-        victimPlayerId: victimId
-      };
-      if (killerId > 0 && killerId !== victimId) {
-        await writeAuditEvent(client, {
-          playerId: killerId,
-          eventType: "battle_kill",
-          category: "battle",
-          description: `Убийство игрока #${victimId} на карте ${mapName}`,
-          newValue: combatValue,
-          source: "battle_server"
-        });
-      }
-      if (victimId > 0) {
-        await writeAuditEvent(client, {
-          playerId: victimId,
-          eventType: "battle_death",
-          category: "battle",
-          description: `Смерть от игрока #${killerId} на карте ${mapName}`,
-          newValue: combatValue,
-          source: "battle_server"
-        });
-      }
+    if (type === "player_report") {
+      await writeAuditEvent(client, {
+        playerId,
+        playerName: event.playerName,
+        eventType: "player_report",
+        category: "moderation",
+        description: `Жалоба на игрока #${Number(event.targetPlayerId || details.targetPlayerId || 0)}`,
+        source: "battle_server",
+        severity: "notice",
+        metadata: { roomName, mapName, targetPlayerId: Number(event.targetPlayerId || details.targetPlayerId || 0), reason: event.reportReason || details.reason, details: event.reportDetails || details.details }
+      });
     }
 
     await client.query("COMMIT");
@@ -14588,6 +14655,67 @@ async function recordBattleEvent(event) {
   } finally {
     client.release();
   }
+}
+
+async function queueTelegramGameNotification(kind, payload = {}) {
+  if (!pgPool || !["online", "modgames", "daily"].includes(String(kind))) return false;
+  await pgPool.query(
+    "INSERT INTO telegram_game_notifications (kind, payload) VALUES ($1, $2::jsonb)",
+    [String(kind), JSON.stringify(asBattleJson(payload))]
+  );
+  return true;
+}
+
+async function telegramDailyLeaderboard(localDay) {
+  const specs = [
+    ["Больше всего убийств", "kills"], ["Набрано опыта", "experience"],
+    ["Разоруживаний", "disarms"], ["Убийств в голову", "headshots"],
+    ["Убийств в пах", "nuts"], ["Принёс флагов", "flags"],
+    ["Захватил точек", "points"], ["Помощь в убийстве", "assists"],
+  ];
+  return Promise.all(specs.map(async ([label, column]) => {
+    if (column === "disarms") {
+      return { label, value: "н/д", player: "событие не реализовано", available: false };
+    }
+    const result = await pgPool.query(
+      `SELECT p.name, d."${column}" AS value
+         FROM player_daily_game_stats d JOIN players p ON p.id = d.player_id
+        WHERE d.local_day = $1::date AND d."${column}" > 0
+        ORDER BY d."${column}" DESC, p.id ASC LIMIT 1`, [localDay]
+    );
+    const leader = result.rows[0];
+    return { label, value: Number(leader?.value || 0), player: String(leader?.name || "—"), available: true };
+  }));
+}
+
+async function maybeQueueTelegramDaily() {
+  if (!pgPool) return;
+  const timeZone = process.env.TELEGRAM_DAILY_TIMEZONE || "Europe/Simferopol";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+  }).formatToParts(new Date()).reduce((out, part) => (out[part.type] = part.value, out), {});
+  if (parts.hour !== "00" || parts.minute !== "00") return;
+  const today = `${parts.year}-${parts.month}-${parts.day}`;
+  const yesterday = new Date(`${today}T00:00:00Z`);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const reportDay = yesterday.toISOString().slice(0, 10);
+  const client = await pgPool.connect();
+  try {
+    await client.query("BEGIN");
+    const inserted = await client.query(
+      "INSERT INTO telegram_game_daily_runs (local_day) VALUES ($1) ON CONFLICT DO NOTHING RETURNING local_day", [today]
+    );
+    if (!inserted.rowCount) { await client.query("ROLLBACK"); return; }
+    const categories = await telegramDailyLeaderboard(reportDay);
+    await client.query(
+      "INSERT INTO telegram_game_notifications (kind, payload) VALUES ('daily', $1::jsonb)",
+      [JSON.stringify({ date: reportDay, categories })]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("[telegram-notifications] daily report enqueue failed", error);
+  } finally { client.release(); }
 }
 
 ensureDesktopAccount();
@@ -14721,7 +14849,7 @@ async function handleHttpRequest(req, res) {
             ? `Создан промокод ${promo.code}: ${promo.rewardAmount} контрабаксов`
             : `Промокод ${promo.code} ${promo.active ? "включён" : "выключен"}`,
           source: "telegram_admin",
-          ipAddress: requestClientIp(req),
+          ipAddress: auditRequestNetwork(req).ip,
           device: String(req.headers["user-agent"] || "").slice(0, 300),
           newValue: promo,
           metadata: {
@@ -14775,7 +14903,8 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
-  if (url.pathname.startsWith("/bot/telegram")) {
+  if (url.pathname.startsWith("/bot/telegram") &&
+      !["/bot/telegram/notifications/next", "/bot/telegram/notifications/ack"].includes(url.pathname)) {
     if (!hasValidTelegramLinkApiToken(req)) {
       sendJson(res, { ok: false, error: "not_found" }, 404);
       return;
@@ -14954,7 +15083,7 @@ async function handleHttpRequest(req, res) {
         severity: "warning",
         description: `Администратор удалил старую игровую ссылку, привязку устройства и Telegram`,
         source: "legacy_admin_token",
-        ipAddress: requestClientIp(req),
+        ipAddress: auditRequestNetwork(req).ip,
         device: String(req.headers["user-agent"] || "").slice(0, 300),
         newValue: {
           linkRotated: true,
@@ -15217,7 +15346,7 @@ async function handleHttpRequest(req, res) {
         return;
       }
       const auditContext = {
-        ipAddress: requestClientIp(req),
+        ipAddress: auditRequestNetwork(req).ip,
         device: String(req.headers["user-agent"] || "").slice(0, 300),
         geo: requestGeo(req),
         source: "battle_pass_case"
@@ -15255,7 +15384,7 @@ async function handleHttpRequest(req, res) {
         return;
       }
       const auditContext = {
-        ipAddress: requestClientIp(req),
+        ipAddress: auditRequestNetwork(req).ip,
         device: String(req.headers["user-agent"] || "").slice(0, 300),
         geo: requestGeo(req),
         source: "battle_pass_case_resolution"
@@ -15283,9 +15412,9 @@ async function handleHttpRequest(req, res) {
       sendJson(res, { result: false, error: "1" }, 403);
       return;
     }
-    await recordGameLoginOnce(account, req);
+    await recordGameLoginOnce(account, req, url);
     const auditContext = {
-      ipAddress: requestClientIp(req),
+      ipAddress: auditRequestNetwork(req).ip,
       device: String(req.headers["user-agent"] || "").slice(0, 300),
       geo: requestGeo(req),
       source: "game_api"
@@ -15337,6 +15466,20 @@ async function handleHttpRequest(req, res) {
     } catch (error) {
       sendJson(res, { ok: false, error: error.message || "staff_action_failed" }, serviceErrorStatus(error));
     }
+    return;
+  }
+
+  if (url.pathname === "/battle/runtime-config") {
+    if (req.method !== "GET") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+    if (!hasValidBattleServiceToken(req)) {
+      sendJson(res, { ok: false, error: "invalid_token" }, 403);
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    sendJson(res, { ok: true, version: 1, modGamesEnabled: process.env.MODGAMES_ENABLED === "1" });
     return;
   }
 
@@ -15492,6 +15635,65 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if (url.pathname === "/battle/telegram/notifications") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
+      return;
+    }
+
+    try {
+      const body = await readJsonBody(req, 8 * 1024);
+      if (!hasValidBattleServiceToken(req, body)) {
+        sendJson(res, { ok: false, error: "invalid_token" }, 403);
+        return;
+      }
+      const kind = String(body.kind || "");
+      if (!["online", "modgames"].includes(kind)) {
+        sendJson(res, { ok: false, error: "invalid_notification_kind" }, 400);
+        return;
+      }
+      const payload = kind === "online"
+        ? { count: Math.max(0, Math.min(100000, Math.trunc(Number(body.payload?.count || 0)))) }
+        : {
+            map: String(body.payload?.map || "").slice(0, 80),
+            room: String(body.payload?.room || "").slice(0, 100),
+            name: String(body.payload?.name || "ModGames").slice(0, 100),
+          };
+      await queueTelegramGameNotification(kind, payload);
+      sendJson(res, { ok: true });
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "telegram_notification_failed" }, serviceErrorStatus(error));
+    }
+    return;
+  }
+
+  if (url.pathname === "/bot/telegram/notifications/next") {
+    if (req.method !== "GET" || !hasValidBattleServiceToken(req, {})) {
+      sendJson(res, { ok: false, error: req.method === "GET" ? "invalid_token" : "method_not_allowed" }, req.method === "GET" ? 403 : 405);
+      return;
+    }
+    if (!pgPool) { sendJson(res, { ok: false, events: [] }, 503); return; }
+    const result = await pgPool.query(
+      `SELECT id, kind, payload FROM telegram_game_notifications
+        WHERE delivered_at IS NULL ORDER BY id ASC LIMIT 10`
+    );
+    sendJson(res, { ok: true, events: result.rows.map(row => ({ id: Number(row.id), kind: row.kind, payload: jsonValue(row.payload, {}) })) });
+    return;
+  }
+
+  if (url.pathname === "/bot/telegram/notifications/ack") {
+    if (req.method !== "POST") { sendJson(res, { ok: false, error: "method_not_allowed" }, 405); return; }
+    const body = await readJsonBody(req, 4 * 1024);
+    if (!hasValidBattleServiceToken(req, body)) { sendJson(res, { ok: false, error: "invalid_token" }, 403); return; }
+    const id = Number(body.id || 0);
+    if (!Number.isSafeInteger(id) || id < 1) { sendJson(res, { ok: false, error: "invalid_id" }, 400); return; }
+    const updated = await pgPool.query(
+      "UPDATE telegram_game_notifications SET delivered_at = now() WHERE id = $1 AND delivered_at IS NULL", [id]
+    );
+    sendJson(res, { ok: true, delivered: updated.rowCount > 0 });
+    return;
+  }
+
   if (url.pathname === "/db") {
     if (!hasValidAdminToken(req)) {
       sendJson(res, { ok: false, error: "not_found" }, 404);
@@ -15546,6 +15748,10 @@ server.listen(PORT, () => {
   if (CREATE_CODE === "CONTRA-REVIVE-2026") console.warn("[security] CREATE_CODE still uses the public fallback; rotate it");
   if (DEFAULT_KEY === "contra-revive-key") console.warn("[security] DEFAULT_KEY still uses the public fallback; rotate it");
 });
+const telegramDailyTimer = setInterval(() => {
+  maybeQueueTelegramDaily().catch(error => console.error("[telegram-notifications] daily scheduler failed", error));
+}, 30 * 1000);
+telegramDailyTimer.unref?.();
 server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
 server.headersTimeout = Math.min(HTTP_HEADERS_TIMEOUT_MS, HTTP_REQUEST_TIMEOUT_MS);
 server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
