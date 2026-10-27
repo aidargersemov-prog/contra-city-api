@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-20-revert-inbound-parse-recovery-v415";
+const BUILD_ID = "battle-server-2026-10-27-shipconteyner-map-v416";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -776,6 +776,11 @@ const MAP_PICKUP_POINTS = {
     { id: 37007, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: -93.107, y: -37.914, z: 53.359, rotY: 90 },
     { id: 37008, type: ITEM_TYPES.AMMO, subType: 1, value: 0, x: 150.277, y: -36.871, z: 128.199, rotY: 180 },
   ],
+  shipconteyner: [
+    // Authored markers under POINTS_RESCALE in ShipConteyner.unity3d.
+    { id: 38001, type: ITEM_TYPES.HEALTH, subType: 2, value: 0, x: 4.244, y: 28.631, z: 212.166, rotY: 90 },
+    { id: 38002, type: ITEM_TYPES.AMMO, subType: 2, value: 0, x: 9.812, y: 28.843, z: 217.523, rotY: 270 },
+  ],
 };
 const MAP_SPAWN_POINTS = {
   arena_3lvl: {
@@ -983,6 +988,34 @@ const MAP_SPAWN_POINTS = {
       { x: -122.07, y: -40.126, z: 17.735, rotY: 45 },
     ],
   },
+  shipconteyner: {
+    // Authored Respawn_T0/T1/T2 markers under POINTS_RESCALE in ShipConteyner.unity3d.
+    dm: [
+      { x: -85.626, y: 14.933, z: 297.573, rotY: 135 },
+      { x: 97.485, y: 14.196, z: 297.849, rotY: 225 },
+      { x: 6.239, y: 14.933, z: 208.724, rotY: 180 },
+      { x: -74.851, y: 14.933, z: 117.843, rotY: 45 },
+      { x: 98.817, y: 14.554, z: 116.706, rotY: 330 },
+    ],
+    team1: [
+      { x: -58.682, y: 14.4, z: 272.037, rotY: 270 },
+      { x: -83.987, y: 15.057, z: 289.581, rotY: 180 },
+      { x: -81.047, y: 14.318, z: 273.334, rotY: 180 },
+      { x: -58.47, y: 14.356, z: 288.148, rotY: 0 },
+      { x: -68.2, y: 14.595, z: 301.439, rotY: 90 },
+      { x: -68.592, y: 14.576, z: 292.097, rotY: 90 },
+      { x: -65.341, y: 14.169, z: 281.828, rotY: 270 },
+    ],
+    team2: [
+      { x: 65.552, y: 17.028, z: 139.87, rotY: 90 },
+      { x: 91.777, y: 14.489, z: 135.07, rotY: 0 },
+      { x: 64.925, y: 17.028, z: 131.954, rotY: 180 },
+      { x: 80.281, y: 15.253, z: 149.381, rotY: 90 },
+      { x: 89.256, y: 14.303, z: 124.756, rotY: 315 },
+      { x: 76.459, y: 14.471, z: 122.959, rotY: 0 },
+      { x: 66.972, y: 17.028, z: 148.689, rotY: 90 },
+    ],
+  },
 };
 
 const MAP_MODE_DEATHMATCH = 1;
@@ -1012,6 +1045,7 @@ const MAP_ALLOWED_MODES = {
   legoturnament: [MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG],
   arena_3lvl: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
   inferno: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH, MAP_MODE_CAPTURE_THE_FLAG, MAP_MODE_CONTROL_POINTS],
+  shipconteyner: [MAP_MODE_DEATHMATCH, MAP_MODE_TEAM_DEATHMATCH],
   promzona: [MAP_MODE_DEATHMATCH, MAP_MODE_ROGUELIKE],
 };
 const CTF_MAPS = {
