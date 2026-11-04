@@ -927,7 +927,7 @@ const MAP_SPAWN_POINTS = {
     dm: [
       // Respawn_T0 world position. The authored marker is nested under
       // POINTS_RESCALE and MAP_ROOT; MAP_ROOT currently has scale 5.
-      { x: 355.9, y: 6.69, z: 650.41, rotY: 0 },
+      { x: 39.47564, y: 1.3936, z: 109.8022, rotY: 0 },
     ]
   },
   legoturnament: {
@@ -13611,12 +13611,6 @@ function expeditionReservationAllowsPlayer(room, playerId) {
   return Number.isFinite(id) && id > 0 && room.expeditionReservationPlayerIds instanceof Set && room.expeditionReservationPlayerIds.has(id);
 }
 
-function isDeveloperExpeditionReservation(settings, room, playerId) {
-  return settings.hasFullSettings === false && room?.expeditionReserved &&
-    String(room.expeditionQueueId || "").startsWith("developer-") &&
-    expeditionReservationAllowsPlayer(room, playerId);
-}
-
 function reserveExpeditionSoloRoom(queue, members) {
   const room = ensureRoom({
     name: `Expedition solo ${queue.id}`,
@@ -15466,7 +15460,9 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
     const requestedRoom = rooms.get(settings.name);
     const requestedPlayerId = Number(htGet(actorParam, 241)?.value || 0);
-    const developerExpeditionJoin = isDeveloperExpeditionReservation(settings, requestedRoom, requestedPlayerId);
+    const developerExpeditionJoin = Boolean(settings.hasFullSettings === false && requestedRoom?.expeditionReserved &&
+      String(requestedRoom.expeditionQueueId || "").startsWith("developer-") &&
+      expeditionReservationAllowsPlayer(requestedRoom, requestedPlayerId));
     if (!EXPEDITION_PUBLIC_ENABLED &&
         (Number(settings.mode) === MAP_MODE_ROGUELIKE || Number(requestedRoom?.mode) === MAP_MODE_ROGUELIKE) &&
         !developerExpeditionJoin) {
@@ -15524,7 +15520,6 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       return [rawOperationResponse(255, [], -3, "profile-unavailable")];
     }
     if (developerExpeditionJoin && normalizeStaffRole(profile.staffRole) !== "developer") {
-      console.log(`[expedition] developer room join rejected player=${profile.authId} role=${normalizeStaffRole(profile.staffRole)}`);
       return [rawOperationResponse(255, [], -17, "developer-role-required")];
     }
     if (settings.hasFullSettings !== false && settings.password && !staffHasCapability(profile.staffRole, "private_room")) {
