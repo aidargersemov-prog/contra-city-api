@@ -927,7 +927,7 @@ const MAP_SPAWN_POINTS = {
     dm: [
       // Respawn_T0 world position. The authored marker is nested under
       // POINTS_RESCALE and MAP_ROOT; MAP_ROOT currently has scale 5.
-      { x: 39.47564, y: 1.3936, z: 109.8022, rotY: 0 },
+      { x: 355.90, y: 6.97, z: 650.41, rotY: 0 },
     ]
   },
   legoturnament: {
