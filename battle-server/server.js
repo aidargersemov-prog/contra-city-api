@@ -927,7 +927,7 @@ const MAP_SPAWN_POINTS = {
     dm: [
       // Respawn_T0 world position. The authored marker is nested under
       // POINTS_RESCALE and MAP_ROOT; MAP_ROOT currently has scale 5.
-      { x: 654.935, y: 6.86, z: 150.265, rotY: 0 },
+      { x: 355.9, y: 6.69, z: 650.41, rotY: 0 },
     ]
   },
   legoturnament: {
@@ -14375,8 +14375,8 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
   const command = Number(expeditionPayloadValue(data, 1, 0));
   // Keep active runs able to finish, but reject every new lobby entry from
   // older clients that still expose the PvE screen.
-  if (!EXPEDITION_PUBLIC_ENABLED && session?.listLobby) {
-    if ([EXPEDITION_COMMAND.SOLO_QUEUE_JOIN, EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL, EXPEDITION_COMMAND.DEVELOPER_SOLO_LAUNCH].includes(command)) {
+  if (!EXPEDITION_PUBLIC_ENABLED && session?.listLobby && command !== EXPEDITION_COMMAND.DEVELOPER_SOLO_LAUNCH) {
+    if ([EXPEDITION_COMMAND.SOLO_QUEUE_JOIN, EXPEDITION_COMMAND.SOLO_QUEUE_CANCEL].includes(command)) {
       return [makeExpeditionSoloQueueRejected(session, "mode_unavailable")];
     }
     if ([EXPEDITION_COMMAND.PARTY_CREATE, EXPEDITION_COMMAND.PARTY_LEAVE, EXPEDITION_COMMAND.PARTY_INVITE,
@@ -15458,8 +15458,15 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
 
     const settings = roomSettingsFrom(roomPropsParam);
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
+    const requestedRoom = rooms.get(settings.name);
+    const requestedPlayerId = Number(htGet(actorParam, 241)?.value || 0);
+    const developerExpeditionJoin = settings.hasFullSettings === false &&
+      requestedRoom?.expeditionReserved &&
+      String(requestedRoom.expeditionQueueId || "").startsWith("developer-") &&
+      expeditionReservationAllowsPlayer(requestedRoom, requestedPlayerId);
     if (!EXPEDITION_PUBLIC_ENABLED &&
-        (Number(settings.mode) === MAP_MODE_ROGUELIKE || Number(rooms.get(settings.name)?.mode) === MAP_MODE_ROGUELIKE)) {
+        (Number(settings.mode) === MAP_MODE_ROGUELIKE || Number(requestedRoom?.mode) === MAP_MODE_ROGUELIKE) &&
+        !developerExpeditionJoin) {
       console.log(`[expedition] closed room entry rejected name=${settings.name} player=${session.playerId || "unknown"}`);
       return [rawOperationResponse(255, [], -17, "expedition-unavailable")];
     }
@@ -15512,6 +15519,10 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
       const requestedCcid = actorCredentials(actorParam).authId;
       console.log(`[state] room join rejected reason=profile-unavailable requested=${settings.name} player=${requestedCcid}`);
       return [rawOperationResponse(255, [], -3, "profile-unavailable")];
+    }
+    if (developerExpeditionJoin && normalizeStaffRole(profile.staffRole) !== "developer") {
+      console.log(`[expedition] developer room join rejected player=${profile.authId} role=${normalizeStaffRole(profile.staffRole)}`);
+      return [rawOperationResponse(255, [], -17, "developer-role-required")];
     }
     if (settings.hasFullSettings !== false && settings.password && !staffHasCapability(profile.staffRole, "private_room")) {
       console.log(`[staff] room create rejected player=${profile.authId} role=${normalizeStaffRole(profile.staffRole)} reason=private-room-role`);
