@@ -32,7 +32,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-10-27-shipconteyner-map-v416";
+const BUILD_ID = "battle-server-2026-11-05-expedition-dev-promzona-v417";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -13611,6 +13611,12 @@ function expeditionReservationAllowsPlayer(room, playerId) {
   return Number.isFinite(id) && id > 0 && room.expeditionReservationPlayerIds instanceof Set && room.expeditionReservationPlayerIds.has(id);
 }
 
+function isDeveloperExpeditionReservation(settings, room, playerId) {
+  return settings.hasFullSettings === false && room?.expeditionReserved &&
+    String(room.expeditionQueueId || "").startsWith("developer-") &&
+    expeditionReservationAllowsPlayer(room, playerId);
+}
+
 function reserveExpeditionSoloRoom(queue, members) {
   const room = ensureRoom({
     name: `Expedition solo ${queue.id}`,
@@ -15460,10 +15466,7 @@ async function handleOperation(port, socket, rinfo, session, parsed, channel = 0
     settings.name = settings.name || requestedName || DEFAULT_ROOM;
     const requestedRoom = rooms.get(settings.name);
     const requestedPlayerId = Number(htGet(actorParam, 241)?.value || 0);
-    const developerExpeditionJoin = settings.hasFullSettings === false &&
-      requestedRoom?.expeditionReserved &&
-      String(requestedRoom.expeditionQueueId || "").startsWith("developer-") &&
-      expeditionReservationAllowsPlayer(requestedRoom, requestedPlayerId);
+    const developerExpeditionJoin = isDeveloperExpeditionReservation(settings, requestedRoom, requestedPlayerId);
     if (!EXPEDITION_PUBLIC_ENABLED &&
         (Number(settings.mode) === MAP_MODE_ROGUELIKE || Number(requestedRoom?.mode) === MAP_MODE_ROGUELIKE) &&
         !developerExpeditionJoin) {
