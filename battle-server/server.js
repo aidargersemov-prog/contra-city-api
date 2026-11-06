@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { TextDecoder } = require("util");
 const { monitorEventLoopDelay } = require("perf_hooks");
 const { createClanWarsBattle, MAPS: CLAN_WAR_MAPS } = require("./clan-wars-battle.cjs");
+const { COMMAND: CHAPTER_ONE_COMMAND, handleChapterOne } = require("./pve-chapter-one.cjs");
 let clanWarsBattle = null;
 let modGames = null;
 let modGamesCentralEnabled = false;
@@ -32,7 +33,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-11-05-expedition-dev-promzona-v417";
+const BUILD_ID = "battle-server-2026-11-06-promzona-quest-hp-v418";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -14422,6 +14423,22 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
   const runId = expeditionRunId(expeditionPayloadValue(data, 2, ""));
   if (!run || !runId || runId !== run.runId || session.expeditionRunId !== run.runId) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run?.runId || "", "run_not_authorized", false)];
+  }
+
+  if ([CHAPTER_ONE_COMMAND.HELLO, CHAPTER_ONE_COMMAND.REGISTER, CHAPTER_ONE_COMMAND.HIT].includes(command)) {
+    const sequence = Number(expeditionPayloadValue(data, 3, 0));
+    const rawPayload = expeditionPayloadValue(data, 7, "");
+    let payload = null;
+    if (typeof rawPayload === "string" && Buffer.byteLength(rawPayload, "utf8") <= 512) {
+      try { payload = JSON.parse(rawPayload); } catch {}
+    }
+    const result = handleChapterOne(run, {
+      actorId: Number(session.actorId),
+      authority: Number(session.actorId) === Number(run.authorityActorId),
+      solo: activeExpeditionRoomMembers(room).length === 1,
+      alive: Boolean(session.spawned && !session.dead),
+    }, command, sequence, payload);
+    return [makeExpeditionAiEvent(CHAPTER_ONE_COMMAND.STATE, run.runId, sequence, Number(session.actorId), JSON.stringify(result))];
   }
 
   const aiResult = handleExpeditionAiRequest(session, room, run, command, data, channel);
