@@ -33,7 +33,7 @@ const PUBLIC_HOST = !CONFIGURED_PUBLIC_HOST || CONFIGURED_PUBLIC_HOST === RETIRE
   ? DEFAULT_PUBLIC_HOST
   : CONFIGURED_PUBLIC_HOST;
 const SERVER_NAME = process.env.SERVER_NAME || "Европа-1";
-const BUILD_ID = "battle-server-2026-11-06-promzona-quest-hp-v418";
+const BUILD_ID = "battle-server-2026-11-07-promzona-melee-v419";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const EXPEDITION_PUBLIC_ENABLED = false;
@@ -14368,6 +14368,37 @@ function handleExpeditionAiRequest(session, room, run, command, data, channel = 
   return [];
 }
 
+function applyChapterOneMeleeDamage(session, result) {
+  const current = sessionCurrentHealthEnergy(session);
+  // Requested PvE damage is direct HP; equipment/armor modifiers are not part
+  // of the authored melee contract. Do not fabricate a PvP shooter actor.
+  const damage = Math.min(current.health, result.Damage);
+  session.health = Math.max(0, current.health - damage);
+  session.energy = current.energy;
+  result.Damage = damage;
+  result.PlayerHealth = session.health;
+  result.PlayerEnergy = session.energy;
+  result.Dead = session.health === 0;
+  if (!result.Dead) return;
+  session.dead = true;
+  session.waitingSelfSpawnMove = false;
+  session.deaths = numberOr(session.deaths, 0) + 1;
+  session.matchDeaths = numberOr(session.matchDeaths, 0) + 1;
+  resetZombieInfectionProgress(session);
+  clearSpawnMoveWarningTimer(session);
+  clearSpawnSelfRetryTimers(session);
+  clearSessionWeaponReloadTimers(session);
+  clearSessionActiveShotLedgers(session);
+  clearSessionImpactTimers(session);
+  clearPeerSpawnTimers(session);
+  clearPickupSpawnRepairTimers(session);
+  clearSpawnStallRecovery(session);
+  session.damageContributors = new Map();
+  session.pendingSpawnBroadcast = null;
+  gateKilledSessionsAfterDelivery({ killedSessions: [session] });
+  // No player frag/suicide, loot or XP is awarded for authored NPC damage.
+}
+
 async function handleExpeditionRequest(session, parsed, channel = 0) {
   const data = eventDataHash(parsed);
   if (!data) {
@@ -14425,7 +14456,7 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
     return [makeExpeditionReply(session, EXPEDITION_COMMAND.REJECTED, run?.runId || "", "run_not_authorized", false)];
   }
 
-  if ([CHAPTER_ONE_COMMAND.HELLO, CHAPTER_ONE_COMMAND.REGISTER, CHAPTER_ONE_COMMAND.HIT].includes(command)) {
+  if ([CHAPTER_ONE_COMMAND.HELLO, CHAPTER_ONE_COMMAND.REGISTER, CHAPTER_ONE_COMMAND.HIT, CHAPTER_ONE_COMMAND.MELEE].includes(command)) {
     const sequence = Number(expeditionPayloadValue(data, 3, 0));
     const rawPayload = expeditionPayloadValue(data, 7, "");
     let payload = null;
@@ -14438,6 +14469,7 @@ async function handleExpeditionRequest(session, parsed, channel = 0) {
       solo: activeExpeditionRoomMembers(room).length === 1,
       alive: Boolean(session.spawned && !session.dead),
     }, command, sequence, payload);
+    if (result.Kind === "player_damage") applyChapterOneMeleeDamage(session, result);
     return [makeExpeditionAiEvent(CHAPTER_ONE_COMMAND.STATE, run.runId, sequence, Number(session.actorId), JSON.stringify(result))];
   }
 
