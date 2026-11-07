@@ -5,6 +5,21 @@
 const { randomInt } = require("node:crypto");
 const COMMAND = Object.freeze({ HELLO: 50, REGISTER: 51, HIT: 52, MELEE: 53, STATE: 150 });
 
+// Exact type counts from the three authored encounter controllers.
+// 1..5 = chapter 1; 21..25 = chapter 2; 32..35 = chapter 3.
+const WAVES = Object.freeze({
+  1: { acid: 10 }, 2: { acid: 6, berserk: 6 },
+  3: { worker: 5, butcher: 5 }, 4: { berserk: 10, worker: 10 },
+  5: { acid: 9, berserk: 8, gas: 8 },
+  21: { berserk: 4 }, 22: { gas: 5, berserk: 5 },
+  23: { gas: 6, berserk: 6, acid: 5 }, 24: { acid: 6, berserk: 6 },
+  25: { acid: 11, berserk: 11, gas: 10 },
+  32: { acid: 5, gas: 5, berserk: 4, worker: 4 },
+  33: { worker: 4, berserk: 4 },
+  34: { worker: 4, berserk: 4, acid: 4, gas: 4 },
+  35: { worker: 9, berserk: 9, acid: 8, gas: 8, butcher: 8, sleedgehammer: 8 },
+});
+
 function handleChapterOne(run, context, command, sequence, payload, now = Date.now(), roll = (min = 5, max = 10) => randomInt(min, max + 1)) {
   const sceneId = payload?.SceneId;
   const reject = Error => ({ Protocol: 1, Error, Sequence: sequence, SceneId: sceneId });
@@ -17,18 +32,18 @@ function handleChapterOne(run, context, command, sequence, payload, now = Date.n
   if (state.sceneId !== sceneId) return reject("fresh_room_required");
   if (sequence <= (state.sequence.get(context.actorId) || 0)) return reject("stale_sequence");
   state.sequence.set(context.actorId, sequence);
-  if (command === COMMAND.HELLO) return { Protocol: 1, Kind: "ready", Sequence: sequence, SceneId: sceneId, MeleeSupported: true };
+  if (command === COMMAND.HELLO) return { Protocol: 1, Kind: "ready", Sequence: sequence, SceneId: sceneId, MeleeSupported: true, LaterQuestsSupported: true };
   if (!payload || typeof payload !== "object") return reject("invalid_payload");
   const id = payload.MobId;
   // Stable identities bound to authored waves, not caller-supplied max HP/counts.
-  const match = typeof id === "string" && /^([12]):(acid|berserk):([1-9][0-9]?)$/.exec(id);
+  const match = typeof id === "string" && /^([1-9][0-9]?):(acid|berserk|worker|butcher|gas|sleedgehammer):([1-9][0-9]?)$/.exec(id);
   if (!match) return reject("invalid_mob_id");
   const quest = Number(match[1]), kind = match[2], index = Number(match[3]);
-  if ((quest === 1 && (kind !== "acid" || index > 10)) || (quest === 2 && index > 6)) return reject("outside_authored_wave");
+  if (!WAVES[quest]?.[kind] || index > WAVES[quest][kind]) return reject("outside_authored_wave");
   let mob = state.mobs.get(id);
   if (command === COMMAND.REGISTER) {
     if (!mob) {
-      const hp = kind === "berserk" ? 125 : 100;
+      const hp = quest > 2 ? 5 : kind === "berserk" ? 125 : 100;
       mob = { MobId: id, Health: hp, MaxHealth: hp, Quest: quest };
       state.mobs.set(id, mob);
     }
@@ -41,7 +56,7 @@ function handleChapterOne(run, context, command, sequence, payload, now = Date.n
       const damage = roll();
       if (!Number.isInteger(damage) || damage < 5 || damage > 10) throw new Error("invalid_damage_roll");
       mob.Health = Math.max(0, mob.Health - damage);
-      if (mob.Health === 0) state.kills[quest]++;
+      if (mob.Health === 0) state.kills[quest] = (state.kills[quest] || 0) + 1;
     }
   } else if (command === COMMAND.MELEE) {
     if (!context.alive) return reject("player_not_alive");
@@ -54,7 +69,7 @@ function handleChapterOne(run, context, command, sequence, payload, now = Date.n
     mob.lastMeleeAt = now;
     return { Protocol: 1, Kind: "player_damage", Sequence: sequence, SceneId: sceneId, MobId: id, Damage: damage };
   } else return reject("unsupported_command");
-  return { Protocol: 1, Kind: "health", Sequence: sequence, SceneId: sceneId, ...mob, Kills: state.kills[quest] };
+  return { Protocol: 1, Kind: "health", Sequence: sequence, SceneId: sceneId, ...mob, Kills: state.kills[quest] || 0 };
 }
 
 module.exports = { COMMAND, handleChapterOne };
