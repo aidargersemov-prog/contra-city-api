@@ -26,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-11-05-promzona-bundle-v192";
+const API_BUILD_ID = "railway-api-2026-11-14-promzona-bundle-v192";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -51,7 +51,7 @@ const ASSET_BUNDLE_NAMES = new Set([
 const REMOTE_ASSET_BUNDLE_URLS = new Map([
   [
     "promzona.unity3d",
-    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/c2ee990b4010072254fbbf2c696353e5a3f5dbf9/railway-api/assetbundles/promzona.unity3d"
+    "https://media.githubusercontent.com/media/aidargersemov-prog/contra-city-api/ee3749ef6280edf2ccc7fa82171812f29a38deac/railway-api/assetbundles/promzona.unity3d"
   ]
 ]);
 const MIGRATIONS_DIR = path.join(API_DIR, "migrations");
@@ -78,6 +78,7 @@ const BATTLE_HOST = !CONFIGURED_BATTLE_HOST || CONFIGURED_BATTLE_HOST === RETIRE
   ? DEFAULT_BATTLE_HOST
   : CONFIGURED_BATTLE_HOST;
 const BATTLE_NAME = process.env.BATTLE_NAME || "Contra City";
+const BATTLE_REGION_NAME = String(process.env.BATTLE_REGION_NAME || "Франкфурт").trim() || "Франкфурт";
 const WARSAW_BATTLE_HOST = String(process.env.WARSAW_BATTLE_HOST || "").trim();
 const BATTLE_EVENT_TOKEN = process.env.BATTLE_EVENT_TOKEN || "";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || "";
@@ -8453,7 +8454,7 @@ function mapsPayload() {
     .join(",") || "5055";
   const battleServers = BATTLE_HOST
     ? [
-        { h: BATTLE_HOST, p: battlePorts, n: "Франкфурт", pL: "100", lM: "0", lMa: "5000", m: "0" },
+        { h: BATTLE_HOST, p: battlePorts, n: BATTLE_REGION_NAME, pL: "100", lM: "0", lMa: "5000", m: "0" },
         ...(WARSAW_BATTLE_HOST && WARSAW_BATTLE_HOST !== BATTLE_HOST
           ? [{ h: WARSAW_BATTLE_HOST, p: battlePorts, n: "Варшава", pL: "100", lM: "0", lMa: "5000", m: "0" }]
           : []),
