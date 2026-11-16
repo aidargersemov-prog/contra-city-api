@@ -26,7 +26,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-11-14-promzona-bundle-v192";
+const API_BUILD_ID = "railway-api-2026-11-16-rainbow-name-v196";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -1046,8 +1046,8 @@ const WEAPON_DAMAGE_BALANCE = Object.freeze({
   hg_sigsauerp226_b: { name: "Дружинник", near: 19, kind: "ranged", effect: 2 },
   hg_glock_s: { name: "Политрук", near: 10, kind: "ranged" },
   hg_glockb01_s: { name: "Спекулянт", near: 11, kind: "ranged", effect: 2 },
-  hg_desert: { name: "Сокол", near: 35, kind: "ranged" },
-  hg_desertb01: { name: "Пустынный Орел", near: 38, kind: "ranged" },
+  hg_desert: { name: "Сокол", near: 42, far: 30, kind: "ranged" },
+  hg_desertb01: { name: "Пустынный Орел", near: 48, far: 35, kind: "ranged" },
   hg_usp: { name: "Скиф", near: 13, kind: "ranged", effect: 3 },
   hg_taurus: { name: "Палач", near: 42, kind: "ranged" },
   mg_ak47: { name: "Комрад 47 / ГОСТ Комрад 47", near: 9, kind: "ranged" },
@@ -1084,9 +1084,9 @@ const WEAPON_DAMAGE_BALANCE = Object.freeze({
   gg_m134b01: { name: "Вьюга", near: 10, kind: "ranged", effect: 5 },
   sg_winchester1887: { name: "ВыньЧестер / ГОСТ ВыньЧестер", near: 8, kind: "ranged" },
   sg_db: { name: "Егерь", near: 35, kind: "ranged" },
-  sg_novapump: { name: "Сибиряк", near: 29, kind: "ranged" },
+  sg_novapump: { name: "Сибиряк", near: 49, far: 39, kind: "ranged" },
   sg_remington: { name: "Советник", near: 10, kind: "ranged", effect: 2 },
-  sg_spas: { name: "Кабан", near: 35, kind: "ranged" },
+  sg_spas: { name: "Кабан", near: 65, far: 53, kind: "ranged" },
   // Launcher critical floors are explicit table values, including 20/22 and 22/24.
   rl_rpg26: { name: "Аврора / ГОСТ Аврора", near: 35, critical: 42, kind: "launcher" },
   rl_rpg7: { name: "Мини Катюша", near: 42, critical: 50, kind: "launcher" },
@@ -1116,8 +1116,8 @@ function tableWeaponDamageStats(systemName) {
   const definition = WEAPON_DAMAGE_BALANCE[String(systemName || "").toLowerCase()];
   if (!definition) return {};
   const near = definition.near;
-  const far = definition.kind === "sniper" ? Math.round(near * 135 / 100)
-    : definition.kind === "ranged" ? Math.round(near * 65 / 100) : near;
+  const far = definition.far ?? (definition.kind === "sniper" ? Math.round(near * 135 / 100)
+    : definition.kind === "ranged" ? Math.round(near * 65 / 100) : near);
   return { smindam: near, smaxdam: near + 4, mmindam: far, mmaxdam: far + 4, lmindam: far, lmaxdam: far + 4 };
 }
 // End user damage table.
@@ -1146,7 +1146,9 @@ function weapon(id, wt, slot, sname, price, extra = {}) {
     desc: `w_${textId}_desc`,
     desca: `w_${textId}_desca`,
     ...effectiveWeaponStars(sname),
-    ...tableWeaponDamageStats(sname)
+    ...tableWeaponDamageStats(sname),
+    ...(["gl_milkor", "gl_milkor_a", "gl_ex41", "gl_snowlauncher", "gl_grenadelauncher03"].includes(String(sname).toLowerCase())
+      ? { lt: 6200, projectileLifetimeMs: 3100 } : {})
   };
 }
 
@@ -1198,11 +1200,11 @@ function enhancer(id, prices = 120) {
 }
 
 const defaultWeapons = [
-  weapon(1, 1, 1, "ohca_basebalbat", 0, { ammo: 0, ammo_tot: 0, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 }),
+  weapon(1, 1, 1, "ohca_basebalbat", 0, { rap: 782, ammo: 0, ammo_tot: 0, smindam: 18, smaxdam: 34, mmindam: 12, mmaxdam: 22, lmindam: 8, lmaxdam: 14 }),
   weapon(2, 3, 2, "hg_makarov", 0, { rap: 355,  smindam: 18, smaxdam: 28, mmindam: 13, mmaxdam: 21, lmindam: 8, lmaxdam: 15 }),
   weapon(3, 4, 3, "mg_ak47", 0, { rap: 126, smindam: 16, smaxdam: 25, mmindam: 13, mmaxdam: 21, lmindam: 9, lmaxdam: 17 }),
   weapon(4, 6, 4, "gg_m134", 0, { smindam: 13, smaxdam: 22, mmindam: 11, mmaxdam: 18, lmindam: 8, lmaxdam: 14 }),
-  weapon(5, 7, 5, "sg_winchester1887", 0, { rap: 1165 }),
+  weapon(5, 7, 5, "sg_winchester1887", 0, { rap: 865 }),
   weapon(6, 8, 6, "rl_rpg26", 0, { smindam: 78, smaxdam: 120, mmindam: 62, mmaxdam: 95, lmindam: 40, lmaxdam: 72 }),
   weapon(7, 10, 7, "sr_svd", 0, { krit: 8, smindam: 34, smaxdam: 48, mmindam: 38, mmaxdam: 54, lmindam: 42, lmaxdam: 60 })
 ];
@@ -1625,7 +1627,7 @@ const temporaryBalanceWeaponKeys = new Set([
   "gl_grenadelauncher03", "gl_milkor_a"
 ]);
 // Update firing intervals for these existing purchases without rebasing other stats.
-const correctedWeaponRapidityKeys = new Set(["sr_vintorez","hg_usp","sg_remington","hg_desert","hg_desertb01","sg_spas","sg_winchester1887","hg_taurus","hg_glockb01_s","hg_makarov","hg_tt","hg_walther_r","hg_waltherp99","hg_sigsauerp226_b","hg_glock_s","sr_sniperrifle03","sr_arctic","sr_arcticb01","sr_wildcat1","sr_wildcat2"]);
+const correctedWeaponRapidityKeys = new Set(["ohca_basebalbat","sr_vintorez","hg_usp","sg_remington","hg_desert","hg_desertb01","sg_spas","sg_winchester1887","hg_taurus","hg_glockb01_s","hg_makarov","hg_tt","hg_walther_r","hg_waltherp99","hg_sigsauerp226_b","hg_glock_s","sr_sniperrifle03","sr_arctic","sr_arcticb01","sr_wildcat1","sr_wildcat2"]);
 // GG_M134B01 reuses Вьюга's text (w_47) while displaying a Maximych-style
 // gatling model. Keep its canonical ID for already owned items, but do not
 // offer this mismatched duplicate in the shop.
@@ -2322,33 +2324,33 @@ function assemblageTextFor(id) {
 
 const restoredAssemblageDefinitions = [
   { id: 1, code: "peak_reaper", items: [["Hats", "tophat"], ["Masks", "skeleton_H"], ["Shirts", "skeleton"], ["Backpacks", "tomb"], ["Gloves", "skeleton"], ["Pants", "skeleton"], ["Boots", "skeleton"], ["Others", "coins"]] },
-  { id: 2, code: "raven", items: [["Hats", "tactichelm01"], ["Masks", "gasmask01"], ["Gloves", "tactical01"], ["Shirts", "tactic01"], ["Pants", "tactic01"], ["Boots", "tactical01"], ["Heads", "spec01"], ["Others", "voron"]] },
+  { id: 2, code: "raven", items: [["Hats", "tactichelm01"], ["Masks", "gasmask01"], ["Gloves", "tactical01"], ["Shirts", "tactic01"], ["Pants", "tactic01"], ["Boots", "tactical01"], ["Others", "voron"]] },
   { id: 3, code: "vandal", items: [["Hats", "cap02"], ["Masks", "band01"], ["Gloves", "bint02"], ["Shirts", "hood04"], ["Pants", "sport03"], ["Boots", "sneak02"], ["Backpacks", "darts"], ["Others", "maz"]] },
   { id: 4, code: "stormtrooper", items: [["Hats", "helm01"], ["Masks", "klava01"], ["Gloves", "glov01"], ["Shirts", "armor02"], ["Pants", "jeans01"], ["Boots", "boot01"], ["Backpacks", "back02"], ["Others", "stormwhiskers"]] },
   { id: 5, code: "ecoterror", items: [["Hats", "hat03"], ["Masks", "goog03"], ["Gloves", "clock01"], ["Shirts", "hood01"], ["Pants", "pant01"], ["Boots", "sneakV202"], ["Backpacks", "turt01"], ["Others", "ecograss"]] },
-  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Boots", "sneakV203"], ["Backpacks", "rocket02"], ["Others", "cola01"], ["Heads", "brown04"]] },
+  { id: 6, code: "belov", items: [["Hats", "indiana02"], ["Masks", "goog02"], ["Gloves", "bint01"], ["Shirts", "hood03"], ["Pants", "sport02"], ["Boots", "sneakV203"], ["Backpacks", "rocket02"], ["Others", "cola01"]] },
   { id: 7, code: "mummy", items: [["Hats", "pharaoh"], ["Shirts", "mummy"], ["Backpacks", "sarcophagus"], ["Gloves", "mummy"], ["Pants", "mummy"], ["Boots", "mummy"], ["Masks", "mummy_H"], ["Others", "skrab"]] },
-  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Gloves", "clock02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Heads", "brown03"], ["Others", "reconpouch"]] },
+  { id: 8, code: "recon", items: [["Hats", "tactichelm02"], ["Masks", "gasmask02"], ["Gloves", "clock02"], ["Shirts", "tactic02"], ["Pants", "tactic02"], ["Boots", "tactical02"], ["Others", "reconpouch"]] },
   { id: 9, code: "dead_moroz", items: [["Hats", "santa"], ["Masks", "santa"], ["Shirts", "santa"], ["Backpacks", "santa"], ["Gloves", "santa"], ["Pants", "santa"], ["Boots", "santa"], ["Others", "santa"]] },
   { id: 10, code: "vdv", items: [["Hats", "beret03"], ["Shirts", "trooper"], ["Masks", "aviaglass"], ["Pants", "trooper"]] },
-  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Gloves", "tactical02"], ["Shirts", "tactic04"], ["Pants", "tactic04"], ["Heads", "black01"], ["Others", "barkhanflask"]] },
+  { id: 11, code: "barkhan", items: [["Hats", "milcap03"], ["Gloves", "tactical02"], ["Shirts", "tactic04"], ["Pants", "tactic04"], ["Others", "barkhanflask"]] },
   { id: 12, code: "invader", items: [["Shirts", "tactic03"], ["Pants", "tactic03"], ["Boots", "boot02"], ["Masks", "googB02"], ["Hats", "beret01"]] },
   { id: 14, code: "olympian", items: [["Hats", "Olympic"], ["Masks", "SnowGoggles"], ["Shirts", "hoodOlimpic"], ["Backpacks", "Snowboard"], ["Gloves", "Olympic"], ["Pants", "Olympic"], ["Boots", "sneakOlimpic"], ["Others", "medal"]] },
   { id: 15, code: "vkks_gold_2014", items: [["Hats", "capVKKS01"], ["Pants", "sportVKKS01"], ["Others", "medalgold"], ["Shirts", "chood01"]] },
   { id: 16, code: "vkks_silver_2014", items: [["Hats", "capVKKS02"], ["Shirts", "chood02"], ["Pants", "sportVKKS02"], ["Others", "medalsilver"]] },
   { id: 17, code: "vkks_bronze_2014", items: [["Hats", "capVKKS03"], ["Shirts", "chood03"], ["Pants", "sportVKKS03"], ["Others", "medalbronze"]] },
   { id: 18, code: "delta", items: [["Hats", "tacticalB01"], ["Shirts", "tacticB01"], ["Pants", "tacticB01"], ["Gloves", "tacticalB01"], ["Boots", "tacticalB01"], ["Others", "smertik"]] },
-  { id: 19, code: "ray", items: [["Hats", "capB08"], ["Masks", "bandB07"], ["Gloves", "glov02"], ["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Backpacks", "arrows"], ["Heads", "spec02"], ["Others", "raybanana"]] },
+  { id: 19, code: "ray", items: [["Hats", "capB08"], ["Masks", "bandB07"], ["Shirts", "hoodB08"], ["Pants", "sportB08"], ["Boots", "sneakV2B02"], ["Backpacks", "arrows"], ["Others", "raybanana"]] },
   { id: 20, code: "badboy", items: [["Shirts", "hoodB03"], ["Pants", "sportB03"], ["Others", "badboy"], ["Boots", "sneakV2B05"], ["Masks", "maskB01"], ["Hats", "capB04"]] },
-  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Masks", "bandB03"], ["Gloves", "wristwrapB02"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Heads", "spec03"], ["Others", "acidampoule"]] },
+  { id: 21, code: "acid_warrior", items: [["Hats", "hatB08"], ["Masks", "bandB03"], ["Shirts", "hoodB10"], ["Pants", "sportB10"], ["Boots", "sneakV2B06"], ["Others", "acidampoule"]] },
   { id: 22, code: "stuzha", items: [["Hats", "santa2"], ["Masks", "santa2"], ["Shirts", "santa2"], ["Backpacks", "santa2"], ["Gloves", "santa2"], ["Pants", "santa2"], ["Boots", "santa2"], ["Others", "santa2"]] },
   { id: 23, code: "red_heat", items: [["Hats", "capB06"], ["Shirts", "shirtB09"], ["Pants", "shortB12"], ["Masks", "googB01"], ["Boots", "sneakV2B07"]] },
   { id: 24, code: "cool_breeze", items: [["Hats", "capB05"], ["Shirts", "shirtB04"], ["Pants", "shortB14"], ["Masks", "googB03"], ["Boots", "sneakV2B03"]] },
   { id: 25, code: "necrowarrior", items: [["Heads", "franky"], ["Masks", "franky"], ["Shirts", "franky"], ["Pants", "franky"], ["Boots", "franky"], ["Gloves", "franky"], ["Others", "franky"], ["Backpacks", "frankyOctopus"]] },
   { id: 26, code: "infernal", items: [["Hats", "infernal"], ["Shirts", "infernal"], ["Pants", "infernal"], ["Boots", "infernal"], ["Gloves", "infernal"], ["Masks", "infernal_H"], ["Others", "infernal"], ["Backpacks", "infernalRaven"]] },
-  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"], ["Heads", "brown02"], ["Others", "cyborgprocessor"]] },
-  { id: 28, code: "wanderer", items: [["Hats", "hatB01"], ["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"], ["Backpacks", "parr01"], ["Heads", "black04"], ["Others", "wanderercap"]] },
-  { id: 29, code: "snakecatcher", items: [["Hats", "capB07"], ["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Boots", "sneakV2B08"], ["Backpacks", "snake01"], ["Heads", "spec04"], ["Others", "snakevenom"]] },
+  { id: 27, code: "cyborg", items: [["Masks", "maskB02"], ["Shirts", "hoodB05"], ["Pants", "sportB05"], ["Boots", "sneakV2B04"], ["Others", "cyborgprocessor"]] },
+  { id: 28, code: "wanderer", items: [["Masks", "bandB05"], ["Shirts", "hoodB01"], ["Pants", "sportB01"], ["Boots", "sneakV2B10"], ["Backpacks", "parr01"], ["Others", "wanderercap"]] },
+  { id: 29, code: "snakecatcher", items: [["Hats", "capB07"], ["Masks", "bandB01"], ["Shirts", "hoodB04"], ["Pants", "sportB04"], ["Backpacks", "snake01"], ["Others", "snakevenom"]] },
   { id: 30, code: "ghost", items: [["Masks", "klavaB01"], ["Shirts", "prizrak"], ["Pants", "prizrak"], ["Gloves", "prizrak"], ["Boots", "prizrak"], ["Others", "ghostbat"]] },
   { id: 31, code: "anarchist", items: [["Hats", "capB01"], ["Shirts", "anarch"], ["Pants", "jeansB03"], ["Gloves", "wristwrapB03"], ["Boots", "anarch"], ["Others", "spinyellow"]] },
   { id: 32, code: "biker", items: [["Hats", "biker"], ["Shirts", "biker"], ["Pants", "jeansB02"], ["Gloves", "biker"], ["Boots", "sneakV201"]] },
@@ -3475,6 +3477,10 @@ function normalizeInventoryItem(item) {
       }
       // Rebase only damage fields of saved upgrades onto the new damage table.
       const damageUpgrade = upgradedWeaponItem(canonical);
+      if (["gl_milkor", "gl_milkor_a", "gl_ex41", "gl_snowlauncher", "gl_grenadelauncher03"].includes(weaponSnameKey(canonical))) {
+        upgraded.lt = canonical.lt;
+        upgraded.projectileLifetimeMs = canonical.projectileLifetimeMs;
+      }
       for (const key of ["smindam", "smaxdam", "mmindam", "mmaxdam", "lmindam", "lmaxdam"]) {
         upgraded[key] = damageUpgrade[key];
       }
@@ -4021,6 +4027,7 @@ async function loadPostgresAccount(id) {
     [Number(row.id)]
   );
   const staffRole = await loadActiveStaffRole(pgPool, Number(row.id));
+  const nicknameEffect = await pgPool.query("SELECT rainbow FROM player_nickname_effects WHERE player_id = $1", [Number(row.id)]);
 
   const account = accountFromPostgresRow(
     row,
@@ -4050,6 +4057,7 @@ async function loadPostgresAccount(id) {
     }))
   );
   account.staffRole = staffRole;
+  account.rainbowName = nicknameEffect.rows[0]?.rainbow === true;
   account.clan = clanSummaryForPlayer(account.id);
   return normalizeAccount(account);
 }
@@ -8331,7 +8339,7 @@ async function claimPendingInventoryDeliveries(playerId) {
 
 function profilePayload(account, full = false) {
   const publicName = account.namePending ? "" : account.name;
-  const staff = staffProfilePayload(account.staffRole, publicName);
+  const staff = staffProfilePayload(account.staffRole, publicName, account.rainbowName === true);
   const payload = {
     result: true,
     info: {
