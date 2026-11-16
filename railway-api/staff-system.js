@@ -52,14 +52,16 @@ function positivePlayerId(value) {
   return Number.isInteger(id) && id > 0 ? id : 0;
 }
 
-export function staffProfilePayload(roleValue, displayName = "") {
+export function staffProfilePayload(roleValue, displayName = "", rainbowName = false) {
   const role = normalizeStaffRole(roleValue);
   const rank = staffRoleRank(role);
   const meta = STAFF_ROLE_META[role];
   const plainName = safeRichText(displayName, 80);
+  const decoratedName = rainbowName && role !== "developer" && plainName
+    ? `<color=#8E45FF>${plainName}</color>` : plainName;
   const battleName = role === "none" || !plainName
-    ? plainName
-    : `<color=${meta.color}>${meta.prefix}</color> <color=${meta.color}>${plainName}</color>`;
+    ? decoratedName
+    : `<color=${meta.color}>${meta.prefix}</color> ${rainbowName ? decoratedName : `<color=${meta.color}>${plainName}</color>`}`;
   return {
     role,
     rank,
@@ -214,6 +216,29 @@ export async function staffAjaxPayload(db, account, act, searchParams) {
 
   if (normalizedAct === "me") {
     return { result: true, ok: true, staff: profile };
+  }
+
+  if (normalizedAct === "rainbow_name_get" || normalizedAct === "rainbow_name_save") {
+    if (role !== "developer") return staffFailure("developer_role_required");
+    const targetId = positivePlayerId(searchParams.get("targetId"));
+    if (!targetId || targetId > 2147483647) return staffFailure("invalid_player_id", 400);
+    const target = await db.query("SELECT id, name FROM players WHERE id = $1", [targetId]);
+    if (!target.rows[0]) return staffFailure("player_not_found", 404);
+    if (normalizedAct === "rainbow_name_save") {
+      const enabled = searchParams.get("enabled");
+      if (enabled !== "0" && enabled !== "1") return staffFailure("invalid_enabled", 400);
+      await db.query(`INSERT INTO player_nickname_effects (player_id, rainbow, granted_by_player_id, updated_at)
+        VALUES ($1, $2, $3, now()) ON CONFLICT (player_id) DO UPDATE SET
+        rainbow = EXCLUDED.rainbow, granted_by_player_id = EXCLUDED.granted_by_player_id, updated_at = now()`,
+        [targetId, enabled === "1", Number(account.id)]);
+      await writeAuditEvent(db, { playerId: targetId, playerName: target.rows[0].name,
+        eventType: "rainbow_nickname_change", category: "moderation", severity: "info",
+        description: `Rainbow nickname ${enabled === "1" ? "enabled" : "disabled"} by ${account.name}`,
+        source: "staff_panel", metadata: { actorPlayerId: Number(account.id), enabled: enabled === "1" } });
+    }
+    const effect = await db.query("SELECT rainbow FROM player_nickname_effects WHERE player_id = $1", [targetId]);
+    return { result: true, ok: true, targetId, targetName: target.rows[0].name,
+      enabled: effect.rows[0]?.rainbow === true };
   }
 
   if (normalizedAct === "developer_effects_get" || normalizedAct === "developer_effects_save") {
