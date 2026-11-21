@@ -10,6 +10,7 @@ import { touchPlayerActivity, writeAuditEvent } from "./admin-logs/audit-store.j
 import { CLAN_ENHANCER_PRICES, PLAYER_ENHANCER_PRICES, TAUNT_PRICES } from "./shop-prices.js";
 import { createClanWars, WAR_MAPS } from "./clan-wars.js";
 import { buildQuestSet, questPresentation, advanceQuest } from "./clan-contract-quests.js";
+import { questRotation } from "./pve-quest-rotation.js";
 import {
   executeBattleStaffAction,
   legacyPermissionPayload,
@@ -26,7 +27,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-11-16-rainbow-name-v196";
+const API_BUILD_ID = "railway-api-2026-11-18-pve-quest-rotation-v197";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -45,7 +46,8 @@ const ASSET_BUNDLE_NAMES = new Set([
   "legoturnament.unity3d",
   "inferno.unity3d",
   "shipconteyner.unity3d",
-  "promzona.unity3d"
+  "promzona.unity3d",
+  "promzona_regular.unity3d"
   //"dashguard.unity3d"
 ]);
 const REMOTE_ASSET_BUNDLE_URLS = new Map([
@@ -13611,6 +13613,11 @@ async function routeAjax(url, resolvedAccount = null, requestOrigin = null) {
 
   if (page === "staff") return staffAjaxPayload(pgPool, account, act, url.searchParams);
   if (page === "clan_wars") return clanWars.ajax(Number(account.id), act || "state", url.searchParams);
+  if (page === "pve_quests") {
+    if (act !== "state") return { result: false, error: "unknown_pve_quest_action" };
+    const clan = playerClanRecord(account.id);
+    return ok({ quests: questRotation(account.id, clan?.id || 0) });
+  }
 
   if (page === "auth" && act === "g") {
     return ok({ user_id: String(account.id), key: account.key });
@@ -15519,6 +15526,22 @@ async function handleHttpRequest(req, res) {
     return;
   }
 
+  if(url.pathname==="/battle/regular-profile"){
+    if(req.method!=="POST")return sendJson(res,{ok:false},405);
+    if(!hasValidBattleServiceToken(req,null))return sendJson(res,{ok:false},403);
+    try{
+      const body=await readJsonBody(req,32*1024);
+      const {regularProfile}=await import("./regular-pve-profile.js");
+      const profile=await regularProfile(pgPool,body);
+      if(body.action?.type==="buy_row" && !profile.error && store.accounts[String(body.playerId)])
+        store.accounts[String(body.playerId)].money=profile.money;
+      return sendJson(res,{ok:true,profile});
+    }catch(error){
+      console.error("[regular-pve] profile transaction failed",error.message);
+      const status=error.message==="Stale profile revision" || error.status===409 ? 409 : error.status===422 ? 422 : 503;
+      return sendJson(res,{ok:false},status);
+    }
+  }
   if (url.pathname === "/battle/clan-wars") {
     if (req.method !== "POST") {
       sendJson(res, { ok: false, error: "method_not_allowed" }, 405);
