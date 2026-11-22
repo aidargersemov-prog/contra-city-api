@@ -1,4 +1,4 @@
-import {loadoutAction,distributeExtraction} from "./regular-pve-loadout.js";
+import {loadoutAction,distributeExtraction,survivalOffers,outfitOffers,outfitBonuses} from "./regular-pve-loadout.js";
 export async function regularProfile(pool,{playerId,profile,operation,action,extraction}){
   if(!pool)throw new Error("PostgreSQL unavailable");
   if(!/^[1-9][0-9]{0,16}$/.test(String(playerId)))throw new Error("Invalid player");
@@ -6,12 +6,15 @@ export async function regularProfile(pool,{playerId,profile,operation,action,ext
   try{
     await client.query("BEGIN");
     await client.query("INSERT INTO regular_pve_profiles(player_id) VALUES($1) ON CONFLICT DO NOTHING",[playerId]);
-    const get=()=>client.query("SELECT level,xp,revision,storage_rows_2,storage_rows_3,yield_rank AS yield,speed_rank AS speed,loss_rank AS loss,extra_rank AS extra FROM regular_pve_profiles WHERE player_id=$1 FOR UPDATE",[playerId]);
+    const get=()=>client.query("SELECT level,xp,revision,vitality_rank,hardened_rank,second_wind_rank,adrenaline_rank,vampirism_rank,berserk_rank,ninja_rank,collector_rank,economist_rank,marksman_rank,double_strike_rank,active_perk_preset,perk_presets,equipped_outfit,storage_rows_2,storage_rows_3,yield_rank AS yield,speed_rank AS speed,loss_rank AS loss,extra_rank AS extra FROM regular_pve_profiles WHERE player_id=$1 FOR UPDATE",[playerId]);
     let row=(await get()).rows[0];
     let extra={};
     if(action){extra=await loadoutAction(client,playerId,row,action);
+      const outfitChanged=!extra.error && ["equip_outfit","unequip_outfit"].includes(action.type);
       if(extra.error)Object.assign(extra,await loadoutAction(client,playerId,row,{type:"read"}));
-      row=(await get()).rows[0];}
+      row=(await get()).rows[0];
+      if(outfitChanged)extra=await loadoutAction(client,playerId,row,{type:"read"});
+    }
     if(profile){
       if(typeof operation!=="string" || operation.length>150 || !operation.length)throw new Error("Invalid operation");
       const inserted=await client.query("INSERT INTO regular_pve_operations VALUES($1,$2) ON CONFLICT DO NOTHING",[playerId,operation]);
@@ -19,7 +22,7 @@ export async function regularProfile(pool,{playerId,profile,operation,action,ext
         if(profile.revision!==row.revision)throw new Error("Stale profile revision");
         await client.query("UPDATE regular_pve_profiles SET level=$2,xp=$3,yield_rank=$4,speed_rank=$5,loss_rank=$6,extra_rank=$7,revision=revision+1 WHERE player_id=$1",[playerId,profile.level,profile.xp,profile.yield,profile.speed,profile.loss,profile.extra]);
         const quantities=[];
-        const warehouse=extraction?await distributeExtraction(client,playerId,row,profile.extractedStock,extraction.stacks):profile.extractedStock||{};
+        const warehouse=extraction?await distributeExtraction(client,playerId,row,profile.extractedStock,extraction.stacks,extraction.outfit):profile.extractedStock||{};
         const groups={...profile.contributions,warehouse};
         for(const [purpose,materials] of Object.entries(groups)){
           for(const [key,count] of Object.entries(materials)){
@@ -34,7 +37,7 @@ export async function regularProfile(pool,{playerId,profile,operation,action,ext
         row=(await get()).rows[0];
       }
     }
-    const result={...row,xp:Number(row.xp),extractedStock:{},contributions:{}};
+    const result={...row,xp:Number(row.xp),outfitBonuses:outfitBonuses(row.equipped_outfit),extractedStock:{},contributions:{}};
     const items=await client.query("SELECT purpose,material,quantity FROM regular_pve_materials WHERE player_id=$1",[playerId]);
     for(const item of items.rows){
       const dest=item.purpose==="warehouse"?result.extractedStock:(result.contributions[item.purpose]||={});
@@ -43,7 +46,9 @@ export async function regularProfile(pool,{playerId,profile,operation,action,ext
     if(action && action.type!=="depart"){
       const stats=(await client.query("SELECT count(*)::int AS total,count(*) FILTER(WHERE finished_at >= (date_trunc('day',now() AT TIME ZONE 'Europe/Moscow') AT TIME ZONE 'Europe/Moscow'))::int AS today FROM regular_pve_raid_history WHERE player_id=$1",[playerId])).rows[0];
       const wallet=(await client.query("SELECT money FROM players WHERE id=$1",[playerId])).rows[0];
-      Object.assign(extra,stats,{money:Number(wallet?.money||0),rows:{2:row.storage_rows_2,3:row.storage_rows_3}});
+      const perks=survivalOffers(row,result.extractedStock);
+      Object.assign(extra,stats,{money:Number(wallet?.money||0),rows:{2:row.storage_rows_2,3:row.storage_rows_3},
+        vitality:perks.vitality,perks,outfits:await outfitOffers(client,playerId,row,result.extractedStock)});
     }
     await client.query("COMMIT");return {...result,...extra};
   }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
