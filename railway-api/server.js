@@ -27,7 +27,7 @@ import {
 } from "./case-loot.js";
 
 const PORT = Number(process.env.PORT || 3000);
-const API_BUILD_ID = "railway-api-2026-11-25-promzona-regular-bundle-v199";
+const API_BUILD_ID = "railway-api-2026-11-25-shop-set-order-v200";
 const WORKSHOP_ENABLED = false;
 const ENHANCERS_ENABLED = false;
 const CREATE_CODE = process.env.CREATE_CODE || "";
@@ -650,17 +650,17 @@ function timedCost(id, configuredPrices = 100) {
 const weaponTitleById = {
   1: "Бита",
   2: "Партизан",
-  3: "Комрад-47",
+  3: "Комрад",
   4: "Стаханов",
   5: "ВыньЧестер",
   6: "Аврора",
   7: "Компостер",
   10: "ГОСТ Бита",
   11: "ГОСТ Партизан",
-  12: "ГОСТ Комрад-47",
+  12: "ГОСТ Комрад",
   13: "ГОСТ Стаханов",
-  14: "ГОСТ ВыньЧестер ",
-  15: "ГОСТ Аврора ",
+  14: "ГОСТ ВыньЧестер",
+  15: "ГОСТ Аврора",
   16: "ГОСТ Компостер",
   17: "Лом",
   18: "Комиссар",
@@ -753,7 +753,7 @@ const GADYUKA_PARITY_FIELDS = Object.keys(GADYUKA_GRENADE_STATS).filter((key) =>
 // Keep IDs stable so existing purchases, loadouts and workshop upgrades survive.
 const weaponIdentityBySname = new Map([
   ["SG_DB", "Егерь"],
-  ["SG_Winchester1887", "ВьньЧестер"],
+  ["SG_Winchester1887", "ВыньЧестер"],
   ["SG_Novapump", "Сибиряк"],
   ["OHCA_Torch_F", "Светочь"],
   ["OHCA_Icicle_W", "Ледовик"],
@@ -777,20 +777,20 @@ const weaponIdentityBySname = new Map([
   ["MG_AssaultRifle03", "Барс"],
   ["MG_UMP45D2_O", "Ликвидатор"],
   ["MG_AUG3_O", "Буран"],
-  ["MG_AK47", "Гост Комрад"],
+  ["MG_AK47", "Комрад"],
   ["HG_Walther_R", "Начальник"],
   ["HG_TT", "Комиссар"],
   ["HG_WaltherP99", "СверхДембель"],
-  ["HG_Makarov", "Гост Партизан"],
+  ["HG_Makarov", "Партизан"],
   ["HG_Glock_S", "Политрук"],
   ["HG_SIGSauerP226_B", "Дружинник"],
   ["SR_SteyrB01", "Сторож"],
-  ["SR_SVD", "Гост Компостер"],
+  ["SR_SVD", "Компостер"],
   ["SR_HK417_D", "Дальнобойщик"],
   ["SR_M110_B", "Клык"],
   ["GG_M134B02", "Максимыч"],
   ["GG_N2", "Берия"],
-  ["GG_M134", "Гост Стаханов"],
+  ["GG_M134", "Стаханов"],
   ["GG_M249", "Дон"],
   ["SNG_Snowgun", "Вьюга"],
 ].map(([sname, name]) => [sname.toLowerCase(), Object.freeze({ sname, name })]));
@@ -798,10 +798,6 @@ const weaponIdentityBySname = new Map([
 // Purchase IDs are stable; localization IDs refer to the original model's
 // w_<id>_* records in the client TextAsset, and can be different.
 const weaponTextIdBySname = new Map([
-  ["HG_Makarov", 11],
-  ["MG_AK47", 12],
-  ["GG_M134", 13],
-  ["SR_SVD", 16],
   ["GG_M134B02", 66],
   ["GG_M249", 37],
   ["GG_N2", 20],
@@ -2447,8 +2443,19 @@ const shopWears = legacyShopWears.filter((item) => {
   const slot = wearSlotNamesById.get(Number(item.wt)) || "";
   return !hiddenShopWearKeys.has(`${slot}:${item.sname}`);
 });
+// Unlisted sets and standalone clothes keep their relative order above the ranked sets.
+const shopSetOrder = [
+  "stormtrooper", "ecoterror", "vandal",
+  "belov", "mummy", "ray",
+  "raven", "recon", "barkhan",
+  "acid_warrior", "wanderer", "cyborg",
+  "snakecatcher", "scrapper", "badboy",
+  "ghost", "delta", "stalker",
+  "avenger"
+];
 const shopAssemblages = restoredAssemblageDefinitions
   .filter((definition) => !removedAssemblageIds.has(definition.id))
+  .sort((a, b) => shopSetOrder.indexOf(a.code) - shopSetOrder.indexOf(b.code))
   .map((definition) => {
   const text = assemblageTextFor(definition.id);
   return {
@@ -2459,6 +2466,19 @@ const shopAssemblages = restoredAssemblageDefinitions
     items: JSON.stringify(definition.items.map(([slot, sname]) => assemblageWear(slot, sname)))
   };
   });
+
+const shopWearRank = new Map();
+for (const definition of restoredAssemblageDefinitions) {
+  const rank = shopSetOrder.indexOf(definition.code);
+  if (rank < 0) continue;
+  for (const [slot, sname] of definition.items) {
+    const item = findWearCatalogItem(slot, sname);
+    shopWearRank.set(item.id, rank);
+  }
+}
+const shopWearDisplayOrder = [...shopWears].sort((a, b) =>
+  (shopWearRank.get(a.id) ?? -1) - (shopWearRank.get(b.id) ?? -1)
+);
 
 // Hidden from the live shop: 2 "Лимонадный глоток", 6 "Пальцестрел",
 // 9 "Самолеты", 10 "Секир-башка", 11 "Подозрительность".
@@ -8434,7 +8454,7 @@ function shopPayload() {
       items: clone(shopWeapons)
     },
     wear: {
-      items: clone(shopWears)
+      items: clone(shopWearDisplayOrder)
     },
     taunt: {
       items: clone(shopTaunts)
